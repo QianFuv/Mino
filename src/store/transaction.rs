@@ -317,6 +317,16 @@ impl PlanStore {
             &request.command,
             &request.changed_fields,
         )? {
+            let proposed_bytes = canonical_json_bytes(plan)?;
+            if sha256_digest(&proposed_bytes) != receipt.state_hash {
+                return Err(StoreError::new(
+                    StoreErrorKind::RequestConflict,
+                    format!(
+                        "Request {} was reused with different initial plan bytes",
+                        request.request_id
+                    ),
+                ));
+            }
             return Ok(receipt);
         }
         if self.paths.current_plan(&plan_id).exists() {
@@ -413,6 +423,45 @@ impl PlanStore {
         let _lock = PlanLock::acquire(&self.paths.lock_file(plan_id), self.lock_options)?;
         self.recover_locked(plan_id)?;
         self.read_current_plan(plan_id)
+    }
+
+    /// Loads and verifies one immutable historical plan snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan or revision is missing, storage is locked
+    /// or corrupt, or snapshot bytes are not canonical for the requested identity.
+    pub fn load_snapshot(&self, plan_id: &PlanId, revision: u64) -> Result<Plan, StoreError> {
+        self.require_plan_directory(plan_id)?;
+        let _lock = PlanLock::acquire(&self.paths.lock_file(plan_id), self.lock_options)?;
+        self.recover_locked(plan_id)?;
+        let path = self.paths.snapshot(plan_id, revision);
+        let bytes = fs::read(&path).map_err(|error| {
+            StoreError::new(
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    StoreErrorKind::PlanNotFound
+                } else {
+                    StoreErrorKind::Io
+                },
+                format!(
+                    "Failed to read plan {plan_id} revision {revision} at {}: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+        let plan: Plan = serde_json::from_slice(&bytes)?;
+        if plan.id() != plan_id
+            || plan.revision() != revision
+            || canonical_json_bytes(&plan)? != bytes
+        {
+            return Err(StoreError::new(
+                StoreErrorKind::CorruptState,
+                format!(
+                    "Snapshot {revision} for plan {plan_id} is not canonical or has the wrong identity"
+                ),
+            ));
+        }
+        Ok(plan)
     }
 
     /// Loads the verified append-only event sequence after recovery.

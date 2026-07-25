@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CheckId, CheckStatus, CommitStatus, CriterionId, CriterionStatus, DomainError, DomainErrorKind,
-    EvidenceId, TaskId, TaskStatus,
+    DraftTaskInput, EvidenceId, TaskId, TaskStatus,
 };
 
 /// The planned change kind for a file-map entry.
@@ -34,6 +34,48 @@ pub struct FileMapEntry {
     pub(crate) change: FileChange,
     pub(crate) reason: String,
     pub(crate) task_id: TaskId,
+}
+
+impl FileMapEntry {
+    /// Creates one task-owned file responsibility.
+    #[must_use]
+    pub fn new(
+        path: impl Into<String>,
+        change: FileChange,
+        reason: impl Into<String>,
+        task_id: TaskId,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            change,
+            reason: reason.into(),
+            task_id,
+        }
+    }
+
+    /// Returns the project-relative path or narrow glob.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns the planned change kind.
+    #[must_use]
+    pub const fn change(&self) -> FileChange {
+        self.change
+    }
+
+    /// Returns the task responsibility for this path.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    /// Returns the task that owns this file responsibility.
+    #[must_use]
+    pub const fn task_id(&self) -> &TaskId {
+        &self.task_id
+    }
 }
 
 /// An observable condition that must be proven before task completion.
@@ -68,6 +110,12 @@ impl AcceptanceCriterion {
     #[must_use]
     pub const fn status(&self) -> CriterionStatus {
         self.status
+    }
+
+    /// Returns the observable acceptance description.
+    #[must_use]
+    pub fn description(&self) -> &str {
+        &self.description
     }
 
     /// Returns evidence currently bound to the criterion.
@@ -148,6 +196,24 @@ impl VerificationCheck {
         self.required
     }
 
+    /// Returns the exact executable and argument vector.
+    #[must_use]
+    pub fn command(&self) -> &[String] {
+        &self.command
+    }
+
+    /// Returns the project-relative working directory.
+    #[must_use]
+    pub fn cwd(&self) -> &str {
+        &self.cwd
+    }
+
+    /// Returns the expected process exit code.
+    #[must_use]
+    pub const fn expected_exit_code(&self) -> i32 {
+        self.expected_exit_code
+    }
+
     /// Returns evidence currently bound to the check.
     #[must_use]
     pub fn evidence_refs(&self) -> &[EvidenceId] {
@@ -204,6 +270,30 @@ impl CommitGate {
             committed_files: Vec::new(),
             evidence_refs: Vec::new(),
         }
+    }
+
+    /// Returns whether the task requires a Git commit.
+    #[must_use]
+    pub const fn is_required(&self) -> bool {
+        self.required
+    }
+
+    /// Returns the current commit-gate status.
+    #[must_use]
+    pub const fn status(&self) -> CommitStatus {
+        self.status
+    }
+
+    /// Returns the exact planned Conventional Commit message.
+    #[must_use]
+    pub fn planned_message(&self) -> &str {
+        &self.planned_message
+    }
+
+    /// Returns paths or globs allowed in the task commit.
+    #[must_use]
+    pub fn scope(&self) -> &[String] {
+        &self.scope
     }
 }
 
@@ -295,6 +385,64 @@ impl Task {
         }
     }
 
+    /// Builds a Draft task from strict authored input and deterministic identifiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when a supplied task or criterion identifier
+    /// differs from the deterministic next identifier, or authored content is invalid.
+    pub fn from_draft(expected_id: &TaskId, input: DraftTaskInput) -> Result<Self, DomainError> {
+        if input.id.as_ref().is_some_and(|id| id != expected_id) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Expected task ID {expected_id}"),
+            ));
+        }
+        let mut task = Self::new(expected_id.clone(), input.title, input.depends_on);
+        for step in input.steps {
+            task.add_step(step)?;
+        }
+        for file in input.files {
+            task.add_file_map_entry(FileMapEntry::new(
+                file.path,
+                file.change,
+                file.reason,
+                expected_id.clone(),
+            ))?;
+        }
+        for (index, criterion) in input.acceptance_criteria.into_iter().enumerate() {
+            let number = index.checked_add(1).ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Acceptance criterion count overflowed",
+                )
+            })?;
+            let expected = CriterionId::parse(format!("{expected_id}-A{number}"))?;
+            if criterion.id.as_ref().is_some_and(|id| id != &expected) {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Expected criterion ID {expected}"),
+                ));
+            }
+            task.add_acceptance_criterion(AcceptanceCriterion::new(
+                expected,
+                criterion.description,
+            ))?;
+        }
+        for verification in input.verification {
+            task.add_verification_check(verification.into_check())?;
+        }
+        if let Some(commit_gate) = input.commit_gate {
+            task.set_commit_gate(CommitGate::new(
+                commit_gate.required,
+                commit_gate.planned_message,
+                commit_gate.scope,
+            ))?;
+        }
+        task.validate_invariants()?;
+        Ok(task)
+    }
+
     /// Returns the stable task identifier.
     #[must_use]
     pub const fn id(&self) -> &TaskId {
@@ -319,6 +467,18 @@ impl Task {
         &self.depends_on
     }
 
+    /// Returns ordered authored implementation steps.
+    #[must_use]
+    pub fn steps(&self) -> &[String] {
+        &self.steps
+    }
+
+    /// Returns file responsibilities owned by the task.
+    #[must_use]
+    pub fn file_map(&self) -> &[FileMapEntry] {
+        &self.file_map
+    }
+
     /// Returns the acceptance criteria.
     #[must_use]
     pub fn acceptance_criteria(&self) -> &[AcceptanceCriterion] {
@@ -329,6 +489,68 @@ impl Task {
     #[must_use]
     pub fn verification_checks(&self) -> &[VerificationCheck] {
         &self.verification_checks
+    }
+
+    /// Returns the optional task-level Git commit gate.
+    #[must_use]
+    pub const fn commit_gate(&self) -> Option<&CommitGate> {
+        self.commit_gate.as_ref()
+    }
+
+    /// Adds one non-empty implementation step while the task is Draft.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task is not Draft or the step is empty.
+    pub fn add_step(&mut self, step: impl Into<String>) -> Result<(), DomainError> {
+        if self.status != TaskStatus::Draft {
+            return Err(self.invalid_transition("add an implementation step"));
+        }
+        let step = step.into();
+        if step.trim().is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Task {} cannot contain an empty step", self.id),
+            ));
+        }
+        self.steps.push(step);
+        Ok(())
+    }
+
+    /// Adds one file responsibility while the task is Draft.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task is not Draft, the entry is incomplete,
+    /// belongs to another task, or duplicates an existing path.
+    pub fn add_file_map_entry(&mut self, entry: FileMapEntry) -> Result<(), DomainError> {
+        if self.status != TaskStatus::Draft {
+            return Err(self.invalid_transition("add a file responsibility"));
+        }
+        if entry.task_id != self.id
+            || entry.path.trim().is_empty()
+            || entry.reason.trim().is_empty()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!(
+                    "Task {} received an incomplete or foreign file entry",
+                    self.id
+                ),
+            ));
+        }
+        if self
+            .file_map
+            .iter()
+            .any(|current| current.path == entry.path)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Task {} already owns file path {}", self.id, entry.path),
+            ));
+        }
+        self.file_map.push(entry);
+        Ok(())
     }
 
     /// Adds a unique acceptance criterion while the task is Draft.
@@ -342,6 +564,12 @@ impl Task {
     ) -> Result<(), DomainError> {
         if self.status != TaskStatus::Draft {
             return Err(self.invalid_transition("add an acceptance criterion"));
+        }
+        if criterion.description.trim().is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Task {} cannot contain an empty criterion", self.id),
+            ));
         }
         if self
             .acceptance_criteria
@@ -365,6 +593,15 @@ impl Task {
     pub fn add_verification_check(&mut self, check: VerificationCheck) -> Result<(), DomainError> {
         if self.status != TaskStatus::Draft {
             return Err(self.invalid_transition("add a verification check"));
+        }
+        if check.command.is_empty()
+            || check.command.iter().any(|part| part.trim().is_empty())
+            || check.cwd.trim().is_empty()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Task {} contains an incomplete verification check", self.id),
+            ));
         }
         if self
             .verification_checks
@@ -535,6 +772,35 @@ impl Task {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
                 format!("Task {} depends on itself", self.id),
+            ));
+        }
+        if self.depends_on.iter().collect::<BTreeSet<_>>().len() != self.depends_on.len() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Task {} contains duplicate dependencies", self.id),
+            ));
+        }
+        if self.steps.iter().any(|step| step.trim().is_empty()) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Task {} contains an empty step", self.id),
+            ));
+        }
+        let file_paths = self
+            .file_map
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<BTreeSet<_>>();
+        if file_paths.len() != self.file_map.len()
+            || self.file_map.iter().any(|entry| {
+                entry.task_id != self.id
+                    || entry.path.trim().is_empty()
+                    || entry.reason.trim().is_empty()
+            })
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Task {} contains an invalid file map", self.id),
             ));
         }
 

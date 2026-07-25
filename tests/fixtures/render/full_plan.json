@@ -21,6 +21,7 @@
     "markdown_path": "docs/plan/2026-07-25-render-contract.md"
   },
   "original_request": "Render every plan field | deterministically.\nNever overwrite a manual edit.",
+  "summary": "Render the complete protocol as a stable managed projection.",
   "context": [
     {
       "reference": "AGENTS.md",

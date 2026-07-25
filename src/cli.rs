@@ -8,6 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::commands::plan::{self, PlanAction};
 use crate::commands::project::{self, ProjectAction};
 use crate::commands::standards::{self, StandardsAction};
 use crate::{ErrorCategory, MinoError, MinoResult, OutputFormat};
@@ -31,6 +32,8 @@ struct Cli {
 enum Command {
     /// Discover, initialize, inspect, and diagnose project-local Mino state.
     Project(ProjectArguments),
+    /// Create and author revision-checked implementation plans.
+    Plan(PlanArguments),
     /// Detect, recommend, resolve, and explicitly synchronize project standards.
     Standards(StandardsArguments),
 }
@@ -39,6 +42,12 @@ enum Command {
 struct ProjectArguments {
     #[command(subcommand)]
     action: ProjectAction,
+}
+
+#[derive(Debug, Args)]
+struct PlanArguments {
+    #[command(subcommand)]
+    action: PlanAction,
 }
 
 #[derive(Debug, Args)]
@@ -62,7 +71,7 @@ pub fn main_entry() -> ExitCode {
 }
 
 fn execute(cli: Cli) -> Result<MinoResult<Value>, MinoError> {
-    let _ = cli.no_input;
+    let no_input = cli.no_input;
     let start = match cli.root {
         Some(root) => root,
         None => std::env::current_dir().map_err(|error| {
@@ -74,6 +83,8 @@ fn execute(cli: Cli) -> Result<MinoResult<Value>, MinoError> {
     };
     match cli.command {
         Some(Command::Project(arguments)) => project::execute(&start, arguments.action)
+            .map(crate::commands::CommandResponse::into_result),
+        Some(Command::Plan(arguments)) => plan::execute(&start, arguments.action, no_input)
             .map(crate::commands::CommandResponse::into_result),
         Some(Command::Standards(arguments)) => standards::execute(&start, arguments.action)
             .map(crate::commands::CommandResponse::into_result),

@@ -1,5 +1,6 @@
 //! Internal CLI command adapters over public application services.
 
+pub(crate) mod plan;
 pub(crate) mod project;
 pub(crate) mod standards;
 

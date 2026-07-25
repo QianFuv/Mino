@@ -2,8 +2,8 @@
 managed_by: mino
 plan_id: 2026-07-25-render-contract
 revision: 8
-state_hash: sha256:8806076b8a04ee5896492a3cb6d7d6554d1543f4b31e4e23543e48476ad659af
-renderer_version: 1
+state_hash: sha256:43f65dc3a0396aa3a40ab7df1d290c5d196b2d3d2b1284d6a71edfa3b3672458
+renderer_version: 2
 manual_editing: prohibited
 ---
 
@@ -38,6 +38,10 @@ manual_editing: prohibited
 ## Original Request
 
 Render every plan field | deterministically.<br>Never overwrite a manual edit.
+
+## Summary
+
+Render the complete protocol as a stable managed projection.
 
 ## Context
 

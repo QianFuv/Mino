@@ -8,7 +8,7 @@ use crate::store::{canonical_json_bytes, sha256_digest};
 use super::{RenderError, RenderErrorKind};
 
 /// Current deterministic Markdown renderer version.
-pub const RENDERER_VERSION: u32 = 1;
+pub const RENDERER_VERSION: u32 = 2;
 
 /// Byte-stable Markdown and the digests that bind it to source state.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -68,6 +68,7 @@ fn render_document(plan: &Value, state_hash: &str) -> String {
     render_front_matter(&mut output, plan, state_hash);
     render_heading_and_overview(&mut output, plan);
     render_original_request(&mut output, plan);
+    render_summary(&mut output, plan);
     render_context(&mut output, plan);
     render_scope(&mut output, plan);
     render_decisions(&mut output, plan);
@@ -160,6 +161,11 @@ fn render_heading_and_overview(output: &mut String, plan: &Value) {
 fn render_original_request(output: &mut String, plan: &Value) {
     output.push_str("\n## Original Request\n\n");
     write_paragraph(output, text(&plan["original_request"]));
+}
+
+fn render_summary(output: &mut String, plan: &Value) {
+    output.push_str("\n## Summary\n\n");
+    write_paragraph(output, text(&plan["summary"]));
 }
 
 fn render_context(output: &mut String, plan: &Value) {

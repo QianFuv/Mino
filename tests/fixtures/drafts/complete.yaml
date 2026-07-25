@@ -1,0 +1,70 @@
+metadata:
+  priority: P1
+  plan_type: backend
+  area: plan
+  owner: codex
+summary: Add deterministic draft authoring through one source-of-truth aggregate.
+context:
+  - reference: AGENTS.md
+    fact: Every mutation requires optimistic concurrency and idempotency.
+    implication: Authoring commands carry revision and request identifiers.
+scope:
+  goal: Create an executable authored plan draft.
+  deliverables:
+    - Canonical granular commands
+    - Strict YAML batch input
+  in_scope:
+    - Draft authored fields
+  out_of_scope:
+    - Task execution state
+decisions:
+  - item: Batch input
+    type: Decision
+    decision: Deserialize strictly before mutation
+    reason: Execution-only fields must not enter Draft apply
+    status: Accepted
+approach: Route every input mode through typed domain authoring operations.
+interfaces: CLI and YAML inputs flow through PlanService into PlanStore and the renderer.
+edge_cases:
+  - case: YAML contains an execution-only status field
+    expected_behavior: Reject the entire document without a revision change
+    covered_by:
+      - T1-A1
+      - TASK-TEST
+tasks:
+  - id: T1
+    title: Implement authoring
+    depends_on: []
+    steps:
+      - Define strict inputs
+      - Persist one semantic revision
+    files:
+      - path: src/application/plan.rs
+        change: Modify
+        reason: Coordinate domain, store, and projection
+    acceptance_criteria:
+      - id: T1-A1
+        description: Equivalent authored inputs produce equivalent authored bytes
+    verification:
+      - id: TASK-TEST
+        command:
+          - cargo
+          - test
+          - --test
+          - plan_authoring
+        cwd: .
+        expected_exit_code: 0
+        required: true
+    commit_gate:
+      required: true
+      planned_message: "feat(plan): add draft authoring commands"
+      scope:
+        - src/application/plan.rs
+verification_plan:
+  - id: GLOBAL-SMOKE
+    command:
+      - cargo
+      - test
+    cwd: .
+    expected_exit_code: 0
+    required: true

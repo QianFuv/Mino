@@ -139,6 +139,7 @@ fn approved_two_task_plan() -> (Plan, TaskId, TaskId) {
 }
 
 fn populate_authored_fixture(serialized: &mut Value) {
+    serialized["summary"] = Value::from("Define a strict typed protocol foundation");
     serialized["metadata"] = json!({
         "name": "Protocol domain",
         "priority": "P1",

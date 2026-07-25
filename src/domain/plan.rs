@@ -6,9 +6,12 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CheckId, CheckStatus, CriterionId, DomainError, DomainErrorKind, EvidenceId, FileMapEntry,
-    GitFlowConsent, PlanId, PlanStatus, ProtocolVersion, ReviewClassification, ReviewStatus,
-    SchemaVersion, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
+    CheckId, CheckStatus, CriterionId, DomainError, DomainErrorKind, DraftContextInput,
+    DraftCriterionInput, DraftDecisionInput, DraftEdgeCaseInput, DraftFileInput,
+    DraftMetadataInput, DraftPlanInput, DraftScopeInput, DraftTaskInput, DraftVerificationInput,
+    EvidenceId, FileMapEntry, GitFlowConsent, PlanDraftSeed, PlanId, PlanStatus, ProtocolVersion,
+    ReviewClassification, ReviewStatus, SchemaVersion, Task, TaskId, TaskStatus, Timestamp,
+    VerificationCheck,
 };
 
 /// Human and repository metadata associated with a plan.
@@ -26,6 +29,62 @@ pub struct PlanMetadata {
     markdown_path: Option<String>,
 }
 
+impl PlanMetadata {
+    /// Returns the human-readable requirement name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the declared priority.
+    #[must_use]
+    pub fn priority(&self) -> &str {
+        &self.priority
+    }
+
+    /// Returns the declared plan type.
+    #[must_use]
+    pub fn plan_type(&self) -> &str {
+        &self.plan_type
+    }
+
+    /// Returns the declared area.
+    #[must_use]
+    pub fn area(&self) -> &str {
+        &self.area
+    }
+
+    /// Returns the declared owner.
+    #[must_use]
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    /// Returns the creation timestamp.
+    #[must_use]
+    pub const fn created_at(&self) -> &Timestamp {
+        &self.created_at
+    }
+
+    /// Returns the last authored or lifecycle update timestamp.
+    #[must_use]
+    pub const fn updated_at(&self) -> &Timestamp {
+        &self.updated_at
+    }
+
+    /// Returns the captured Git branch when present.
+    #[must_use]
+    pub fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+
+    /// Returns the project-relative managed Markdown path when present.
+    #[must_use]
+    pub fn markdown_path(&self) -> Option<&str> {
+        self.markdown_path.as_deref()
+    }
+}
+
 /// A discovered fact and its implication for the plan.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -33,6 +92,40 @@ pub struct ContextReference {
     reference: String,
     fact: String,
     implication: String,
+}
+
+impl ContextReference {
+    /// Creates one authored current-state reference.
+    #[must_use]
+    pub fn new(
+        reference: impl Into<String>,
+        fact: impl Into<String>,
+        implication: impl Into<String>,
+    ) -> Self {
+        Self {
+            reference: reference.into(),
+            fact: fact.into(),
+            implication: implication.into(),
+        }
+    }
+
+    /// Returns the referenced source.
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+
+    /// Returns the repository fact.
+    #[must_use]
+    pub fn fact(&self) -> &str {
+        &self.fact
+    }
+
+    /// Returns the implementation implication.
+    #[must_use]
+    pub fn implication(&self) -> &str {
+        &self.implication
+    }
 }
 
 /// The user-visible objective and explicit scope boundaries.
@@ -43,6 +136,32 @@ pub struct PlanScope {
     deliverables: Vec<String>,
     in_scope: Vec<String>,
     out_of_scope: Vec<String>,
+}
+
+impl PlanScope {
+    /// Returns the plan goal.
+    #[must_use]
+    pub fn goal(&self) -> &str {
+        &self.goal
+    }
+
+    /// Returns declared deliverables.
+    #[must_use]
+    pub fn deliverables(&self) -> &[String] {
+        &self.deliverables
+    }
+
+    /// Returns declared in-scope boundaries.
+    #[must_use]
+    pub fn in_scope(&self) -> &[String] {
+        &self.in_scope
+    }
+
+    /// Returns declared out-of-scope boundaries.
+    #[must_use]
+    pub fn out_of_scope(&self) -> &[String] {
+        &self.out_of_scope
+    }
 }
 
 /// A recorded decision, assumption, or question.
@@ -58,12 +177,76 @@ pub struct Decision {
     status: String,
 }
 
+impl Decision {
+    /// Creates one authored decision, assumption, or question.
+    #[must_use]
+    pub fn new(
+        item: impl Into<String>,
+        kind: impl Into<String>,
+        value: impl Into<String>,
+        reason: impl Into<String>,
+        status: impl Into<String>,
+    ) -> Self {
+        Self {
+            item: item.into(),
+            kind: kind.into(),
+            value: value.into(),
+            reason: reason.into(),
+            status: status.into(),
+        }
+    }
+
+    /// Returns the decision subject.
+    #[must_use]
+    pub fn item(&self) -> &str {
+        &self.item
+    }
+
+    /// Returns the decision classification.
+    #[must_use]
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// Returns the selected value.
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Returns the decision reason.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    /// Returns the resolution status.
+    #[must_use]
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+}
+
 /// The implementation approach and planned file responsibilities.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Approach {
     summary: String,
     file_map: Vec<FileMapEntry>,
+}
+
+impl Approach {
+    /// Returns the implementation approach summary.
+    #[must_use]
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    /// Returns the complete task-owned file map.
+    #[must_use]
+    pub fn file_map(&self) -> &[FileMapEntry] {
+        &self.file_map
+    }
 }
 
 /// An expected edge case and its observable result.
@@ -75,6 +258,40 @@ pub struct EdgeCase {
     covered_by: Vec<String>,
 }
 
+impl EdgeCase {
+    /// Creates one authored edge case.
+    #[must_use]
+    pub fn new(
+        case_: impl Into<String>,
+        expected_behavior: impl Into<String>,
+        covered_by: Vec<String>,
+    ) -> Self {
+        Self {
+            case: case_.into(),
+            expected_behavior: expected_behavior.into(),
+            covered_by,
+        }
+    }
+
+    /// Returns the edge-case description.
+    #[must_use]
+    pub fn case(&self) -> &str {
+        &self.case
+    }
+
+    /// Returns the required observable behavior.
+    #[must_use]
+    pub fn expected_behavior(&self) -> &str {
+        &self.expected_behavior
+    }
+
+    /// Returns criterion and check identifiers covering the case.
+    #[must_use]
+    pub fn covered_by(&self) -> &[String] {
+        &self.covered_by
+    }
+}
+
 /// A versioned standards package selected for a plan.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -83,6 +300,48 @@ pub struct StandardSelection {
     version: String,
     digest: String,
     source: String,
+}
+
+impl StandardSelection {
+    /// Creates one exact standards package selection.
+    #[must_use]
+    pub fn new(
+        package_id: impl Into<String>,
+        version: impl Into<String>,
+        digest: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
+        Self {
+            package_id: package_id.into(),
+            version: version.into(),
+            digest: digest.into(),
+            source: source.into(),
+        }
+    }
+
+    /// Returns the stable package identifier.
+    #[must_use]
+    pub fn package_id(&self) -> &str {
+        &self.package_id
+    }
+
+    /// Returns the exact package version.
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// Returns the exact package digest.
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Returns the package source description.
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
 }
 
 /// Git repository facts and plan-level consent captured at approval.
@@ -97,6 +356,72 @@ pub struct GitReadiness {
     git_flow_enabled: bool,
     git_flow_consent: GitFlowConsent,
     approved_at: Option<Timestamp>,
+}
+
+impl GitReadiness {
+    /// Creates Git readiness facts without claiming user consent.
+    #[must_use]
+    pub fn detected(
+        repository: impl Into<String>,
+        working_tree: impl Into<String>,
+        branch: Option<String>,
+        base_commit: Option<String>,
+        base_status: impl Into<String>,
+        git_flow_enabled: bool,
+    ) -> Self {
+        Self {
+            repository: repository.into(),
+            working_tree: working_tree.into(),
+            branch,
+            base_commit,
+            base_status: base_status.into(),
+            git_flow_enabled,
+            git_flow_consent: GitFlowConsent::Pending,
+            approved_at: None,
+        }
+    }
+
+    /// Returns the repository presence fact.
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+
+    /// Returns the working-tree state fact.
+    #[must_use]
+    pub fn working_tree(&self) -> &str {
+        &self.working_tree
+    }
+
+    /// Returns the captured branch when present.
+    #[must_use]
+    pub fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+
+    /// Returns the captured base commit when present.
+    #[must_use]
+    pub fn base_commit(&self) -> Option<&str> {
+        self.base_commit.as_deref()
+    }
+
+    /// Returns the captured base-status description.
+    #[must_use]
+    pub fn base_status(&self) -> &str {
+        &self.base_status
+    }
+
+    /// Returns whether clean-baseline Git Flow is eligible.
+    #[must_use]
+    pub const fn git_flow_enabled(&self) -> bool {
+        self.git_flow_enabled
+    }
+
+    /// Returns the current Git Flow consent declaration.
+    #[must_use]
+    pub const fn git_flow_consent(&self) -> GitFlowConsent {
+        self.git_flow_consent
+    }
 }
 
 /// Kinds of explicit approval declarations recorded by Mino.
@@ -190,6 +515,8 @@ pub struct Plan {
     blocker: Option<String>,
     metadata: PlanMetadata,
     original_request: String,
+    #[serde(default)]
+    summary: String,
     context: Vec<ContextReference>,
     scope: PlanScope,
     decisions: Vec<Decision>,
@@ -222,6 +549,8 @@ struct UncheckedPlan {
     blocker: Option<String>,
     metadata: PlanMetadata,
     original_request: String,
+    #[serde(default)]
+    summary: String,
     context: Vec<ContextReference>,
     scope: PlanScope,
     decisions: Vec<Decision>,
@@ -256,6 +585,7 @@ impl TryFrom<UncheckedPlan> for Plan {
             blocker: unchecked.blocker,
             metadata: unchecked.metadata,
             original_request: unchecked.original_request,
+            summary: unchecked.summary,
             context: unchecked.context,
             scope: unchecked.scope,
             decisions: unchecked.decisions,
@@ -313,6 +643,7 @@ impl Plan {
             resume_status: None,
             blocker: None,
             original_request: original_request.into(),
+            summary: String::new(),
             context: Vec::new(),
             scope: PlanScope::default(),
             decisions: Vec::new(),
@@ -340,6 +671,22 @@ impl Plan {
             final_outcome: FinalOutcome::default(),
             extensions: BTreeMap::new(),
         }
+    }
+
+    /// Creates a revision-one Draft with automatic project and standards facts.
+    #[must_use]
+    pub fn from_draft_seed(seed: PlanDraftSeed, created_at: Timestamp) -> Self {
+        let mut plan = Self::new(seed.id, seed.original_request, created_at);
+        plan.metadata.name = seed.name;
+        plan.metadata.plan_type = seed.trigger;
+        plan.metadata.branch = seed.branch;
+        plan.metadata.markdown_path = Some(seed.markdown_path);
+        plan.git_readiness = seed.git_readiness;
+        plan.standards = seed.standards;
+        plan.standards
+            .sort_by(|left, right| left.package_id.cmp(&right.package_id));
+        plan.global_verification = seed.verification_plan;
+        plan
     }
 
     /// Returns the stable plan identifier.
@@ -370,6 +717,72 @@ impl Plan {
     #[must_use]
     pub const fn status(&self) -> PlanStatus {
         self.status
+    }
+
+    /// Returns human and repository metadata.
+    #[must_use]
+    pub const fn metadata(&self) -> &PlanMetadata {
+        &self.metadata
+    }
+
+    /// Returns the exact original request.
+    #[must_use]
+    pub fn original_request(&self) -> &str {
+        &self.original_request
+    }
+
+    /// Returns the authored plan summary.
+    #[must_use]
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    /// Returns current-state references in authored order.
+    #[must_use]
+    pub fn context(&self) -> &[ContextReference] {
+        &self.context
+    }
+
+    /// Returns the authored scope.
+    #[must_use]
+    pub const fn scope(&self) -> &PlanScope {
+        &self.scope
+    }
+
+    /// Returns decisions, assumptions, and questions in authored order.
+    #[must_use]
+    pub fn decisions(&self) -> &[Decision] {
+        &self.decisions
+    }
+
+    /// Returns the implementation approach and complete file map.
+    #[must_use]
+    pub const fn approach(&self) -> &Approach {
+        &self.approach
+    }
+
+    /// Returns the authored interfaces and data-flow description.
+    #[must_use]
+    pub fn interfaces(&self) -> &str {
+        &self.interfaces
+    }
+
+    /// Returns edge cases in authored order.
+    #[must_use]
+    pub fn edge_cases(&self) -> &[EdgeCase] {
+        &self.edge_cases
+    }
+
+    /// Returns exact selected standards packages.
+    #[must_use]
+    pub fn standards(&self) -> &[StandardSelection] {
+        &self.standards
+    }
+
+    /// Returns captured Git readiness and consent facts.
+    #[must_use]
+    pub const fn git_readiness(&self) -> &GitReadiness {
+        &self.git_readiness
     }
 
     /// Returns tasks in stored order.
@@ -406,6 +819,518 @@ impl Plan {
     #[must_use]
     pub fn schema() -> schemars::Schema {
         schema_for!(Self)
+    }
+
+    /// Applies a strict batch of authored Draft fields in one revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not Draft, the batch is empty, a
+    /// deterministic identifier differs, or any resulting invariant is invalid.
+    pub fn apply_draft_input(
+        &mut self,
+        input: DraftPlanInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if input.is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Draft apply requires at least one authored field",
+            ));
+        }
+        self.author_draft(updated_at, move |candidate| {
+            let DraftPlanInput {
+                metadata,
+                summary,
+                context,
+                scope,
+                decisions,
+                approach,
+                interfaces,
+                edge_cases,
+                tasks,
+                verification_plan,
+            } = input;
+            if let Some(metadata) = metadata {
+                candidate.apply_metadata_unversioned(metadata)?;
+            }
+            if let Some(summary) = summary {
+                candidate.summary = summary;
+            }
+            candidate
+                .context
+                .extend(context.into_iter().map(context_from_input));
+            if let Some(scope) = scope {
+                candidate.apply_scope_unversioned(scope)?;
+            }
+            candidate
+                .decisions
+                .extend(decisions.into_iter().map(decision_from_input));
+            if let Some(approach) = approach {
+                candidate.approach.summary = approach;
+            }
+            if let Some(interfaces) = interfaces {
+                candidate.interfaces = interfaces;
+            }
+            candidate
+                .edge_cases
+                .extend(edge_cases.into_iter().map(edge_case_from_input));
+            for task in tasks {
+                candidate.append_task_unversioned(task)?;
+            }
+            for verification in verification_plan {
+                candidate.add_global_verification_unversioned(verification.into_check())?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Replaces supplied Draft metadata fields in one revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not Draft or no metadata field is supplied.
+    pub fn author_metadata(
+        &mut self,
+        metadata: DraftMetadataInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if metadata.is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Metadata set requires at least one field",
+            ));
+        }
+        self.author_draft(updated_at, move |candidate| {
+            candidate.apply_metadata_unversioned(metadata)
+        })
+    }
+
+    /// Replaces the Draft summary in one revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not Draft.
+    pub fn author_summary(
+        &mut self,
+        summary: impl Into<String>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let summary = summary.into();
+        self.author_draft(updated_at, move |candidate| {
+            candidate.summary = summary;
+            Ok(())
+        })
+    }
+
+    /// Appends one current-state reference in a new Draft revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not Draft.
+    pub fn author_context(
+        &mut self,
+        context: DraftContextInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.author_draft(updated_at, move |candidate| {
+            candidate.context.push(context_from_input(context));
+            Ok(())
+        })
+    }
+
+    /// Replaces supplied scope fields in a new Draft revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not Draft or no scope field is supplied.
+    pub fn author_scope(
+        &mut self,
+        scope: DraftScopeInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if scope.is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Scope set requires at least one field",
+            ));
+        }
+        self.author_draft(updated_at, move |candidate| {
+            candidate.apply_scope_unversioned(scope)
+        })
+    }
+
+    /// Appends one deliverable in a new Draft revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not Draft or the value is empty.
+    pub fn author_deliverable(
+        &mut self,
+        value: impl Into<String>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let value = non_empty_authored_value(value, "deliverable")?;
+        self.author_draft(updated_at, move |candidate| {
+            candidate.scope.deliverables.push(value);
+            Ok(())
+        })
+    }
+
+    /// Appends one in-scope boundary in a new Draft revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not Draft or the value is empty.
+    pub fn author_in_scope(
+        &mut self,
+        value: impl Into<String>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let value = non_empty_authored_value(value, "in-scope boundary")?;
+        self.author_draft(updated_at, move |candidate| {
+            candidate.scope.in_scope.push(value);
+            Ok(())
+        })
+    }
+
+    /// Appends one out-of-scope boundary in a new Draft revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not Draft or the value is empty.
+    pub fn author_out_of_scope(
+        &mut self,
+        value: impl Into<String>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let value = non_empty_authored_value(value, "out-of-scope boundary")?;
+        self.author_draft(updated_at, move |candidate| {
+            candidate.scope.out_of_scope.push(value);
+            Ok(())
+        })
+    }
+
+    /// Appends one decision, assumption, or question in a new Draft revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not Draft.
+    pub fn author_decision(
+        &mut self,
+        decision: DraftDecisionInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.author_draft(updated_at, move |candidate| {
+            candidate.decisions.push(decision_from_input(decision));
+            Ok(())
+        })
+    }
+
+    /// Replaces the implementation approach in a new Draft revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not Draft.
+    pub fn author_approach(
+        &mut self,
+        approach: impl Into<String>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let approach = approach.into();
+        self.author_draft(updated_at, move |candidate| {
+            candidate.approach.summary = approach;
+            Ok(())
+        })
+    }
+
+    /// Replaces interfaces and data flow in a new Draft revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not Draft.
+    pub fn author_interfaces(
+        &mut self,
+        interfaces: impl Into<String>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let interfaces = interfaces.into();
+        self.author_draft(updated_at, move |candidate| {
+            candidate.interfaces = interfaces;
+            Ok(())
+        })
+    }
+
+    /// Appends one edge case in a new Draft revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not Draft.
+    pub fn author_edge_case(
+        &mut self,
+        edge_case: DraftEdgeCaseInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.author_draft(updated_at, move |candidate| {
+            candidate.edge_cases.push(edge_case_from_input(edge_case));
+            Ok(())
+        })
+    }
+
+    /// Appends a deterministically identified task in a new Draft revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not Draft, a supplied ID differs from
+    /// the next task ID, or a dependency does not precede the task.
+    pub fn author_task(
+        &mut self,
+        task: DraftTaskInput,
+        updated_at: Timestamp,
+    ) -> Result<TaskId, DomainError> {
+        self.author_draft(updated_at, move |candidate| {
+            candidate.append_task_unversioned(task)
+        })
+    }
+
+    /// Appends one implementation step to a Draft task in a new plan revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing task, a non-Draft plan/task, or an empty step.
+    pub fn author_task_step(
+        &mut self,
+        task_id: &TaskId,
+        step: impl Into<String>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        let step = step.into();
+        self.author_draft(updated_at, move |candidate| {
+            candidate.task_mut(&task_id)?.add_step(step)
+        })
+    }
+
+    /// Appends a deterministically identified acceptance criterion to a Draft task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing task, non-Draft state, empty description,
+    /// or a supplied identifier that differs from the next criterion ID.
+    pub fn author_task_criterion(
+        &mut self,
+        task_id: &TaskId,
+        criterion: DraftCriterionInput,
+        updated_at: Timestamp,
+    ) -> Result<CriterionId, DomainError> {
+        let task_id = task_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            let task = candidate.task_mut(&task_id)?;
+            let number = task
+                .acceptance_criteria()
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "Acceptance criterion count overflowed",
+                    )
+                })?;
+            let expected = CriterionId::parse(format!("{task_id}-A{number}"))?;
+            if criterion.id.as_ref().is_some_and(|id| id != &expected) {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Expected criterion ID {expected}"),
+                ));
+            }
+            task.add_acceptance_criterion(super::AcceptanceCriterion::new(
+                expected.clone(),
+                criterion.description,
+            ))?;
+            Ok(expected)
+        })
+    }
+
+    /// Appends one verification command to a Draft task in a new plan revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing task, non-Draft state, duplicate ID, or
+    /// incomplete command definition.
+    pub fn author_task_verification(
+        &mut self,
+        task_id: &TaskId,
+        verification: DraftVerificationInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            candidate
+                .task_mut(&task_id)?
+                .add_verification_check(verification.into_check())
+        })
+    }
+
+    /// Appends one file responsibility to both the task and complete plan file map.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing task, non-Draft state, empty fields, or duplicate path.
+    pub fn author_file(
+        &mut self,
+        task_id: &TaskId,
+        file: DraftFileInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            candidate.add_file_unversioned(&task_id, file)
+        })
+    }
+
+    /// Appends one global verification command in a new Draft revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan, duplicate ID, or incomplete command.
+    pub fn author_global_verification(
+        &mut self,
+        verification: DraftVerificationInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.author_draft(updated_at, move |candidate| {
+            candidate.add_global_verification_unversioned(verification.into_check())
+        })
+    }
+
+    fn author_draft<T, F>(&mut self, updated_at: Timestamp, mutation: F) -> Result<T, DomainError>
+    where
+        F: FnOnce(&mut Self) -> Result<T, DomainError>,
+    {
+        self.require_status(PlanStatus::Draft, "edit authored fields")?;
+        let next_revision = self.next_revision()?;
+        let mut candidate = self.clone();
+        let result = mutation(&mut candidate)?;
+        candidate.record_revision(next_revision, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(result)
+    }
+
+    fn apply_metadata_unversioned(
+        &mut self,
+        metadata: DraftMetadataInput,
+    ) -> Result<(), DomainError> {
+        if metadata.is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Metadata set requires at least one field",
+            ));
+        }
+        if let Some(name) = metadata.name {
+            self.metadata.name = name;
+        }
+        if let Some(priority) = metadata.priority {
+            self.metadata.priority = priority;
+        }
+        if let Some(plan_type) = metadata.plan_type {
+            self.metadata.plan_type = plan_type;
+        }
+        if let Some(area) = metadata.area {
+            self.metadata.area = area;
+        }
+        if let Some(owner) = metadata.owner {
+            self.metadata.owner = owner;
+        }
+        Ok(())
+    }
+
+    fn apply_scope_unversioned(&mut self, scope: DraftScopeInput) -> Result<(), DomainError> {
+        if scope.is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Scope set requires at least one field",
+            ));
+        }
+        if let Some(goal) = scope.goal {
+            self.scope.goal = goal;
+        }
+        if let Some(deliverables) = scope.deliverables {
+            self.scope.deliverables = deliverables;
+        }
+        if let Some(in_scope) = scope.in_scope {
+            self.scope.in_scope = in_scope;
+        }
+        if let Some(out_of_scope) = scope.out_of_scope {
+            self.scope.out_of_scope = out_of_scope;
+        }
+        Ok(())
+    }
+
+    fn append_task_unversioned(&mut self, task: DraftTaskInput) -> Result<TaskId, DomainError> {
+        let number = self.tasks.len().checked_add(1).ok_or_else(|| {
+            DomainError::new(DomainErrorKind::InvariantViolation, "Task count overflowed")
+        })?;
+        let expected_id = TaskId::parse(format!("T{number}"))?;
+        let task = Task::from_draft(&expected_id, task)?;
+        if self.tasks.iter().any(|current| current.id() == task.id()) {
+            return Err(DomainError::new(
+                DomainErrorKind::DuplicateTask,
+                format!("Task {} already exists", task.id()),
+            ));
+        }
+        for dependency in task.dependencies() {
+            if self.task(dependency).is_none() {
+                return Err(DomainError::new(
+                    DomainErrorKind::UnmetDependencies,
+                    format!("Task {} depends on missing task {dependency}", task.id()),
+                ));
+            }
+        }
+        self.approach
+            .file_map
+            .extend(task.file_map().iter().cloned());
+        self.task_order.push(expected_id.clone());
+        self.tasks.push(task);
+        Ok(expected_id)
+    }
+
+    fn add_file_unversioned(
+        &mut self,
+        task_id: &TaskId,
+        file: DraftFileInput,
+    ) -> Result<(), DomainError> {
+        let entry = FileMapEntry::new(file.path, file.change, file.reason, task_id.clone());
+        self.task_mut(task_id)?.add_file_map_entry(entry.clone())?;
+        self.approach.file_map.push(entry);
+        Ok(())
+    }
+
+    fn add_global_verification_unversioned(
+        &mut self,
+        check: VerificationCheck,
+    ) -> Result<(), DomainError> {
+        if self
+            .global_verification
+            .iter()
+            .any(|current| current.id() == check.id())
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Global check {} already exists", check.id()),
+            ));
+        }
+        if check.command().is_empty()
+            || check.command().iter().any(|part| part.trim().is_empty())
+            || check.cwd().trim().is_empty()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Global check {} is incomplete", check.id()),
+            ));
+        }
+        self.global_verification.push(check);
+        Ok(())
     }
 
     /// Adds a Draft task to the end of implementation order.
@@ -459,7 +1384,10 @@ impl Plan {
                 format!("Global check {} already exists", check.id()),
             ));
         }
-        if check.command.is_empty() || check.cwd.trim().is_empty() {
+        if check.command.is_empty()
+            || check.command.iter().any(|part| part.trim().is_empty())
+            || check.cwd.trim().is_empty()
+        {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
                 format!("Global check {} is incomplete", check.id()),
@@ -1128,11 +2056,11 @@ impl Plan {
                 "A non-Draft plan requires global verification",
             ));
         }
-        if self
-            .global_verification
-            .iter()
-            .any(|check| check.command.is_empty() || check.cwd.trim().is_empty())
-        {
+        if self.global_verification.iter().any(|check| {
+            check.command.is_empty()
+                || check.command.iter().any(|part| part.trim().is_empty())
+                || check.cwd.trim().is_empty()
+        }) {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
                 "Global verification contains an incomplete check",
@@ -1212,5 +2140,35 @@ impl Plan {
     fn record_revision(&mut self, revision: u64, updated_at: Timestamp) {
         self.revision = revision;
         self.metadata.updated_at = updated_at;
+    }
+}
+
+fn context_from_input(input: DraftContextInput) -> ContextReference {
+    ContextReference::new(input.reference, input.fact, input.implication)
+}
+
+fn decision_from_input(input: DraftDecisionInput) -> Decision {
+    Decision::new(
+        input.item,
+        input.kind,
+        input.value,
+        input.reason,
+        input.status,
+    )
+}
+
+fn edge_case_from_input(input: DraftEdgeCaseInput) -> EdgeCase {
+    EdgeCase::new(input.case_, input.expected_behavior, input.covered_by)
+}
+
+fn non_empty_authored_value(value: impl Into<String>, field: &str) -> Result<String, DomainError> {
+    let value = value.into();
+    if value.trim().is_empty() {
+        Err(DomainError::new(
+            DomainErrorKind::InvariantViolation,
+            format!("Authored {field} cannot be empty"),
+        ))
+    } else {
+        Ok(value)
     }
 }
