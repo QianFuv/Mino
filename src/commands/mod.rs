@@ -1,6 +1,7 @@
 //! Internal CLI command adapters over public application services.
 
 pub(crate) mod project;
+pub(crate) mod standards;
 
 use serde_json::Value;
 

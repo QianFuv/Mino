@@ -14,6 +14,8 @@ pub mod output;
 pub mod project;
 /// Deterministic managed Markdown projection and drift detection.
 pub mod render;
+/// Embedded inert standards catalog, recommendations, and check resolution.
+pub mod standards;
 /// Recoverable revisioned storage, locking, hashing, and audit contracts.
 pub mod store;
 

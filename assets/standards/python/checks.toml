@@ -1,0 +1,17 @@
+[[checks]]
+id = "PY-RUFF-CHECK"
+argv = ["uv", "run", "ruff", "check", "."]
+tool = "uv"
+required = true
+
+[[checks]]
+id = "PY-RUFF-FORMAT"
+argv = ["uv", "run", "ruff", "format", "--check", "."]
+tool = "uv"
+required = true
+
+[[checks]]
+id = "PY-MYPY"
+argv = ["uv", "run", "mypy", "."]
+tool = "uv"
+required = true

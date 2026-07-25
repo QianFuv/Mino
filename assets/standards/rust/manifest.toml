@@ -1,0 +1,4 @@
+package_id = "rust"
+display_name = "Rust"
+version = "1.0.0"
+languages = ["rust"]

@@ -9,6 +9,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::commands::project::{self, ProjectAction};
+use crate::commands::standards::{self, StandardsAction};
 use crate::{ErrorCategory, MinoError, MinoResult, OutputFormat};
 
 #[derive(Debug, Parser)]
@@ -30,12 +31,20 @@ struct Cli {
 enum Command {
     /// Discover, initialize, inspect, and diagnose project-local Mino state.
     Project(ProjectArguments),
+    /// Detect, recommend, and resolve versioned project standards.
+    Standards(StandardsArguments),
 }
 
 #[derive(Debug, Args)]
 struct ProjectArguments {
     #[command(subcommand)]
     action: ProjectAction,
+}
+
+#[derive(Debug, Args)]
+struct StandardsArguments {
+    #[command(subcommand)]
+    action: StandardsAction,
 }
 
 /// Parses arguments, executes one command, writes one result, and returns its exit code.
@@ -65,6 +74,8 @@ fn execute(cli: Cli) -> Result<MinoResult<Value>, MinoError> {
     };
     match cli.command {
         Some(Command::Project(arguments)) => project::execute(&start, arguments.action)
+            .map(crate::commands::CommandResponse::into_result),
+        Some(Command::Standards(arguments)) => standards::execute(&start, arguments.action)
             .map(crate::commands::CommandResponse::into_result),
         None => Ok(MinoResult::success(
             "Mino CLI initialized.",

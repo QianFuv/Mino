@@ -1,0 +1,24 @@
+[[rules]]
+id = "common.confirm-intent"
+level = "required"
+text = "Confirm the requested outcome, assumptions, and acceptance criteria before implementation."
+
+[[rules]]
+id = "common.read-before-editing"
+level = "required"
+text = "Inspect target files, callers, tests, and shared utilities before editing."
+
+[[rules]]
+id = "common.minimal-change"
+level = "required"
+text = "Make the smallest sufficient change and preserve unrelated user work."
+
+[[rules]]
+id = "common.deterministic-checks"
+level = "required"
+text = "Use deterministic tools for facts, formatting, linting, types, and tests."
+
+[[rules]]
+id = "common.fail-loud"
+level = "required"
+text = "Report skipped checks, failed assumptions, and unresolved risk explicitly."

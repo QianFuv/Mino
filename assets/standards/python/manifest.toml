@@ -1,0 +1,4 @@
+package_id = "python"
+display_name = "Python"
+version = "1.0.0"
+languages = ["python"]

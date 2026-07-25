@@ -1,0 +1,24 @@
+[[rules]]
+id = "rust.docs"
+level = "required"
+text = "Document every public function, struct, enum, trait, and module with Rust doc comments."
+
+[[rules]]
+id = "rust.naming"
+level = "required"
+text = "Use PascalCase for types and variants, snake_case for modules and functions, and SCREAMING_SNAKE_CASE for constants."
+
+[[rules]]
+id = "rust.conversions"
+level = "required"
+text = "Use as_ for borrowed no-cost conversions, to_ for owned conversions, and into_ when consuming self."
+
+[[rules]]
+id = "rust.getters"
+level = "required"
+text = "Name getters foo and setters set_foo; do not use a get_ prefix."
+
+[[rules]]
+id = "rust.crate-name"
+level = "required"
+text = "Do not use -rs or -rust suffixes in crate names."

@@ -1,0 +1,29 @@
+[[checks]]
+id = "RUST-FMT"
+argv = ["cargo", "fmt", "--all", "--", "--check"]
+tool = "cargo"
+required = true
+
+[[checks]]
+id = "RUST-CLIPPY"
+argv = ["cargo", "clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
+tool = "cargo"
+required = true
+
+[[checks]]
+id = "RUST-TEST"
+argv = ["cargo", "test"]
+tool = "cargo"
+required = true
+
+[[checks]]
+id = "RUST-CARGO-SORT"
+argv = ["cargo", "sort", "--check"]
+tool = "cargo-sort"
+required = true
+
+[[checks]]
+id = "RUST-MIRI"
+argv = ["cargo", "+nightly", "miri", "test"]
+tool = "cargo-miri"
+required = true

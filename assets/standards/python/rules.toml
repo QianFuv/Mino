@@ -1,0 +1,19 @@
+[[rules]]
+id = "python.docstrings"
+level = "required"
+text = "Add Google-style docstrings to every function, class, and module."
+
+[[rules]]
+id = "python.naming"
+level = "required"
+text = "Use PascalCase for classes, snake_case for functions and variables, lowercase modules, and UPPER_SNAKE_CASE constants."
+
+[[rules]]
+id = "python.exceptions"
+level = "required"
+text = "Use the Error suffix for exception classes and trailing underscores for keyword conflicts."
+
+[[rules]]
+id = "python.single-letter"
+level = "required"
+text = "Never use l, O, or I as single-character variable names."

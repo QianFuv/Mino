@@ -1,0 +1,4 @@
+package_id = "typescript-javascript"
+display_name = "TypeScript / JavaScript"
+version = "1.0.0"
+languages = ["typescript-javascript"]

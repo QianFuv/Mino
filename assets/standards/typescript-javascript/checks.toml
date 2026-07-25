@@ -1,0 +1,20 @@
+[[checks]]
+id = "TS-ESLINT"
+argv = ["pnpm", "exec", "eslint", "."]
+tool = "pnpm"
+required = true
+project_script = "lint"
+
+[[checks]]
+id = "TS-PRETTIER"
+argv = ["pnpm", "exec", "prettier", "--check", "."]
+tool = "pnpm"
+required = true
+project_script = "format:check"
+
+[[checks]]
+id = "TS-TSC"
+argv = ["pnpm", "exec", "tsc", "--noEmit"]
+tool = "pnpm"
+required = true
+project_script = "typecheck"

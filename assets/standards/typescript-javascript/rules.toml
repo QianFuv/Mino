@@ -1,0 +1,19 @@
+[[rules]]
+id = "typescript.tsdoc"
+level = "required"
+text = "Add TSDoc to every function, class, and module."
+
+[[rules]]
+id = "typescript.naming"
+level = "required"
+text = "Use PascalCase for types and components, camelCase for functions and values, and CONSTANT_CASE for module constants."
+
+[[rules]]
+id = "typescript.identifiers"
+level = "required"
+text = "Do not use interface I prefixes, underscore prefixes or suffixes, private hash fields, or Hungarian notation."
+
+[[rules]]
+id = "typescript.extension"
+level = "required"
+text = "Use .tsx for every TypeScript source file, even without JSX."
