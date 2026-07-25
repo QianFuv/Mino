@@ -9,6 +9,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::commands::agent::{self, AgentAction};
+use crate::commands::evidence::{self, EvidenceAction};
 use crate::commands::plan::{self, PlanAction};
 use crate::commands::project::{self, ProjectAction};
 use crate::commands::standards::{self, StandardsAction};
@@ -39,6 +40,8 @@ enum Command {
     Standards(StandardsArguments),
     /// Return strict, non-interactive machine context and legal next actions.
     Agent(AgentArguments),
+    /// Capture and query immutable execution evidence.
+    Evidence(EvidenceArguments),
 }
 
 #[derive(Debug, Args)]
@@ -63,6 +66,12 @@ struct StandardsArguments {
 struct AgentArguments {
     #[command(subcommand)]
     action: AgentAction,
+}
+
+#[derive(Debug, Args)]
+struct EvidenceArguments {
+    #[command(subcommand)]
+    action: EvidenceAction,
 }
 
 enum CliResponse {
@@ -109,6 +118,9 @@ fn execute(cli: Cli) -> Result<CliResponse, MinoError> {
         Some(Command::Agent(arguments)) => {
             agent::execute(&start, arguments.action, no_input, format).map(CliResponse::Direct)
         }
+        Some(Command::Evidence(arguments)) => evidence::execute(&start, arguments.action)
+            .map(crate::commands::CommandResponse::into_result)
+            .map(CliResponse::Result),
         None => Ok(CliResponse::Result(MinoResult::success(
             "Mino CLI initialized.",
             true,

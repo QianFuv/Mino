@@ -24,6 +24,7 @@ pub use check_run::{
 };
 pub use error::{DomainError, DomainErrorKind};
 pub use event::{Event, EventResult};
+pub(crate) use evidence::EvidenceFields;
 pub use evidence::{Evidence, EvidenceType, Redaction};
 pub use id::{CheckId, CriterionId, EvidenceId, PlanId, RequestId, TaskId};
 pub use plan::{

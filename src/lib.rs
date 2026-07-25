@@ -10,6 +10,8 @@ pub mod cli;
 pub mod domain;
 /// Error categories and process exit-code mappings.
 pub mod error;
+/// Immutable evidence capture, content-addressed blobs, and audit queries.
+pub mod evidence;
 /// Bounded strict and guided authoring input adapters.
 pub mod input;
 /// Stable human-readable and machine-readable output contracts.
