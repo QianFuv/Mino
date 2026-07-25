@@ -21,6 +21,9 @@ deployment, or messaging operations.
 - `.mino/active.json` is a versioned worktree/branch binding store. Change it
   only through `mino git bind`; malformed or stale identity is diagnosed
   instead of silently repaired.
+- `.mino/git/branches/**` contains immutable approval-bound branch intents and
+  completions. Prepared records are recovery state, not permission to alter or
+  delete Git data manually.
 - `docs/plan/*.md` is a digest-checked projection. Manual changes cause drift
   and are preserved rather than overwritten.
 - Plan transactions, snapshots, events, run journals, evidence records, and
@@ -88,17 +91,26 @@ not fetch them.
 
 ## Git and external side effects
 
-The implemented Git adapter invokes Git only for read-only root discovery and
-repository/worktree/HEAD/index/status inspection. Commands run directly
-without a shell, disable terminal prompting and optional locks, bound captured
-output, and strictly parse machine-readable results. `mino git inspect` writes
-nothing. `mino git bind` writes only `.mino/active.json` through a bounded lock
-and atomic replacement; it does not mutate Git state.
+The implemented Git adapter runs directly without a shell, disables terminal
+prompting, bounds captured output, and strictly parses machine-readable
+results. Read-only root/repository/worktree/HEAD/index/status probes also
+disable optional Git locks. `mino git inspect` writes nothing. `mino git bind`
+writes only `.mino/active.json` through a bounded lock and atomic replacement;
+it does not mutate Git state.
 
-Mino does not yet stage, commit, push, merge, rebase, reset, amend,
-force-push, tag, create/delete branches, or create/delete worktrees. A plan's
-Git Flow consent and commit gate still constrain an external authorized
-workflow but do not yet execute it.
+`mino git branch create` is the sole implemented Git mutation. It requires an
+explicit approval reference, accepts only the deterministic proposed name,
+rechecks clean source/base/worktree identity, prepares an immutable recovery
+intent, disables repository hooks with a command-local `core.hooksPath`, and
+binds only after exact post-state confirmation. A refusal occurs before the
+intent or Git mutation. A failed or interrupted attempt preserves its intent
+and observed state for exact retry; Mino never resets, deletes, or cleans up the
+repository to conceal a partial external result.
+
+Mino does not yet stage, commit, push, merge, rebase, reset, amend, force-push,
+tag, delete branches, or create/delete worktrees. A plan's Git Flow consent and
+commit gate still constrain an external authorized commit workflow but do not
+yet execute it.
 
 Active-plan selection requires the canonical common-directory and worktree to
 match. Branch bindings require the same branch; detached bindings require the
@@ -118,6 +130,8 @@ Agent consumers must use JSON/no-input mode and inspect `approval_required`,
 `blocked_actions`, and `next_actions` before every action. They must stop on:
 
 - `approval_required: true` or exit 4.
+- `git.branch.create`, unless the user explicitly approved that exact proposal
+  and supplied the recorded approval reference.
 - An approval/exception/Git operation not already covered by explicit user and
   repository policy.
 - Exit 5 policy refusal, exit 8 drift/corruption, or malformed integration
@@ -128,9 +142,9 @@ Agent consumers must use JSON/no-input mode and inspect `approval_required`,
 
 Never approve on the user's behalf, infer authorization from conversational
 tone, copy the protocol template as a fallback, or fabricate plan/evidence
-state when Mino is unavailable. There is no hidden Git mutation path: the only
-implemented Git-adjacent write is the declared `.mino/active.json` binding.
-There is no arbitrary status setter.
+state when Mino is unavailable. There is no hidden Git mutation path: local
+branch creation is exposed only as `git branch create`, while `git bind` is the
+declared Git-adjacent Mino-state write. There is no arbitrary status setter.
 
 ## Recovery guidance
 

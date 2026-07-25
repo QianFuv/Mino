@@ -10,5 +10,7 @@ pub mod completion;
 pub mod execution;
 /// Git inspection and worktree-aware active-plan binding service.
 pub mod git_binding;
+/// Approval-gated Git branch proposal, creation, and recovery service.
+pub mod git_branch;
 /// Plan authoring and read-side application service.
 pub mod plan;

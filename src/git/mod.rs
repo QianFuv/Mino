@@ -1,11 +1,17 @@
 //! Git repository facts, worktree bindings, and narrow policy primitives.
 
+mod branch;
 mod changes;
 mod command;
 mod inspect;
 mod porcelain;
 mod worktree;
 
+pub use branch::{
+    GitBranchCommandResult, GitBranchCompletion, GitBranchIntent, GitBranchJournal,
+    GitBranchJournalLock, GitBranchJournalStore, create_and_switch_branch, local_branch_target,
+    proposed_branch_name, validate_branch_name,
+};
 pub use changes::{
     ChangedFile, GitChangeError, GitChangeErrorKind, GitChangeSet, inspect_changes,
     matches_file_map_path,

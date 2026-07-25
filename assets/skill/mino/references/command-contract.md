@@ -38,6 +38,16 @@ Binding writes `.mino/active.json`; it does not stage, commit, switch branches,
 or otherwise mutate Git. Exact repeated binds are idempotent; binding another
 plan explicitly replaces only the current worktree's prior selection.
 
+Use `mino git branch propose --plan <id> --format json --no-input` to obtain the
+only supported branch name and current blockers. The proposal is read-only.
+`mino git branch create --plan <id> --approval-ref <ref> --format json
+--no-input` is an approval boundary: stop first, obtain explicit user approval
+for that exact proposal, and pass its auditable reference. An optional
+`--branch` must exactly equal the proposal. Creation writes a recoverable intent,
+disables repository hooks, creates/switches only that local branch at the exact
+captured base, then binds it after post-state verification. Follow returned
+errors; never delete refs, locks, or intent files to force a retry.
+
 ## Initial creation
 
 Only when the user explicitly requests formal or durable planning and context

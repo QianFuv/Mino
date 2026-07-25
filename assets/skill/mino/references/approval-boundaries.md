@@ -29,9 +29,14 @@ action, stop; do not edit plan state directly.
 
 Treat a plan commit gate as a scope and message constraint, not a general Git
 permission. Confirm the repository instructions separately authorize the
-specific mutation. Stage only declared paths or hunks, never `git add .`, and
-use exactly the planned one-line message. Mino v0.1 has no Git mutation command,
-so never claim that Mino performed, approved, or verified a commit it cannot
-execute. Push, merge, rebase, reset, amend, force-push, tag, and branch deletion
-always remain outside the Skill unless a later capability explicitly exposes
-them and the user authorizes them.
+specific mutation. `git.branch.create` is a separate approval boundary: first
+run the read-only proposal, stop for explicit approval of that exact branch,
+then pass the supplied reference to `git branch create`. Plan approval and Git
+Flow consent do not authorize branch creation. Mino records a prepared intent
+for recovery; do not delete it or retry with a different approval reference.
+
+Commit execution is not yet exposed. Stage only declared paths or hunks, never
+`git add .`, and use exactly the planned one-line message when a later
+capability authorizes it. Push, merge, rebase, reset, amend, force-push, tag,
+branch deletion, and worktree mutation remain outside the Skill unless a later
+capability explicitly exposes them and the user authorizes them.

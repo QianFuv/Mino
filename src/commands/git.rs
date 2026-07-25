@@ -5,6 +5,7 @@ use std::path::Path;
 use clap::{Args, Subcommand};
 
 use crate::application::git_binding::GitBindingService;
+use crate::application::git_branch::GitBranchService;
 use crate::commands::CommandResponse;
 use crate::domain::PlanId;
 use crate::{ErrorCategory, MinoError};
@@ -15,6 +16,8 @@ pub(crate) enum GitAction {
     Inspect(InspectArguments),
     /// Bind one plan to the exact current worktree and branch or detached HEAD.
     Bind(BindArguments),
+    /// Propose or create the deterministic Git branch for a plan.
+    Branch(BranchArguments),
 }
 
 #[derive(Debug, Args)]
@@ -32,6 +35,40 @@ pub(crate) struct BindArguments {
     /// Explicitly select the current worktree; no other target is supported.
     #[arg(long)]
     current: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct BranchArguments {
+    #[command(subcommand)]
+    action: GitBranchAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum GitBranchAction {
+    /// Return a deterministic branch proposal without mutation.
+    Propose(BranchProposeArguments),
+    /// Create the proposed branch after an explicit approval reference.
+    Create(BranchCreateArguments),
+}
+
+#[derive(Debug, Args)]
+struct BranchProposeArguments {
+    /// Plan for which a Git branch should be proposed.
+    #[arg(long)]
+    plan: String,
+}
+
+#[derive(Debug, Args)]
+struct BranchCreateArguments {
+    /// Plan for which the approved Git branch should be created.
+    #[arg(long)]
+    plan: String,
+    /// Auditable external reference for explicit branch approval.
+    #[arg(long)]
+    approval_ref: String,
+    /// Optional explicit branch name, which must equal the proposal.
+    #[arg(long)]
+    branch: Option<String>,
 }
 
 pub(crate) fn execute(start: &Path, action: GitAction) -> Result<CommandResponse, MinoError> {
@@ -55,6 +92,7 @@ pub(crate) fn execute(start: &Path, action: GitAction) -> Result<CommandResponse
                 serde_json::to_value(service.bind_current(parse_plan_id(&arguments.plan)?)?),
             )
         }
+        GitAction::Branch(arguments) => execute_branch(start, arguments.action)?,
     };
     let payload = payload.map_err(|error| {
         MinoError::new(
@@ -68,6 +106,27 @@ pub(crate) fn execute(start: &Path, action: GitAction) -> Result<CommandResponse
         payload,
         missing: Vec::new(),
         next_actions: Vec::new(),
+    })
+}
+
+fn execute_branch(
+    start: &Path,
+    action: GitBranchAction,
+) -> Result<(&'static str, Result<serde_json::Value, serde_json::Error>), MinoError> {
+    let service = GitBranchService::discover(start)?;
+    Ok(match action {
+        GitBranchAction::Propose(arguments) => (
+            "Git branch proposal generated without mutation.",
+            serde_json::to_value(service.propose(&parse_plan_id(&arguments.plan)?)?),
+        ),
+        GitBranchAction::Create(arguments) => (
+            "Approved Git branch created and bound.",
+            serde_json::to_value(service.create(
+                &parse_plan_id(&arguments.plan)?,
+                &arguments.approval_ref,
+                arguments.branch.as_deref(),
+            )?),
+        ),
     })
 }
 

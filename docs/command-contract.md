@@ -24,9 +24,10 @@ Except for initial `plan create`, mutations against an existing plan or its
 evidence require a current `--expect-revision` and a UUID `--request-id`;
 authored mutations also identify `--actor`. Use a fresh UUID for each distinct
 mutation. Reuse it only for an exact retry. After a successful mutation,
-discard the old revision and read context again. `git bind` changes only the
-worktree-local active binding, not a plan revision, and therefore does not use
-the plan mutation arguments.
+discard the old revision and read context again. `git bind` and `git branch
+create` do not change a plan revision and therefore do not use the plan
+mutation arguments; branch creation has its own explicit approval reference
+and immutable prepared-intent journal.
 
 ## Complete command inventory
 
@@ -45,12 +46,14 @@ the plan mutation arguments.
 `project init --apply-agents-block` and
 `project init --apply-gitignore-block` modify only their owned marker regions.
 
-### Git inspection and active binding
+### Git inspection, active binding, and branch creation
 
 | Command | Mutation | Contract |
 |---|---:|---|
 | `mino git inspect` | No | Return repository, common-directory, worktree, Git-directory, index, HEAD, upstream, porcelain-v2 status, and active-binding facts; optional `--plan` verifies one plan and reports whether it is bound. |
 | `mino git bind` | `.mino/active.json` only | Require `--plan <id> --current`; bind one non-Done plan to the canonical current worktree plus branch, or to the exact detached HEAD. Exact retries preserve the original bytes. |
+| `mino git branch propose` | No | Derive `mino/<plan-id>`, validate it with Git, and report clean/base/source/existing-ref blockers without writing Git or Mino state. |
+| `mino git branch create` | Local branch + Mino journal/binding | Require `--plan <id> --approval-ref <ref>`; optional `--branch` must exactly equal the proposal. Recheck the clean worktree, captured branch/detached mode, and base HEAD before creating and switching. |
 
 Binding status is one of `missing`, `current`, `foreign_worktree`,
 `stale_branch`, `stale_head`, or `not_repository`. Once an active binding file
@@ -59,6 +62,15 @@ worktree or branch. An explicit bind replaces only the current worktree's prior
 binding and preserves entries for other worktrees. `git inspect` does not
 modify Git or Mino state. `git bind` does not stage files or change HEAD,
 branches, refs, the index, or commits.
+
+`git branch create` is an Agent approval boundary. Before invoking it, the
+caller must obtain explicit user authorization and pass its auditable reference;
+plan approval or Git Flow consent is not a substitute. Mino publishes an
+immutable `.mino/git/branches/<plan-id>/intent.json` before Git, disables
+repository hooks for the switch, binds only after the exact branch/base state
+is observed, and then publishes `completion.json`. An exact retry either
+retries an unchanged failed source state, reconciles an already-created branch,
+or replays the completed result without a second mutation.
 
 ### Plan authoring and approval
 
@@ -136,9 +148,10 @@ record with `supersedes`; records and blobs are never rewritten.
 | `mino exec resume` | Yes | Restore the exact recorded Ready/In Progress state. |
 | `mino exec finish` | Yes | Require all tasks/global checks complete and transition In Progress to Review. |
 
-The v0.1 execution commands perform no Git commit, push, merge, rebase, reset,
-amend, tag, branch, or worktree mutation. The v0.2 `git bind` surface writes
-only Mino's local active-binding file; Git repository state is unchanged.
+The v0.1 execution commands perform no Git mutation. The v0.2 Git surfaces can
+write Mino binding/journal state and can create/switch only the deterministic
+approved local branch. They do not stage, commit, push, merge, rebase, reset,
+amend, force-push, tag, delete a branch, or create/delete a worktree.
 
 ## Success envelope
 

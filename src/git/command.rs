@@ -60,29 +60,54 @@ impl Error for GitError {}
 #[derive(Debug)]
 pub(crate) struct GitCommandOutput {
     pub(crate) success: bool,
+    pub(crate) exit_code: Option<i32>,
     pub(crate) stdout: Vec<u8>,
     pub(crate) stderr: Vec<u8>,
 }
 
+/// Runs one read-only Git argument vector with lock creation disabled.
 pub(crate) fn run_read_only<I, S>(root: &Path, arguments: I) -> Result<GitCommandOutput, GitError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = Command::new("git")
+    run(root, arguments, true)
+}
+
+/// Runs one explicitly authorized Git mutation argument vector.
+pub(crate) fn run_mutating<I, S>(root: &Path, arguments: I) -> Result<GitCommandOutput, GitError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run(root, arguments, false)
+}
+
+fn run<I, S>(
+    root: &Path,
+    arguments: I,
+    disable_optional_locks: bool,
+) -> Result<GitCommandOutput, GitError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(root)
         .args(arguments)
-        .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C")
-        .output()
-        .map_err(|error| {
-            GitError::new(
-                GitErrorKind::Unavailable,
-                format!("Failed to start Git at {}: {error}", root.display()),
-            )
-        })?;
+        .env("LC_ALL", "C");
+    if disable_optional_locks {
+        command.env("GIT_OPTIONAL_LOCKS", "0");
+    }
+    let output = command.output().map_err(|error| {
+        GitError::new(
+            GitErrorKind::Unavailable,
+            format!("Failed to start Git at {}: {error}", root.display()),
+        )
+    })?;
     let total_bytes = output
         .stdout
         .len()
@@ -98,6 +123,7 @@ where
     }
     Ok(GitCommandOutput {
         success: output.status.success(),
+        exit_code: output.status.code(),
         stdout: output.stdout,
         stderr: output.stderr,
     })

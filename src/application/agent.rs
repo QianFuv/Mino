@@ -38,6 +38,8 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("exec.resume", true, false),
     ("exec.start", true, false),
     ("git.bind", false, false),
+    ("git.branch.create", false, true),
+    ("git.branch.propose", false, false),
     ("git.inspect", false, false),
     ("plan.apply", true, false),
     ("plan.approve", true, true),

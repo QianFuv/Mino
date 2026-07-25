@@ -26,7 +26,7 @@ flowchart TD
 | Repository Mino Skill | Intent routing, CLI orchestration, approval stops | State transitions, direct managed-file edits, fallback templates |
 | CLI/application services | Commands, concurrency checks, policy gates, evidence binding | Requirement interpretation or hidden approvals |
 | Domain | Valid plan/task/check/criterion states and legal transitions | Filesystem, process, network, or Git side effects |
-| Git adapter and binding service | Read-only Git facts and explicit worktree-local active-plan identity | Branch, index, commit, or remote mutation |
+| Git adapter and policy services | Read-only Git facts, worktree-local active identity, and one approval-gated prepared branch create | Index, commit, remote, destructive, or implicit mutation |
 | `.mino/` | Machine-readable source of truth and immutable history | User-authored documentation |
 | `docs/plan/*.md` | Human review projection | Source state or an editing surface |
 | Standards engine | Embedded packages, recommendation, check resolution, explicit sync | General dependency installation |
@@ -58,6 +58,11 @@ apply flags are present and marker ownership is valid.
 │   ├── standards.lock                   selected standards and catalog generation
 │   ├── active.json                      worktree-keyed active-plan bindings
 │   ├── active.lock                      bounded active-binding writer lock
+│   ├── git/
+│   │   ├── branch.lock                  bounded branch-operation lock
+│   │   └── branches/<plan-id>/
+│   │       ├── intent.json              immutable approval-bound branch intent
+│   │       └── completion.json          immutable terminal branch result
 │   ├── cache/standards/                 verified immutable sync generations
 │   └── plans/<plan-id>/
 │       ├── plan.json                    current canonical aggregate
@@ -86,6 +91,7 @@ tracked like other stable repository instructions.
 | `.mino/standards.lock` | Mino standards lock; explicit sync may atomically replace it. |
 | `.mino/active.json` | Versioned active-plan bindings; change only through `mino git bind`. |
 | `.mino/active.lock` | Advisory binding lock; Mino owns its lifecycle and contents. |
+| `.mino/git/branches/` | Immutable prepared/completed branch journals; manual editing is prohibited. |
 | `.mino/plans/` | Canonical plans, history, runs, and evidence; manual editing is prohibited. |
 | `docs/plan/` | Generated Markdown projections; manual editing is prohibited. |
 | `.agents/skills/mino/` | Stable bundled repository Skill; Mino updates only marker-owned bundle files. |
@@ -115,6 +121,24 @@ binding. `foreign_worktree`, stale, and non-repository states expose no active
 plan. For compatibility, absence of `active.json` retains the v0.1 single
 non-Done-plan lookup; once the binding file exists, there is no cross-worktree
 fallback.
+
+## Approval-gated branch creation
+
+`mino git branch propose --plan <id>` derives `mino/<plan-id>`, delegates final
+name validation to Git, and reports all blockers without creating even Mino
+journal state. Creation is separate and requires an explicit approval
+reference. A clean current worktree must still match the plan's captured source
+branch or detached mode and base commit, and the local target ref must be absent.
+
+After policy succeeds under a bounded operation lock, Mino atomically publishes
+an immutable intent containing the plan revision, canonical worktree identity,
+exact base HEAD, branch name, and approval reference. It then runs one
+hook-disabled `git switch -c` at the exact full base commit. Active binding and
+an immutable completion record are published only after read-only inspection
+confirms the expected branch, HEAD, and clean status. A retry can distinguish
+unchanged source state, an already-applied switch awaiting binding, and a
+completed operation, so it never creates the branch twice or silently cleans an
+unexpected Git state.
 
 ## Plan and task lifecycle
 

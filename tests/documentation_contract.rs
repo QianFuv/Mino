@@ -91,7 +91,8 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     ),
     (&["exec", "check", "--help"], &["run", "help"]),
     (&["exec", "criterion", "--help"], &["pass", "help"]),
-    (&["git", "--help"], &["inspect", "bind", "help"]),
+    (&["git", "--help"], &["inspect", "bind", "branch", "help"]),
+    (&["git", "branch", "--help"], &["propose", "create", "help"]),
     (&["protocol", "--help"], &["status", "migrate", "help"]),
 ];
 
@@ -111,6 +112,8 @@ const LEAF_COMMANDS: &[&str] = &[
     "exec resume",
     "exec start",
     "git bind",
+    "git branch create",
+    "git branch propose",
     "git inspect",
     "plan apply",
     "plan approve",
@@ -239,13 +242,21 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             .find(|action| action["id"] == "git.bind")
             .is_some_and(|action| action["mutates"] == false)
     );
+    assert!(
+        actions
+            .iter()
+            .find(|action| action["id"] == "git.branch.create")
+            .is_some_and(|action| {
+                action["mutates"] == false && action["approval_boundary"] == true
+            })
+    );
     assert_eq!(
         actions
             .iter()
             .filter(|action| action["approval_boundary"] == true)
             .map(|action| action["id"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["plan.approve"]
+        ["git.branch.create", "plan.approve"]
     );
 }
 
@@ -292,6 +303,7 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
         ".mino/protocol.lock",
         ".mino/standards.lock",
         ".mino/active.json",
+        ".mino/git/branches/",
         ".mino/plans/",
         "docs/plan/",
         ".agents/skills/mino/",
