@@ -451,6 +451,20 @@ impl PlanService {
         })
     }
 
+    /// Validates one current plan revision without mutating stored state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for missing/corrupt state, projection drift, or
+    /// unavailable repository facts required by policy validation.
+    pub fn validate(
+        &self,
+        plan_id: &PlanId,
+    ) -> Result<crate::validation::ValidationReport, MinoError> {
+        let plan = self.load_verified(plan_id)?;
+        crate::validation::validate_plan(&self.root, &plan)
+    }
+
     /// Loads a plan only when its managed Markdown projection is current.
     ///
     /// # Errors

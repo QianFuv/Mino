@@ -5,6 +5,7 @@ use std::fmt::{self, Display, Formatter};
 use std::process::ExitCode;
 
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::output::NextAction;
 
@@ -82,6 +83,7 @@ pub struct MinoError {
     message: String,
     missing: Vec<String>,
     next_actions: Vec<NextAction>,
+    details: Option<Value>,
 }
 
 impl MinoError {
@@ -98,6 +100,7 @@ impl MinoError {
             message: message.into(),
             missing: Vec::new(),
             next_actions: Vec::new(),
+            details: None,
         }
     }
 
@@ -106,6 +109,13 @@ impl MinoError {
     pub fn with_remediation(mut self, missing: Vec<String>, next_actions: Vec<NextAction>) -> Self {
         self.missing = missing;
         self.next_actions = next_actions;
+        self
+    }
+
+    /// Attaches command-specific structured failure details.
+    #[must_use]
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
         self
     }
 
@@ -137,6 +147,12 @@ impl MinoError {
     #[must_use]
     pub fn next_actions(&self) -> &[NextAction] {
         &self.next_actions
+    }
+
+    /// Returns command-specific structured failure details when present.
+    #[must_use]
+    pub const fn details(&self) -> Option<&Value> {
+        self.details.as_ref()
     }
 }
 

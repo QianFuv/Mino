@@ -640,6 +640,22 @@ impl Task {
         if self.status != TaskStatus::Draft {
             return Err(self.invalid_transition("mark ready"));
         }
+        if self
+            .depends_on
+            .iter()
+            .any(|dependency| dependency == &self.id)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Task {} depends on itself", self.id),
+            ));
+        }
+        if self.depends_on.iter().collect::<BTreeSet<_>>().len() != self.depends_on.len() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Task {} contains duplicate dependencies", self.id),
+            ));
+        }
         self.validate_execution_definition()?;
         self.status = TaskStatus::Ready;
         Ok(())
@@ -764,21 +780,23 @@ impl Task {
                 format!("Task {} has an empty title", self.id),
             ));
         }
-        if self
-            .depends_on
-            .iter()
-            .any(|dependency| dependency == &self.id)
-        {
-            return Err(DomainError::new(
-                DomainErrorKind::InvariantViolation,
-                format!("Task {} depends on itself", self.id),
-            ));
-        }
-        if self.depends_on.iter().collect::<BTreeSet<_>>().len() != self.depends_on.len() {
-            return Err(DomainError::new(
-                DomainErrorKind::InvariantViolation,
-                format!("Task {} contains duplicate dependencies", self.id),
-            ));
+        if self.status != TaskStatus::Draft {
+            if self
+                .depends_on
+                .iter()
+                .any(|dependency| dependency == &self.id)
+            {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} depends on itself", self.id),
+                ));
+            }
+            if self.depends_on.iter().collect::<BTreeSet<_>>().len() != self.depends_on.len() {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} contains duplicate dependencies", self.id),
+                ));
+            }
         }
         if self.steps.iter().any(|step| step.trim().is_empty()) {
             return Err(DomainError::new(

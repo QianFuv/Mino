@@ -25,6 +25,8 @@ pub(crate) enum PlanAction {
     Create(CreateArguments),
     /// Return deterministic missing fields and the next canonical action.
     Next(PlanReadArguments),
+    /// Validate the current plan revision without mutating it.
+    Validate(PlanReadArguments),
     /// Strictly apply authored fields from one YAML document.
     Apply(ApplyArguments),
     /// Replace human plan metadata while Draft.
@@ -450,6 +452,7 @@ pub(crate) fn execute(
     match action {
         PlanAction::Create(arguments) => execute_create(&service, arguments, no_input),
         PlanAction::Next(arguments) => execute_next(&service, &arguments),
+        PlanAction::Validate(arguments) => execute_validate(&service, &arguments),
         PlanAction::Apply(arguments) => execute_apply(&service, arguments),
         PlanAction::Metadata(arguments) => match arguments.action {
             MetadataAction::Set(arguments) => execute_metadata(&service, arguments),
@@ -583,6 +586,25 @@ fn execute_next(
         false,
         report,
         missing,
+        next_actions,
+    )
+}
+
+fn execute_validate(
+    service: &PlanService,
+    arguments: &PlanReadArguments,
+) -> Result<CommandResponse, MinoError> {
+    let plan_id = parse_plan_id(&arguments.plan)?;
+    let report = service.validate(&plan_id)?;
+    if !report.valid {
+        return Err(crate::validation::validation_failure(&report));
+    }
+    let next_actions = report.next_actions.clone();
+    response(
+        "Plan validation passed.",
+        false,
+        report,
+        Vec::new(),
         next_actions,
     )
 }

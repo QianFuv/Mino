@@ -1,0 +1,50 @@
+metadata:
+  priority: P1
+  plan_type: backend
+  area: validation
+  owner: codex
+summary: Validate standards and commit policy before finalization.
+scope:
+  goal: Report policy defects with executable remediation.
+  deliverables:
+    - Stable policy findings
+  in_scope:
+    - Commit and standards policy
+  out_of_scope:
+    - Running verification commands
+approach: Compare the complete File Map with commit and standards declarations.
+interfaces: CLI validation combines plan data with read-only project facts.
+tasks:
+  - id: T1
+    title: Validate policy defects
+    depends_on: []
+    steps:
+      - Compare declared policy boundaries
+    files:
+      - path: tools/check.py
+        change: Create
+        reason: Require Python standards from the completed File Map
+    acceptance_criteria:
+      - id: T1-A1
+        description: Policy defects have stable remediation
+    verification:
+      - id: POLICY-TASK
+        command:
+          - cargo
+          - test
+        cwd: .
+        expected_exit_code: 0
+        required: true
+    commit_gate:
+      required: true
+      planned_message: "Add validation policy."
+      scope:
+        - docs/**
+verification_plan:
+  - id: GLOBAL-POLICY
+    command:
+      - cargo
+      - test
+    cwd: .
+    expected_exit_code: 0
+    required: true

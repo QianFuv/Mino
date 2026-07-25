@@ -1,0 +1,7 @@
+tasks:
+  - id: T1
+    title: Reject invalid enum values
+    files:
+      - path: src/lib.rs
+        change: Rewrite
+        reason: Invalid enum fixture

@@ -1279,14 +1279,6 @@ impl Plan {
                 format!("Task {} already exists", task.id()),
             ));
         }
-        for dependency in task.dependencies() {
-            if self.task(dependency).is_none() {
-                return Err(DomainError::new(
-                    DomainErrorKind::UnmetDependencies,
-                    format!("Task {} depends on missing task {dependency}", task.id()),
-                ));
-            }
-        }
         self.approach
             .file_map
             .extend(task.file_map().iter().cloned());
@@ -1446,7 +1438,9 @@ impl Plan {
                 "A plan requires at least one global verification check",
             ));
         }
-        self.validate_invariants()?;
+        let mut ready = self.clone();
+        ready.status = PlanStatus::Ready;
+        ready.validate_invariants()?;
         let next_revision = self.next_revision()?;
         self.status = PlanStatus::Ready;
         self.record_revision(next_revision, updated_at);
@@ -1863,19 +1857,21 @@ impl Plan {
             .collect::<BTreeMap<_, _>>();
         for task in &self.tasks {
             task.validate_invariants()?;
-            let task_position = positions[task.id()];
-            for dependency in task.dependencies() {
-                let dependency_position = positions.get(dependency).ok_or_else(|| {
-                    DomainError::new(
-                        DomainErrorKind::InvariantViolation,
-                        format!("Task {} depends on missing task {dependency}", task.id()),
-                    )
-                })?;
-                if dependency_position >= &task_position {
-                    return Err(DomainError::new(
-                        DomainErrorKind::InvariantViolation,
-                        format!("Task {} dependency {dependency} must precede it", task.id()),
-                    ));
+            if self.status != PlanStatus::Draft {
+                let task_position = positions[task.id()];
+                for dependency in task.dependencies() {
+                    let dependency_position = positions.get(dependency).ok_or_else(|| {
+                        DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            format!("Task {} depends on missing task {dependency}", task.id()),
+                        )
+                    })?;
+                    if dependency_position >= &task_position {
+                        return Err(DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            format!("Task {} dependency {dependency} must precede it", task.id()),
+                        ));
+                    }
                 }
             }
         }

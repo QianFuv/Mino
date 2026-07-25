@@ -1,0 +1,45 @@
+metadata:
+  priority: P1
+  plan_type: backend
+  area: validation
+  owner: codex
+summary: Validate Git Flow task commit requirements.
+scope:
+  goal: Require a commit gate for every Git Flow task.
+  deliverables:
+    - Commit gate policy finding
+  in_scope:
+    - Git Flow policy
+  out_of_scope:
+    - Commit execution
+approach: Compare Git readiness with every task commit declaration.
+interfaces: Policy validation reads Git readiness and task definitions.
+tasks:
+  - id: T1
+    title: Validate Git Flow gates
+    depends_on: []
+    steps:
+      - Inspect the task commit gate
+    files:
+      - path: src/validation/policy.rs
+        change: Modify
+        reason: Own Git Flow policy validation
+    acceptance_criteria:
+      - id: T1-A1
+        description: A missing Git Flow commit gate blocks finalization
+    verification:
+      - id: POLICY-GIT-FLOW
+        command:
+          - cargo
+          - test
+        cwd: .
+        expected_exit_code: 0
+        required: true
+verification_plan:
+  - id: GLOBAL-GIT-FLOW
+    command:
+      - cargo
+      - test
+    cwd: .
+    expected_exit_code: 0
+    required: true

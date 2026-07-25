@@ -1,0 +1,24 @@
+metadata:
+  name: Semantic defects
+  priority: P1
+  plan_type: backend
+  area: validation
+  owner: codex
+summary: Locate incomplete authored meaning before finalization.
+scope:
+  goal: ""
+  deliverables: []
+  in_scope: []
+  out_of_scope: []
+decisions:
+  - item: Storage boundary
+    type: Open Question
+    decision: No answer selected
+    reason: Repository inspection is incomplete
+    status: Open
+approach: Accumulate every semantic completeness finding.
+interfaces: Validation reads authored fields without mutation.
+tasks:
+  - id: T1
+    title: Define validation behavior
+    depends_on: []

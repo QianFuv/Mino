@@ -22,6 +22,8 @@ pub mod render;
 pub mod standards;
 /// Recoverable revisioned storage, locking, hashing, and audit contracts.
 pub mod store;
+/// Fixed-order plan validation and structured remediation contracts.
+pub mod validation;
 
 pub use error::{ErrorCategory, MinoError};
 pub use output::{EmptyPayload, MinoResult, NextAction, OutputFormat};

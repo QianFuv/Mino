@@ -1,0 +1,62 @@
+metadata:
+  priority: TODO
+  plan_type: backend
+  area: validation
+  owner: codex
+summary: Validate authored protocol shape before finalization.
+context:
+  - reference: <todo>
+    fact: Validation must locate malformed authored values.
+    implication: Findings use stable field locations.
+scope:
+  goal: Report schema defects deterministically.
+  deliverables:
+    - Stable schema findings
+  in_scope:
+    - Draft validation
+  out_of_scope:
+    - Task execution
+approach: Validate every authored value in protocol order.
+interfaces: CLI validation reads the current stored plan without mutation.
+edge_cases:
+  - case: Coverage names no known criterion or check
+    expected_behavior: Report the unknown reference
+    covered_by:
+      - UNKNOWN-COVERAGE
+tasks:
+  - id: T1
+    title: Validate schema defects
+    depends_on: []
+    steps:
+      - Inspect authored values
+    files:
+      - path: ../src/lib.rs
+        change: Modify
+        reason: Exercise unsafe path detection
+    acceptance_criteria:
+      - id: T1-A1
+        description: Invalid values have stable locations
+    verification:
+      - id: RUST-FMT
+        command:
+          - cargo
+          - fmt
+          - --all
+          - --
+          - --check
+        cwd: ../
+        expected_exit_code: 0
+        required: true
+    commit_gate:
+      required: true
+      planned_message: "feat(validation): report schema defects"
+      scope:
+        - ../src/lib.rs
+verification_plan:
+  - id: GLOBAL-SCHEMA
+    command:
+      - cargo
+      - test
+    cwd: .
+    expected_exit_code: 0
+    required: true

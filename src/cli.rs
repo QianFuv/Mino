@@ -118,7 +118,7 @@ fn write_failure(error: &MinoError, format: OutputFormat) -> ExitCode {
             let _ = writeln!(io::stderr().lock(), "{error}");
         }
         OutputFormat::Json => {
-            let failure = json!({
+            let mut failure = json!({
                 "kind": "mino.result/v1",
                 "ok": false,
                 "complete": false,
@@ -130,6 +130,19 @@ fn write_failure(error: &MinoError, format: OutputFormat) -> ExitCode {
                 "missing": error.missing(),
                 "next_actions": error.next_actions()
             });
+            if let Some(details) = error.details() {
+                if let (Some(failure), Some(details)) =
+                    (failure.as_object_mut(), details.as_object())
+                {
+                    for (key, value) in details {
+                        if !failure.contains_key(key) {
+                            failure.insert(key.clone(), value.clone());
+                        }
+                    }
+                } else if let Some(failure) = failure.as_object_mut() {
+                    failure.insert("details".to_owned(), details.clone());
+                }
+            }
             if let Ok(mut rendered) = serde_json::to_string(&failure) {
                 rendered.push('\n');
                 let _ = io::stdout().lock().write_all(rendered.as_bytes());

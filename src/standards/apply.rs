@@ -25,8 +25,16 @@ pub struct SystemToolProbe;
 
 impl ToolProbe for SystemToolProbe {
     fn is_available(&self, tool: &str, working_directory: &Path) -> bool {
-        Command::new(tool)
-            .arg("--version")
+        let mut command = if tool == "cargo-miri" {
+            let mut command = Command::new("cargo");
+            command.args(["+nightly", "miri", "--version"]);
+            command
+        } else {
+            let mut command = Command::new(tool);
+            command.arg("--version");
+            command
+        };
+        command
             .current_dir(working_directory)
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()

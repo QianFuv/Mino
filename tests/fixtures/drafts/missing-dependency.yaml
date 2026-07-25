@@ -1,0 +1,51 @@
+metadata:
+  priority: P1
+  plan_type: backend
+  area: validation
+  owner: codex
+summary: Validate a missing task dependency before finalization.
+scope:
+  goal: Locate dependencies that do not name a task.
+  deliverables:
+    - Missing dependency finding
+  in_scope:
+    - Dependency existence
+  out_of_scope:
+    - Task execution
+approach: Retain Draft graph defects until explicit validation.
+interfaces: CLI validation reads task dependency identifiers.
+tasks:
+  - id: T1
+    title: Validate missing dependencies
+    depends_on:
+      - T2
+    steps:
+      - Locate unknown task identifiers
+    files:
+      - path: src/validation/graph.rs
+        change: Modify
+        reason: Own missing dependency validation
+    acceptance_criteria:
+      - id: T1-A1
+        description: Missing dependencies are reported
+    verification:
+      - id: GRAPH-MISSING
+        command:
+          - cargo
+          - test
+        cwd: .
+        expected_exit_code: 0
+        required: true
+    commit_gate:
+      required: true
+      planned_message: "feat(validation): locate missing dependencies"
+      scope:
+        - src/validation/graph.rs
+verification_plan:
+  - id: GLOBAL-MISSING
+    command:
+      - cargo
+      - test
+    cwd: .
+    expected_exit_code: 0
+    required: true

@@ -1,0 +1,79 @@
+metadata:
+  priority: P1
+  plan_type: backend
+  area: validation
+  owner: codex
+summary: Validate dependency defects before plan finalization.
+scope:
+  goal: Report an invalid execution graph deterministically.
+  deliverables:
+    - Stable graph findings
+  in_scope:
+    - Dependency validation
+  out_of_scope:
+    - Task execution
+approach: Accumulate missing, ordering, and cycle findings after semantic validation.
+interfaces: CLI validation reads task order and dependency identifiers.
+tasks:
+  - id: T1
+    title: Implement graph validation
+    depends_on:
+      - T2
+    steps:
+      - Validate task dependencies
+    files:
+      - path: src/validation/graph.rs
+        change: Modify
+        reason: Own graph validation
+    acceptance_criteria:
+      - id: T1-A1
+        description: Forward dependencies are reported
+    verification:
+      - id: GRAPH-T1
+        command:
+          - cargo
+          - test
+        cwd: .
+        expected_exit_code: 0
+        required: true
+    commit_gate:
+      required: true
+      planned_message: "feat(validation): validate task graph"
+      scope:
+        - src/validation/graph.rs
+  - id: T2
+    title: Test graph validation
+    depends_on:
+      - T1
+    steps:
+      - Cover cyclic dependencies
+    files:
+      - path: tests/plan_validation.rs
+        change: Test
+        reason: Own graph validation coverage
+    acceptance_criteria:
+      - id: T2-A1
+        description: Cycles are reported once
+    verification:
+      - id: GRAPH-T2
+        command:
+          - cargo
+          - test
+          - --test
+          - plan_validation
+        cwd: .
+        expected_exit_code: 0
+        required: true
+    commit_gate:
+      required: true
+      planned_message: "test(validation): cover task graph"
+      scope:
+        - tests/plan_validation.rs
+verification_plan:
+  - id: GLOBAL-GRAPH
+    command:
+      - cargo
+      - test
+    cwd: .
+    expected_exit_code: 0
+    required: true
