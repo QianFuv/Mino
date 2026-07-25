@@ -47,7 +47,10 @@ pub(crate) fn execute(start: &Path, action: StandardsAction) -> Result<CommandRe
     match action {
         StandardsAction::Detect => {
             let scan = project::scan(start)?;
-            response("Standards detection completed.", detected_languages(&scan))
+            response(
+                "Standards detection completed.",
+                serde_json::json!({ "languages": detected_languages(&scan) }),
+            )
         }
         StandardsAction::Recommend { paths } => {
             let catalog = EmbeddedCatalog::load()?;

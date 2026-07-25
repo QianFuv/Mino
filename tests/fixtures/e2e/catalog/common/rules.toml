@@ -1,0 +1,4 @@
+[[rules]]
+id = "e2e.common.deterministic"
+level = "required"
+text = "Use deterministic local release fixtures."

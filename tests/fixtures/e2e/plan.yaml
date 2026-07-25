@@ -1,0 +1,71 @@
+metadata:
+  priority: P0
+  plan_type: integration
+  area: release
+  owner: codex
+summary: Prove the installed Mino binary can execute one complete evidence-backed lifecycle.
+context:
+  - reference: Original MVP
+    fact: Mino v0.1 ends in Review after ordered execution and global verification.
+    implication: The release gate must stop at Review without inventing acceptance.
+scope:
+  goal: Build and verify a disposable artifact through the Mino protocol.
+  deliverables:
+    - A scoped feature artifact with immutable verification evidence
+  in_scope:
+    - Disposable repository source files
+  out_of_scope:
+    - Git mutation by Mino
+decisions:
+  - item: Verification process
+    type: Decision
+    decision: Run the installed Mino binary directly through the no-shell process runner
+    reason: The result must prove exact argv execution on every supported platform
+    status: Accepted
+approach: Start from a clean Git baseline, recover one injected transaction, then fail and retry a real installed-binary check before completion.
+interfaces: The installed CLI reads authored YAML, owns local state, invokes an exact child argv, stores evidence, and renders Markdown.
+edge_cases:
+  - case: The first task check runs before its child project exists
+    expected_behavior: Exit 6 preserves failure evidence and a later exact check can pass
+    covered_by:
+      - T1-A1
+      - T1-CHECK
+tasks:
+  - id: T1
+    title: Create the disposable feature
+    depends_on: []
+    steps:
+      - Initialize the ignored child project
+      - Create the scoped feature artifact
+      - Run the planned verification command
+    files:
+      - path: feature.txt
+        change: Create
+        reason: Record the user-visible disposable feature
+    acceptance_criteria:
+      - id: T1-A1
+        description: The installed child command validates the prepared execution environment
+    verification:
+      - id: T1-CHECK
+        command:
+          - {{MINO_BINARY}}
+          - --root
+          - {{CHILD_ROOT}}
+          - project
+          - doctor
+        cwd: .
+        expected_exit_code: 0
+        required: true
+    commit_gate:
+      required: true
+      planned_message: "feat(fixture): add verified feature"
+      scope:
+        - feature.txt
+verification_plan:
+  - id: GLOBAL-SMOKE
+    command:
+      - {{MINO_BINARY}}
+      - --version
+    cwd: .
+    expected_exit_code: 0
+    required: true

@@ -1,0 +1,4 @@
+package_id = "common"
+display_name = "E2E Common"
+version = "9.9.9"
+languages = []
