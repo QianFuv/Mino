@@ -3,6 +3,7 @@
 mod config;
 mod doctor;
 mod root;
+mod scan;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ pub use config::{
 };
 pub use doctor::{DoctorFinding, DoctorReport, FindingSeverity, diagnose};
 pub use root::{ProjectRoot, RootSource, discover, discover_for_init};
+pub use scan::{Language, LanguageScore, ProjectScan, ScanEvidence, WorkspaceScan, scan_root};
 
 use config::{create_file, parse_toml, serialize_toml};
 
@@ -226,6 +228,16 @@ pub fn show(start: &Path) -> Result<ProjectShowReport, MinoError> {
 pub fn doctor(start: &Path) -> Result<DoctorReport, MinoError> {
     let project_root = discover(start)?;
     diagnose(&ProjectLayout::new(project_root.path()))
+}
+
+/// Discovers an existing project root and scans its workspaces and languages.
+///
+/// # Errors
+///
+/// Returns an error when root discovery or ignore-aware traversal fails.
+pub fn scan(start: &Path) -> Result<ProjectScan, MinoError> {
+    let project_root = discover(start)?;
+    scan_root(project_root.path())
 }
 
 fn ensure_owned_file<T>(

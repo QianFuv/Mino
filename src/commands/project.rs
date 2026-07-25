@@ -17,6 +17,8 @@ pub(crate) enum ProjectAction {
     Show,
     /// Diagnose configuration, locks, transactions, projections, and integrations.
     Doctor,
+    /// Scan workspaces and return evidence-based language rankings.
+    Scan,
 }
 
 pub(crate) fn execute(start: &Path, action: ProjectAction) -> Result<CommandResponse, MinoError> {
@@ -61,6 +63,13 @@ pub(crate) fn execute(start: &Path, action: ProjectAction) -> Result<CommandResp
             let next_actions = integration_next_actions(&report.findings);
             response(message, complete, report, missing, next_actions)
         }
+        ProjectAction::Scan => response(
+            "Project scan completed.",
+            true,
+            project::scan(start)?,
+            Vec::new(),
+            Vec::new(),
+        ),
     }
 }
 

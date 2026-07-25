@@ -1,0 +1,6 @@
+jobs:
+  checks:
+    steps:
+      - run: cargo test
+      - run: pnpm test
+      - run: uv run pytest

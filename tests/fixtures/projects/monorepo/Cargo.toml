@@ -1,0 +1,3 @@
+[workspace]
+members = ["packages/web", "tools/python"]
+resolver = "3"
