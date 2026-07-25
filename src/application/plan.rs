@@ -42,9 +42,9 @@ pub struct CreatePlanRequest {
     pub created_at: Timestamp,
 }
 
-/// Common metadata required by every Draft mutation.
+/// Common metadata required by every revision-checked semantic plan mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DraftMutationRequest {
+pub struct PlanMutationRequest {
     /// Target plan identifier.
     pub plan_id: PlanId,
     /// Required optimistic-concurrency revision.
@@ -58,6 +58,9 @@ pub struct DraftMutationRequest {
     /// Timestamp captured once for this semantic mutation.
     pub updated_at: Timestamp,
 }
+
+/// Backward-compatible name for authored Draft mutation metadata.
+pub type DraftMutationRequest = PlanMutationRequest;
 
 /// Canonical authored mutation variants accepted before finalization.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -347,6 +350,28 @@ impl PlanService {
         request: DraftMutationRequest,
         mutation: &DraftMutation,
     ) -> Result<PlanOperationReport, MinoError> {
+        let changed_fields = mutation.changed_fields();
+        let applied_mutation = mutation.clone();
+        self.commit_semantic(
+            request,
+            changed_fields,
+            |prior| mutation.assigned_id(prior),
+            move |plan, updated_at| applied_mutation.apply(plan, updated_at),
+        )
+    }
+
+    /// Commits one retry-safe semantic transition and updates its projection.
+    pub(crate) fn commit_semantic<F, A>(
+        &self,
+        request: PlanMutationRequest,
+        changed_fields: Vec<String>,
+        assigned_id: A,
+        mutation: F,
+    ) -> Result<PlanOperationReport, MinoError>
+    where
+        F: Fn(&mut Plan, Timestamp) -> Result<(), crate::domain::DomainError> + Clone,
+        A: FnOnce(&Plan) -> Result<Option<String>, MinoError>,
+    {
         let current = self
             .store
             .load_plan(&request.plan_id)
@@ -375,11 +400,12 @@ impl PlanService {
                 ),
             ));
         };
-        let mut preview = prior.clone();
-        mutation
-            .apply(&mut preview, request.updated_at.clone())
-            .map_err(|error| map_domain_error(&error))?;
-        let assigned_id = mutation.assigned_id(&prior)?;
+        if !is_replay_candidate {
+            let mut preview = prior.clone();
+            mutation(&mut preview, request.updated_at.clone())
+                .map_err(|error| map_domain_error(&error))?;
+        }
+        let assigned_id = assigned_id(&prior)?;
         let prior_rendered = render_plan(&prior).map_err(|error| map_render_error(&error))?;
         let projection_path = projection_path(&self.root, &prior)?;
         let prior_projection = check_projection(&projection_path, &prior_rendered)
@@ -407,7 +433,7 @@ impl PlanService {
             request.request_id,
             request.actor,
             request.command,
-            mutation.changed_fields(),
+            changed_fields,
         )
         .map_err(|error| map_store_error(&error))?;
         let updated_at = request.updated_at;
@@ -415,7 +441,7 @@ impl PlanService {
         let receipt = self
             .store
             .commit(&request.plan_id, store_request, move |plan| {
-                applied_mutation.apply(plan, updated_at)
+                applied_mutation(plan, updated_at)
             })
             .map_err(|error| map_store_error(&error))?;
         let plan = self

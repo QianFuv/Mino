@@ -69,7 +69,9 @@ pub(crate) fn contains_placeholder(value: &str) -> bool {
 }
 
 fn derive_next_actions(plan: &Plan, findings: &[ValidationFinding]) -> Vec<NextAction> {
-    if findings.iter().all(|finding| !finding.blocking) {
+    if findings.iter().all(|finding| !finding.blocking)
+        && plan.status() == crate::domain::PlanStatus::Draft
+    {
         return vec![NextAction {
             id: "plan.finalize".to_owned(),
             argv: vec![
@@ -87,6 +89,9 @@ fn derive_next_actions(plan: &Plan, findings: &[ValidationFinding]) -> Vec<NextA
                 "--no-input".to_owned(),
             ],
         }];
+    }
+    if findings.iter().all(|finding| !finding.blocking) {
+        return Vec::new();
     }
     let mut actions = Vec::new();
     if findings.iter().any(|finding| {

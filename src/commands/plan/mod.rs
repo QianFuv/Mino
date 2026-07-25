@@ -1,5 +1,7 @@
 //! Canonical plan authoring command tree and application adapter.
 
+mod review;
+
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
@@ -27,6 +29,14 @@ pub(crate) enum PlanAction {
     Next(PlanReadArguments),
     /// Validate the current plan revision without mutating it.
     Validate(PlanReadArguments),
+    /// Load the complete current source-of-truth plan.
+    Show(PlanReadArguments),
+    /// Validate and atomically move a complete Draft to Ready.
+    Finalize(review::FinalizeArguments),
+    /// Generate the revision-bound summary used at the approval gate.
+    Review(PlanReadArguments),
+    /// Record explicit plan approval and Git Flow consent.
+    Approve(review::ApproveArguments),
     /// Strictly apply authored fields from one YAML document.
     Apply(ApplyArguments),
     /// Replace human plan metadata while Draft.
@@ -453,6 +463,10 @@ pub(crate) fn execute(
         PlanAction::Create(arguments) => execute_create(&service, arguments, no_input),
         PlanAction::Next(arguments) => execute_next(&service, &arguments),
         PlanAction::Validate(arguments) => execute_validate(&service, &arguments),
+        PlanAction::Show(arguments) => review::execute_show(&service, &arguments),
+        PlanAction::Finalize(arguments) => review::execute_finalize(&service, arguments),
+        PlanAction::Review(arguments) => review::execute_review(&service, &arguments),
+        PlanAction::Approve(arguments) => review::execute_approve(&service, arguments),
         PlanAction::Apply(arguments) => execute_apply(&service, arguments),
         PlanAction::Metadata(arguments) => match arguments.action {
             MetadataAction::Set(arguments) => execute_metadata(&service, arguments),

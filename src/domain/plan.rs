@@ -465,6 +465,12 @@ impl Approval {
             git_flow_consent,
         }
     }
+
+    /// Returns the approval declaration kind.
+    #[must_use]
+    pub const fn kind(&self) -> ApprovalKind {
+        self.kind
+    }
 }
 
 /// A classified review request or acceptance record.
@@ -801,6 +807,14 @@ impl Plan {
     #[must_use]
     pub fn approvals(&self) -> &[Approval] {
         &self.approvals
+    }
+
+    /// Returns whether the current revision has a recorded plan approval.
+    #[must_use]
+    pub fn has_plan_approval(&self) -> bool {
+        self.approvals
+            .iter()
+            .any(|approval| approval.kind == ApprovalKind::Plan)
     }
 
     /// Returns the global verification checks in declared order.
@@ -1412,8 +1426,8 @@ impl Plan {
     ///
     /// # Errors
     ///
-    /// Returns an error when the plan is not Draft, has no tasks, contains non-Ready tasks,
-    /// or violates an invariant.
+    /// Returns an error when the plan is not Draft, has no tasks, contains an
+    /// incomplete task definition, or violates an invariant.
     pub fn finalize(&mut self, updated_at: Timestamp) -> Result<(), DomainError> {
         self.require_status(PlanStatus::Draft, "finalize")?;
         if self.tasks.is_empty() {
@@ -1422,28 +1436,30 @@ impl Plan {
                 "A plan must contain at least one task",
             ));
         }
-        if self
-            .tasks
-            .iter()
-            .any(|task| task.status() != TaskStatus::Ready)
-        {
-            return Err(DomainError::new(
-                DomainErrorKind::InvariantViolation,
-                "Every task must be Ready before plan finalization",
-            ));
-        }
         if self.global_verification.is_empty() {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
                 "A plan requires at least one global verification check",
             ));
         }
-        let mut ready = self.clone();
-        ready.status = PlanStatus::Ready;
-        ready.validate_invariants()?;
         let next_revision = self.next_revision()?;
-        self.status = PlanStatus::Ready;
-        self.record_revision(next_revision, updated_at);
+        let mut ready = self.clone();
+        for task in &mut ready.tasks {
+            match task.status() {
+                TaskStatus::Draft => task.mark_ready()?,
+                TaskStatus::Ready => {}
+                _ => {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "A Draft plan may finalize only Draft or Ready tasks",
+                    ));
+                }
+            }
+        }
+        ready.status = PlanStatus::Ready;
+        ready.record_revision(next_revision, updated_at);
+        ready.validate_invariants()?;
+        *self = ready;
         Ok(())
     }
 
@@ -1464,6 +1480,18 @@ impl Plan {
             return Err(DomainError::new(
                 DomainErrorKind::ApprovalRequired,
                 "Plan approval requires a non-empty actor and reference",
+            ));
+        }
+        if approval.git_flow_consent == GitFlowConsent::Pending {
+            return Err(DomainError::new(
+                DomainErrorKind::ApprovalRequired,
+                "Plan approval requires an explicit Git Flow consent decision",
+            ));
+        }
+        if self.has_plan_approval() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "The current plan revision already has a plan approval",
             ));
         }
         let next_revision = self.next_revision()?;
@@ -2006,6 +2034,35 @@ impl Plan {
     }
 
     fn validate_approval_state(&self) -> Result<(), DomainError> {
+        let plan_approvals = self
+            .approvals
+            .iter()
+            .filter(|approval| approval.kind == ApprovalKind::Plan)
+            .collect::<Vec<_>>();
+        if plan_approvals.len() > 1 {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "A plan revision may contain at most one plan approval",
+            ));
+        }
+        if let Some(approval) = plan_approvals.first() {
+            if approval.git_flow_consent == GitFlowConsent::Pending
+                || self.git_readiness.git_flow_consent != approval.git_flow_consent
+                || self.git_readiness.approved_at.as_ref() != Some(&approval.recorded_at)
+            {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Plan approval and Git Flow consent facts must identify the same declaration",
+                ));
+            }
+        } else if self.git_readiness.git_flow_consent != GitFlowConsent::Pending
+            || self.git_readiness.approved_at.is_some()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Git Flow consent cannot exist without a plan approval",
+            ));
+        }
         if matches!(
             self.status,
             PlanStatus::InProgress | PlanStatus::Review | PlanStatus::Done
