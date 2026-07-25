@@ -1,0 +1,41 @@
+{
+  "kind": "mino.agent-context/v1",
+  "project": {
+    "root": "<ROOT>",
+    "protocol": "2026-05-11.review-rework-git-flow-v1"
+  },
+  "active_plan": {
+    "id": "2026-07-26-agent-fixture",
+    "revision": 7,
+    "status": "Blocked",
+    "active_task": "T1"
+  },
+  "allowed_actions": ["exec.resume"],
+  "blocked_actions": [
+    {
+      "action": "exec.start",
+      "reason": "The plan must resume from its recorded blocked state"
+    }
+  ],
+  "standards": [],
+  "approval_required": false,
+  "next_actions": [
+    {
+      "id": "exec.resume",
+      "argv": [
+        "mino",
+        "exec",
+        "resume",
+        "--plan",
+        "2026-07-26-agent-fixture",
+        "--expect-revision",
+        "7",
+        "--request-id",
+        "<REQUEST_ID>",
+        "--format",
+        "json",
+        "--no-input"
+      ]
+    }
+  ]
+}

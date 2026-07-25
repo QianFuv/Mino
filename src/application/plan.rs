@@ -1,5 +1,6 @@
 //! Revision-checked plan authoring over the recoverable store and managed projection.
 
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -301,6 +302,32 @@ impl PlanService {
         if preflight_projection.exists() && !state_path.exists() {
             return Err(plan_collision_error(&plan_id));
         }
+        if !state_path.exists()
+            && let Some(active) = self.active_plan()?
+        {
+            return Err(MinoError::new(
+                ErrorCategory::PolicyViolation,
+                format!(
+                    "Project already has active plan {} at revision {}",
+                    active.id(),
+                    active.revision()
+                ),
+            )
+            .with_remediation(
+                vec!["active_plan".to_owned()],
+                vec![NextAction {
+                    id: "agent.context".to_owned(),
+                    argv: vec![
+                        "mino".to_owned(),
+                        "agent".to_owned(),
+                        "context".to_owned(),
+                        "--format".to_owned(),
+                        "json".to_owned(),
+                        "--no-input".to_owned(),
+                    ],
+                }],
+            ));
+        }
         let proposed = if state_path.exists() {
             self.store
                 .load_plan(&plan_id)
@@ -467,7 +494,7 @@ impl PlanService {
     pub fn next(&self, plan_id: &PlanId) -> Result<PlanNextReport, MinoError> {
         let plan = self.load_verified(plan_id)?;
         let missing = draft_missing(&plan);
-        let next_actions = next_actions(&plan, &missing);
+        let next_actions = draft_next_actions(&plan, &missing);
         Ok(PlanNextReport {
             plan_id: plan.id().clone(),
             status: plan.status(),
@@ -489,6 +516,79 @@ impl PlanService {
     ) -> Result<crate::validation::ValidationReport, MinoError> {
         let plan = self.load_verified(plan_id)?;
         crate::validation::validate_plan(&self.root, &plan)
+    }
+
+    /// Locates the only non-Done plan in the project, when one exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for malformed private state, projection drift, I/O
+    /// failure, or more than one active non-Done plan.
+    pub fn active_plan(&self) -> Result<Option<Plan>, MinoError> {
+        let plans_directory = self.store.paths().plans_directory();
+        let entries = fs::read_dir(&plans_directory).map_err(|error| {
+            MinoError::new(
+                ErrorCategory::EnvironmentUnavailable,
+                format!("Failed to inspect {}: {error}", plans_directory.display()),
+            )
+        })?;
+        let mut plan_ids = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                MinoError::new(
+                    ErrorCategory::EnvironmentUnavailable,
+                    format!("Failed to inspect {}: {error}", plans_directory.display()),
+                )
+            })?;
+            let file_type = entry.file_type().map_err(|error| {
+                MinoError::new(
+                    ErrorCategory::EnvironmentUnavailable,
+                    format!("Failed to inspect {}: {error}", entry.path().display()),
+                )
+            })?;
+            let name = entry.file_name().into_string().map_err(|_| {
+                MinoError::new(
+                    ErrorCategory::DriftDetected,
+                    "Plan-state directory contains a non-UTF-8 entry",
+                )
+            })?;
+            if !file_type.is_dir() {
+                return Err(MinoError::new(
+                    ErrorCategory::DriftDetected,
+                    format!("Unexpected file in private plan state: {name}"),
+                ));
+            }
+            let plan_id = PlanId::parse(&name).map_err(|error| {
+                MinoError::new(
+                    ErrorCategory::DriftDetected,
+                    format!("Invalid private plan directory {name}: {error}"),
+                )
+            })?;
+            plan_ids.push(plan_id);
+        }
+        plan_ids.sort();
+        let mut active = Vec::new();
+        for plan_id in plan_ids {
+            let plan = self.load_verified(&plan_id)?;
+            if plan.status() != PlanStatus::Done {
+                active.push(plan);
+            }
+        }
+        match active.len() {
+            0 => Ok(None),
+            1 => Ok(active.pop()),
+            _ => Err(MinoError::new(
+                ErrorCategory::PolicyViolation,
+                format!(
+                    "Project has multiple active plans: {}",
+                    active
+                        .iter()
+                        .map(|plan| plan.id().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )),
+        }
     }
 
     /// Loads a plan only when its managed Markdown projection is current.
@@ -775,7 +875,7 @@ fn projection_path(root: &Path, plan: &Plan) -> Result<PathBuf, MinoError> {
     Ok(root.join(path))
 }
 
-fn next_actions(plan: &Plan, missing: &[String]) -> Vec<NextAction> {
+pub(crate) fn draft_next_actions(plan: &Plan, missing: &[String]) -> Vec<NextAction> {
     if plan.status() != PlanStatus::Draft {
         return Vec::new();
     }
@@ -840,7 +940,7 @@ fn next_actions(plan: &Plan, missing: &[String]) -> Vec<NextAction> {
     }]
 }
 
-fn derived_request_id(plan: &Plan, action: &str) -> String {
+pub(crate) fn derived_request_id(plan: &Plan, action: &str) -> String {
     let digest = sha256_digest(format!("{}:{}:{action}", plan.id(), plan.revision()).as_bytes());
     let value = &digest["sha256:".len().."sha256:".len() + 32];
     format!(

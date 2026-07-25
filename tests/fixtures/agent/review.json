@@ -1,0 +1,27 @@
+{
+  "kind": "mino.agent-context/v1",
+  "project": {
+    "root": "<ROOT>",
+    "protocol": "2026-05-11.review-rework-git-flow-v1"
+  },
+  "active_plan": {
+    "id": "2026-07-26-agent-fixture",
+    "revision": 11,
+    "status": "Review",
+    "active_task": null
+  },
+  "allowed_actions": ["plan.show"],
+  "blocked_actions": [
+    {
+      "action": "review.accept",
+      "reason": "Explicit user review acceptance is required; the Agent must stop"
+    },
+    {
+      "action": "exec.start",
+      "reason": "Implementation is complete and awaiting review"
+    }
+  ],
+  "standards": [],
+  "approval_required": true,
+  "next_actions": []
+}

@@ -1,0 +1,67 @@
+{
+  "kind": "mino.agent-context/v1",
+  "project": {
+    "root": "<ROOT>",
+    "protocol": "2026-05-11.review-rework-git-flow-v1"
+  },
+  "active_plan": {
+    "id": "2026-07-26-agent-fixture",
+    "revision": 1,
+    "status": "Draft",
+    "active_task": null
+  },
+  "allowed_actions": [
+    "plan.apply",
+    "plan.metadata.set",
+    "plan.summary.set",
+    "plan.context.add",
+    "plan.scope.set",
+    "plan.scope.add",
+    "plan.decision.add",
+    "plan.task.add",
+    "plan.task.step.add",
+    "plan.task.criterion.add",
+    "plan.task.verification.add",
+    "plan.file.add",
+    "plan.verification.add",
+    "plan.validate",
+    "plan.show"
+  ],
+  "blocked_actions": [
+    {
+      "action": "plan.finalize",
+      "reason": "Plan validation has 8 blocking item(s)"
+    },
+    {
+      "action": "plan.approve",
+      "reason": "The plan must be Ready before approval"
+    },
+    {
+      "action": "exec.start",
+      "reason": "The plan must be Ready and explicitly approved before execution"
+    }
+  ],
+  "standards": [],
+  "approval_required": false,
+  "next_actions": [
+    {
+      "id": "plan.summary.set",
+      "argv": [
+        "mino",
+        "plan",
+        "summary",
+        "set",
+        "--plan",
+        "2026-07-26-agent-fixture",
+        "--stdin",
+        "--expect-revision",
+        "1",
+        "--request-id",
+        "<REQUEST_ID>",
+        "--format",
+        "json",
+        "--no-input"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "kind": "mino.agent-context/v1",
+  "project": {
+    "root": "<ROOT>",
+    "protocol": "2026-05-11.review-rework-git-flow-v1"
+  },
+  "active_plan": null,
+  "allowed_actions": ["plan.create"],
+  "blocked_actions": [],
+  "standards": [],
+  "approval_required": false,
+  "next_actions": []
+}

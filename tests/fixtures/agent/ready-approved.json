@@ -1,0 +1,43 @@
+{
+  "kind": "mino.agent-context/v1",
+  "project": {
+    "root": "<ROOT>",
+    "protocol": "2026-05-11.review-rework-git-flow-v1"
+  },
+  "active_plan": {
+    "id": "2026-07-26-agent-fixture",
+    "revision": 5,
+    "status": "Ready",
+    "active_task": null
+  },
+  "allowed_actions": ["plan.show", "plan.validate", "plan.review", "exec.start"],
+  "blocked_actions": [
+    {
+      "action": "git.commit",
+      "reason": "No task has completed its verification and commit gate"
+    }
+  ],
+  "standards": [],
+  "approval_required": false,
+  "next_actions": [
+    {
+      "id": "exec.start",
+      "argv": [
+        "mino",
+        "exec",
+        "start",
+        "--plan",
+        "2026-07-26-agent-fixture",
+        "--task",
+        "T1",
+        "--expect-revision",
+        "5",
+        "--request-id",
+        "<REQUEST_ID>",
+        "--format",
+        "json",
+        "--no-input"
+      ]
+    }
+  ]
+}

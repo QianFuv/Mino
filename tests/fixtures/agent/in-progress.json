@@ -1,0 +1,28 @@
+{
+  "kind": "mino.agent-context/v1",
+  "project": {
+    "root": "<ROOT>",
+    "protocol": "2026-05-11.review-rework-git-flow-v1"
+  },
+  "active_plan": {
+    "id": "2026-07-26-agent-fixture",
+    "revision": 6,
+    "status": "In Progress",
+    "active_task": "T1"
+  },
+  "allowed_actions": [
+    "exec.check.run",
+    "exec.checkpoint",
+    "exec.complete",
+    "exec.block"
+  ],
+  "blocked_actions": [
+    {
+      "action": "git.commit",
+      "reason": "Task verification is incomplete"
+    }
+  ],
+  "standards": [],
+  "approval_required": false,
+  "next_actions": []
+}

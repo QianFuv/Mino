@@ -1,0 +1,512 @@
+//! Stable Agent context, next-action, capability, and active-plan services.
+
+use std::path::Path;
+
+use serde::Serialize;
+
+use crate::application::plan::{
+    PlanService, derived_request_id, draft_missing, draft_next_actions,
+};
+use crate::domain::{
+    CURRENT_PROTOCOL_REVISION, CURRENT_PROTOCOL_VERSION, Plan, PlanId, PlanStatus, TaskId,
+    TaskStatus,
+};
+use crate::validation::validate_plan;
+use crate::{MinoError, NextAction};
+
+/// Versioned Agent context schema identifier.
+pub const AGENT_CONTEXT_KIND: &str = "mino.agent-context/v1";
+/// Versioned Agent next-action schema identifier.
+pub const AGENT_NEXT_KIND: &str = "mino.agent-next/v1";
+/// Versioned Agent capabilities schema identifier.
+pub const AGENT_CAPABILITIES_KIND: &str = "mino.agent-capabilities/v1";
+
+const CAPABILITIES: &[(&str, bool, bool)] = &[
+    ("agent.capabilities", false, false),
+    ("agent.context", false, false),
+    ("agent.next", false, false),
+    ("exec.block", true, false),
+    ("exec.check.run", true, false),
+    ("exec.checkpoint", true, false),
+    ("exec.complete", true, false),
+    ("exec.resume", true, false),
+    ("exec.start", true, false),
+    ("plan.apply", true, false),
+    ("plan.approve", true, true),
+    ("plan.context.add", true, false),
+    ("plan.create", true, false),
+    ("plan.decision.add", true, false),
+    ("plan.file.add", true, false),
+    ("plan.finalize", true, false),
+    ("plan.metadata.set", true, false),
+    ("plan.next", false, false),
+    ("plan.review", false, false),
+    ("plan.scope.add", true, false),
+    ("plan.scope.set", true, false),
+    ("plan.show", false, false),
+    ("plan.summary.set", true, false),
+    ("plan.task.add", true, false),
+    ("plan.task.criterion.add", true, false),
+    ("plan.task.step.add", true, false),
+    ("plan.task.verification.add", true, false),
+    ("plan.validate", false, false),
+    ("plan.verification.add", true, false),
+    ("project.doctor", false, false),
+    ("project.init", false, false),
+    ("project.scan", false, false),
+    ("project.show", false, false),
+    ("review.accept", true, true),
+    ("review.record", true, false),
+    ("review.rework", true, false),
+    ("standards.apply", false, false),
+    ("standards.detect", false, false),
+    ("standards.recommend", false, false),
+    ("standards.sync", false, false),
+];
+
+/// Stable project identity embedded in every Agent context.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AgentProject {
+    /// Discovered project root.
+    pub root: String,
+    /// Locked protocol version and revision.
+    pub protocol: String,
+}
+
+/// Current plan identity and active execution slot exposed to an Agent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AgentActivePlan {
+    /// Stable plan identifier.
+    pub id: PlanId,
+    /// Current optimistic-concurrency revision.
+    pub revision: u64,
+    /// Current plan lifecycle state.
+    pub status: PlanStatus,
+    /// Active or blocked execution task when one owns the slot.
+    pub active_task: Option<TaskId>,
+}
+
+/// One action that current protocol state forbids.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct BlockedAction {
+    /// Stable canonical action identifier.
+    pub action: String,
+    /// Concise protocol reason the action is unavailable.
+    pub reason: String,
+}
+
+/// Complete dynamic context returned to Coding Agents.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AgentContext {
+    /// Versioned context schema identifier.
+    pub kind: &'static str,
+    /// Discovered project and protocol identity.
+    pub project: AgentProject,
+    /// Only active non-Done plan, when one exists.
+    pub active_plan: Option<AgentActivePlan>,
+    /// Legal action identifiers in deterministic order.
+    pub allowed_actions: Vec<String>,
+    /// Important unavailable actions and stable reasons.
+    pub blocked_actions: Vec<BlockedAction>,
+    /// Exact selected standards package pins.
+    pub standards: Vec<String>,
+    /// Whether the Agent must stop for explicit human approval.
+    pub approval_required: bool,
+    /// Complete canonical commands that may be executed next.
+    pub next_actions: Vec<NextAction>,
+}
+
+/// Focused next-action view derived from the same current context.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AgentNextReport {
+    /// Versioned next-action schema identifier.
+    pub kind: &'static str,
+    /// Current active plan identity, when one exists.
+    pub active_plan: Option<AgentActivePlan>,
+    /// Whether the Agent must stop for explicit human approval.
+    pub approval_required: bool,
+    /// Important unavailable actions and stable reasons.
+    pub blocked_actions: Vec<BlockedAction>,
+    /// Complete canonical commands that may be executed next.
+    pub next_actions: Vec<NextAction>,
+}
+
+/// One stable protocol capability advertised to an Agent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AgentCapability {
+    /// Stable canonical action identifier.
+    pub id: String,
+    /// Whether the action can create a new plan revision.
+    pub mutates: bool,
+    /// Whether the Agent must stop for explicit user approval before invocation.
+    pub approval_boundary: bool,
+}
+
+/// Static machine-use contract for Agent CLI behavior.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AgentCapabilities {
+    /// Versioned capabilities schema identifier.
+    pub kind: &'static str,
+    /// Locked protocol version and revision.
+    pub protocol: String,
+    /// Context schema produced by this CLI.
+    pub context_kind: &'static str,
+    /// Next-action schema produced by this CLI.
+    pub next_kind: &'static str,
+    /// Required invocation-mode flags for Agent queries.
+    pub invocation: AgentInvocationPolicy,
+    /// Required optimistic-concurrency fields for mutations.
+    pub mutations: AgentMutationPolicy,
+    /// Stable protocol actions in canonical identifier order.
+    pub actions: Vec<AgentCapability>,
+}
+
+/// Required non-interactive invocation mode for every Agent query.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AgentInvocationPolicy {
+    /// Whether every Agent command requires JSON output mode.
+    pub requires_json: bool,
+    /// Whether every Agent command forbids interactive input.
+    pub requires_no_input: bool,
+}
+
+/// Required concurrency and idempotency metadata for every mutation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AgentMutationPolicy {
+    /// Whether every mutation requires an expected revision.
+    pub requires_expected_revision: bool,
+    /// Whether every mutation requires an idempotency request identifier.
+    pub requires_request_id: bool,
+}
+
+/// Application boundary for Agent-specific read-only protocol queries.
+#[derive(Clone, Debug)]
+pub struct AgentService {
+    plans: PlanService,
+}
+
+impl AgentService {
+    /// Discovers an initialized project and creates its Agent service.
+    ///
+    /// # Errors
+    ///
+    /// Returns an environment-unavailable error when no initialized project exists.
+    pub fn discover(start: &Path) -> Result<Self, MinoError> {
+        Ok(Self {
+            plans: PlanService::discover(start)?,
+        })
+    }
+
+    /// Returns the current one-plan Agent context.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for malformed/multiple active state, projection
+    /// drift, or repository facts required to validate a Draft.
+    pub fn context(&self) -> Result<AgentContext, MinoError> {
+        let active_plan = self.plans.active_plan()?;
+        build_agent_context(self.plans.root(), active_plan.as_ref())
+    }
+
+    /// Returns only the current approval boundary and canonical next commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::context`].
+    pub fn next(&self) -> Result<AgentNextReport, MinoError> {
+        let context = self.context()?;
+        Ok(AgentNextReport {
+            kind: AGENT_NEXT_KIND,
+            active_plan: context.active_plan,
+            approval_required: context.approval_required,
+            blocked_actions: context.blocked_actions,
+            next_actions: context.next_actions,
+        })
+    }
+
+    /// Returns the static machine-use contract for this protocol version.
+    #[must_use]
+    pub fn capabilities() -> AgentCapabilities {
+        AgentCapabilities {
+            kind: AGENT_CAPABILITIES_KIND,
+            protocol: protocol_name(),
+            context_kind: AGENT_CONTEXT_KIND,
+            next_kind: AGENT_NEXT_KIND,
+            invocation: AgentInvocationPolicy {
+                requires_json: true,
+                requires_no_input: true,
+            },
+            mutations: AgentMutationPolicy {
+                requires_expected_revision: true,
+                requires_request_id: true,
+            },
+            actions: CAPABILITIES
+                .iter()
+                .map(|(id, mutates, approval_boundary)| AgentCapability {
+                    id: (*id).to_owned(),
+                    mutates: *mutates,
+                    approval_boundary: *approval_boundary,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Builds one deterministic Agent context for a supplied lifecycle state.
+///
+/// # Errors
+///
+/// Returns an error when Draft validation requires unavailable project facts.
+pub fn build_agent_context(
+    root: &Path,
+    active_plan: Option<&Plan>,
+) -> Result<AgentContext, MinoError> {
+    let project = AgentProject {
+        root: root.to_string_lossy().into_owned(),
+        protocol: protocol_name(),
+    };
+    let Some(plan) = active_plan else {
+        return Ok(AgentContext {
+            kind: AGENT_CONTEXT_KIND,
+            project,
+            active_plan: None,
+            allowed_actions: vec!["plan.create".to_owned()],
+            blocked_actions: Vec::new(),
+            standards: Vec::new(),
+            approval_required: false,
+            next_actions: Vec::new(),
+        });
+    };
+    let active_plan = AgentActivePlan {
+        id: plan.id().clone(),
+        revision: plan.revision(),
+        status: plan.status(),
+        active_task: active_task(plan),
+    };
+    let standards = plan
+        .standards()
+        .iter()
+        .map(|standard| format!("{}@{}", standard.package_id(), standard.version()))
+        .collect();
+    let guidance = guidance(root, plan)?;
+    Ok(AgentContext {
+        kind: AGENT_CONTEXT_KIND,
+        project,
+        active_plan: Some(active_plan),
+        allowed_actions: guidance.allowed_actions,
+        blocked_actions: guidance.blocked_actions,
+        standards,
+        approval_required: guidance.approval_required,
+        next_actions: guidance.next_actions,
+    })
+}
+
+struct Guidance {
+    allowed_actions: Vec<String>,
+    blocked_actions: Vec<BlockedAction>,
+    approval_required: bool,
+    next_actions: Vec<NextAction>,
+}
+
+fn guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
+    match plan.status() {
+        PlanStatus::Draft => draft_guidance(root, plan),
+        PlanStatus::Ready => Ok(ready_guidance(plan)),
+        PlanStatus::InProgress => Ok(Guidance {
+            allowed_actions: action_ids(&[
+                "exec.check.run",
+                "exec.checkpoint",
+                "exec.complete",
+                "exec.block",
+            ]),
+            blocked_actions: vec![blocked("git.commit", "Task verification is incomplete")],
+            approval_required: false,
+            next_actions: Vec::new(),
+        }),
+        PlanStatus::Blocked => Ok(Guidance {
+            allowed_actions: action_ids(&["exec.resume"]),
+            blocked_actions: vec![blocked(
+                "exec.start",
+                "The plan must resume from its recorded blocked state",
+            )],
+            approval_required: false,
+            next_actions: vec![resume_action(plan)],
+        }),
+        PlanStatus::Review => Ok(Guidance {
+            allowed_actions: action_ids(&["plan.show"]),
+            blocked_actions: vec![
+                blocked(
+                    "review.accept",
+                    "Explicit user review acceptance is required; the Agent must stop",
+                ),
+                blocked(
+                    "exec.start",
+                    "Implementation is complete and awaiting review",
+                ),
+            ],
+            approval_required: true,
+            next_actions: Vec::new(),
+        }),
+        PlanStatus::Done => Ok(Guidance {
+            allowed_actions: action_ids(&["plan.show"]),
+            blocked_actions: vec![blocked("exec.start", "The plan is already Done")],
+            approval_required: false,
+            next_actions: Vec::new(),
+        }),
+    }
+}
+
+fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
+    let missing = draft_missing(plan);
+    let (next_actions, is_valid, blocking_count) = if missing.is_empty() {
+        let report = validate_plan(root, plan)?;
+        (
+            report.next_actions,
+            report.valid,
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.blocking)
+                .count(),
+        )
+    } else {
+        (draft_next_actions(plan, &missing), false, missing.len())
+    };
+    let mut allowed_actions = action_ids(&[
+        "plan.apply",
+        "plan.metadata.set",
+        "plan.summary.set",
+        "plan.context.add",
+        "plan.scope.set",
+        "plan.scope.add",
+        "plan.decision.add",
+        "plan.task.add",
+        "plan.task.step.add",
+        "plan.task.criterion.add",
+        "plan.task.verification.add",
+        "plan.file.add",
+        "plan.verification.add",
+        "plan.validate",
+        "plan.show",
+    ]);
+    let mut blocked_actions = vec![
+        blocked("plan.approve", "The plan must be Ready before approval"),
+        blocked(
+            "exec.start",
+            "The plan must be Ready and explicitly approved before execution",
+        ),
+    ];
+    if is_valid {
+        allowed_actions.push("plan.finalize".to_owned());
+    } else {
+        blocked_actions.insert(
+            0,
+            blocked(
+                "plan.finalize",
+                &format!("Plan validation has {blocking_count} blocking item(s)"),
+            ),
+        );
+    }
+    Ok(Guidance {
+        allowed_actions,
+        blocked_actions,
+        approval_required: false,
+        next_actions,
+    })
+}
+
+fn ready_guidance(plan: &Plan) -> Guidance {
+    if !plan.has_plan_approval() {
+        return Guidance {
+            allowed_actions: action_ids(&["plan.show", "plan.validate", "plan.review"]),
+            blocked_actions: vec![
+                blocked(
+                    "plan.approve",
+                    "Explicit user approval is required; the Agent must stop",
+                ),
+                blocked(
+                    "exec.start",
+                    "Plan execution requires explicit user approval",
+                ),
+            ],
+            approval_required: true,
+            next_actions: Vec::new(),
+        };
+    }
+    let next_actions = first_incomplete_task(plan)
+        .map(|task_id| vec![start_action(plan, task_id)])
+        .unwrap_or_default();
+    Guidance {
+        allowed_actions: action_ids(&["plan.show", "plan.validate", "plan.review", "exec.start"]),
+        blocked_actions: vec![blocked(
+            "git.commit",
+            "No task has completed its verification and commit gate",
+        )],
+        approval_required: false,
+        next_actions,
+    }
+}
+
+fn active_task(plan: &Plan) -> Option<TaskId> {
+    plan.tasks()
+        .iter()
+        .find(|task| matches!(task.status(), TaskStatus::InProgress | TaskStatus::Blocked))
+        .map(|task| task.id().clone())
+}
+
+fn first_incomplete_task(plan: &Plan) -> Option<&TaskId> {
+    plan.task_order().iter().find(|task_id| {
+        plan.task(task_id)
+            .is_some_and(|task| task.status() != TaskStatus::Done)
+    })
+}
+
+fn start_action(plan: &Plan, task_id: &TaskId) -> NextAction {
+    mutation_action(
+        plan,
+        "exec.start",
+        &["exec", "start"],
+        vec!["--task".to_owned(), task_id.to_string()],
+    )
+}
+
+fn resume_action(plan: &Plan) -> NextAction {
+    mutation_action(plan, "exec.resume", &["exec", "resume"], Vec::new())
+}
+
+fn mutation_action(plan: &Plan, id: &str, command: &[&str], extra: Vec<String>) -> NextAction {
+    let mut argv = vec!["mino".to_owned()];
+    argv.extend(command.iter().map(|part| (*part).to_owned()));
+    argv.extend(["--plan".to_owned(), plan.id().to_string()]);
+    argv.extend(extra);
+    argv.extend([
+        "--expect-revision".to_owned(),
+        plan.revision().to_string(),
+        "--request-id".to_owned(),
+        derived_request_id(plan, id),
+    ]);
+    argv.extend([
+        "--format".to_owned(),
+        "json".to_owned(),
+        "--no-input".to_owned(),
+    ]);
+    NextAction {
+        id: id.to_owned(),
+        argv,
+    }
+}
+
+fn action_ids(actions: &[&str]) -> Vec<String> {
+    actions.iter().map(|action| (*action).to_owned()).collect()
+}
+
+fn blocked(action: &str, reason: &str) -> BlockedAction {
+    BlockedAction {
+        action: action.to_owned(),
+        reason: reason.to_owned(),
+    }
+}
+
+fn protocol_name() -> String {
+    format!("{CURRENT_PROTOCOL_VERSION}.{CURRENT_PROTOCOL_REVISION}")
+}
