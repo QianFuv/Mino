@@ -35,16 +35,23 @@ pub(crate) enum StandardsAction {
         #[arg(long = "path")]
         paths: Vec<PathBuf>,
     },
+    /// Explicitly download and verify every configured catalog package.
+    Sync {
+        /// Synchronize every package listed by the configured catalog.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 pub(crate) fn execute(start: &Path, action: StandardsAction) -> Result<CommandResponse, MinoError> {
-    let catalog = EmbeddedCatalog::load()?;
-    let scan = project::scan(start)?;
     match action {
         StandardsAction::Detect => {
+            let scan = project::scan(start)?;
             response("Standards detection completed.", detected_languages(&scan))
         }
         StandardsAction::Recommend { paths } => {
+            let catalog = EmbeddedCatalog::load()?;
+            let scan = project::scan(start)?;
             let recommendation = if paths.is_empty() {
                 recommend_initial(&catalog, &scan)?
             } else {
@@ -63,6 +70,8 @@ pub(crate) fn execute(start: &Path, action: StandardsAction) -> Result<CommandRe
                     "v0.1 standards apply requires --recommended and --seed-verification",
                 ));
             }
+            let catalog = EmbeddedCatalog::load()?;
+            let scan = project::scan(start)?;
             let recommendation = if paths.is_empty() {
                 recommend_initial(&catalog, &scan)?
             } else {
@@ -71,6 +80,18 @@ pub(crate) fn execute(start: &Path, action: StandardsAction) -> Result<CommandRe
             let application =
                 apply_recommendation(&scan.root, &catalog, &recommendation, &SystemToolProbe)?;
             response("Standards application resolved.", application)
+        }
+        StandardsAction::Sync { all } => {
+            if !all {
+                return Err(MinoError::new(
+                    ErrorCategory::IncompleteOrValidation,
+                    "v0.1 standards sync requires --all",
+                ));
+            }
+            response(
+                "Standards catalog synchronized.",
+                crate::standards::synchronize_all(start)?,
+            )
         }
     }
 }

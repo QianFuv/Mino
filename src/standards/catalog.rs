@@ -139,25 +139,25 @@ impl EmbeddedCatalog {
     /// duplicate identifiers, empty commands, or unexpected package IDs.
     pub fn load() -> Result<Self, MinoError> {
         let mut packages = vec![
-            parse_package(
+            parse_package_documents(
                 "common",
                 include_str!("../../assets/standards/common/manifest.toml"),
                 include_str!("../../assets/standards/common/rules.toml"),
                 include_str!("../../assets/standards/common/checks.toml"),
             )?,
-            parse_package(
+            parse_package_documents(
                 "rust",
                 include_str!("../../assets/standards/rust/manifest.toml"),
                 include_str!("../../assets/standards/rust/rules.toml"),
                 include_str!("../../assets/standards/rust/checks.toml"),
             )?,
-            parse_package(
+            parse_package_documents(
                 "typescript-javascript",
                 include_str!("../../assets/standards/typescript-javascript/manifest.toml"),
                 include_str!("../../assets/standards/typescript-javascript/rules.toml"),
                 include_str!("../../assets/standards/typescript-javascript/checks.toml"),
             )?,
-            parse_package(
+            parse_package_documents(
                 "python",
                 include_str!("../../assets/standards/python/manifest.toml"),
                 include_str!("../../assets/standards/python/rules.toml"),
@@ -165,7 +165,7 @@ impl EmbeddedCatalog {
             )?,
         ];
         packages.sort_by(|left, right| left.package_id.cmp(&right.package_id));
-        validate_global_ids(&packages)?;
+        validate_package_set(&packages)?;
         Ok(Self { packages })
     }
 
@@ -192,7 +192,7 @@ impl EmbeddedCatalog {
     }
 }
 
-fn parse_package(
+pub(crate) fn parse_package_documents(
     expected_id: &str,
     manifest_source: &str,
     rules_source: &str,
@@ -201,9 +201,12 @@ fn parse_package(
     let manifest: PackageManifest = parse_document(expected_id, "manifest", manifest_source)?;
     let mut rules: RulesDocument = parse_document(expected_id, "rules", rules_source)?;
     let mut checks: ChecksDocument = parse_document(expected_id, "checks", checks_source)?;
-    if manifest.package_id != expected_id || manifest.version.trim().is_empty() {
+    if manifest.package_id != expected_id
+        || manifest.display_name.trim().is_empty()
+        || manifest.version.trim().is_empty()
+    {
         return Err(catalog_error(format!(
-            "Embedded package {expected_id} has an invalid ID or version"
+            "Standards package {expected_id} has an invalid ID, display name, or version"
         )));
     }
     let languages = manifest
@@ -211,21 +214,31 @@ fn parse_package(
         .iter()
         .map(|language| parse_language(language))
         .collect::<Result<Vec<_>, _>>()?;
+    if languages.iter().copied().collect::<BTreeSet<_>>().len() != languages.len() {
+        return Err(catalog_error(format!(
+            "Standards package {expected_id} contains duplicate languages"
+        )));
+    }
     rules.rules.sort_by(|left, right| left.id.cmp(&right.id));
     checks.checks.sort_by(|left, right| left.id.cmp(&right.id));
-    if rules
-        .rules
-        .iter()
-        .any(|rule| rule.id.trim().is_empty() || rule.text.trim().is_empty())
+    if rules.rules.is_empty()
+        || rules
+            .rules
+            .iter()
+            .any(|rule| rule.id.trim().is_empty() || rule.text.trim().is_empty())
         || checks.checks.iter().any(|check| {
             check.id.trim().is_empty()
                 || check.argv.is_empty()
                 || check.argv.iter().any(|argument| argument.trim().is_empty())
                 || check.tool.trim().is_empty()
+                || check
+                    .project_script
+                    .as_ref()
+                    .is_some_and(|script| script.trim().is_empty())
         })
     {
         return Err(catalog_error(format!(
-            "Embedded package {expected_id} contains an incomplete rule or check"
+            "Standards package {expected_id} contains an incomplete rule or check"
         )));
     }
     let mut digest_input = Vec::new();
@@ -273,7 +286,7 @@ fn parse_language(language: &str) -> Result<Language, MinoError> {
     }
 }
 
-fn validate_global_ids(packages: &[StandardsPackage]) -> Result<(), MinoError> {
+pub(crate) fn validate_package_set(packages: &[StandardsPackage]) -> Result<(), MinoError> {
     let package_ids = packages
         .iter()
         .map(|package| package.package_id.as_str())

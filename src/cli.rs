@@ -31,7 +31,7 @@ struct Cli {
 enum Command {
     /// Discover, initialize, inspect, and diagnose project-local Mino state.
     Project(ProjectArguments),
-    /// Detect, recommend, and resolve versioned project standards.
+    /// Detect, recommend, resolve, and explicitly synchronize project standards.
     Standards(StandardsArguments),
 }
 
@@ -116,8 +116,8 @@ fn write_failure(error: &MinoError, format: OutputFormat) -> ExitCode {
                     "code": error.category().code(),
                     "exit_code": error.category().exit_code_value()
                 },
-                "missing": [],
-                "next_actions": []
+                "missing": error.missing(),
+                "next_actions": error.next_actions()
             });
             if let Ok(mut rendered) = serde_json::to_string(&failure) {
                 rendered.push('\n');

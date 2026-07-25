@@ -6,6 +6,8 @@ use std::process::ExitCode;
 
 use serde::Serialize;
 
+use crate::output::NextAction;
+
 /// Stable categories used to select CLI exit codes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -78,6 +80,8 @@ impl ErrorCategory {
 pub struct MinoError {
     category: ErrorCategory,
     message: String,
+    missing: Vec<String>,
+    next_actions: Vec<NextAction>,
 }
 
 impl MinoError {
@@ -92,7 +96,17 @@ impl MinoError {
         Self {
             category,
             message: message.into(),
+            missing: Vec::new(),
+            next_actions: Vec::new(),
         }
+    }
+
+    /// Attaches machine-readable missing fields and canonical remediation commands.
+    #[must_use]
+    pub fn with_remediation(mut self, missing: Vec<String>, next_actions: Vec<NextAction>) -> Self {
+        self.missing = missing;
+        self.next_actions = next_actions;
+        self
     }
 
     /// Returns the stable failure category.
@@ -111,6 +125,18 @@ impl MinoError {
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// Returns machine-readable missing fields related to the failure.
+    #[must_use]
+    pub fn missing(&self) -> &[String] {
+        &self.missing
+    }
+
+    /// Returns canonical commands that can remediate the failure.
+    #[must_use]
+    pub fn next_actions(&self) -> &[NextAction] {
+        &self.next_actions
     }
 }
 
