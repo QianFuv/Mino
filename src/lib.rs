@@ -12,6 +12,8 @@ pub mod domain;
 pub mod error;
 /// Immutable evidence capture, content-addressed blobs, and audit queries.
 pub mod evidence;
+/// Read-only Git observations and File Map matching.
+pub mod git;
 /// Bounded strict and guided authoring input adapters.
 pub mod input;
 /// Stable human-readable and machine-readable output contracts.

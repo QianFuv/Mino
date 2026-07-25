@@ -1799,6 +1799,31 @@ impl Plan {
         Ok(())
     }
 
+    /// Binds compatible evidence to a criterion on the active task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan and task are In Progress and the
+    /// criterion exists.
+    pub fn record_task_criterion_evidence(
+        &mut self,
+        task_id: &TaskId,
+        criterion_id: &CriterionId,
+        evidence_id: EvidenceId,
+        is_accepted_exception: bool,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.require_status(PlanStatus::InProgress, "record criterion evidence")?;
+        let next_revision = self.next_revision()?;
+        self.task_mut(task_id)?.record_criterion_evidence(
+            criterion_id,
+            evidence_id,
+            is_accepted_exception,
+        )?;
+        self.record_revision(next_revision, updated_at);
+        Ok(())
+    }
+
     /// Records passing evidence for a verification check on the active task.
     ///
     /// # Errors

@@ -6,10 +6,13 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::application::agent::AgentService;
+use crate::application::completion::CompletionService;
 use crate::application::execution::ExecutionService;
 use crate::application::plan::PlanMutationRequest;
 use crate::commands::CommandResponse;
-use crate::domain::{CheckId, CheckpointKind, PlanId, RequestId, TaskId, Timestamp};
+use crate::domain::{
+    CheckId, CheckpointKind, CriterionId, EvidenceId, PlanId, RequestId, TaskId, Timestamp,
+};
 use crate::{ErrorCategory, MinoError};
 
 #[derive(Debug, Subcommand)]
@@ -20,10 +23,16 @@ pub(crate) enum ExecAction {
     Checkpoint(CheckpointArguments),
     /// Run one planned verification check.
     Check(CheckArguments),
+    /// Bind compatible immutable evidence to acceptance criteria.
+    Criterion(CriterionArguments),
+    /// Complete the active task after every evidence and scope gate passes.
+    Complete(CompleteArguments),
     /// Block the current plan with a resumable reason.
     Block(BlockArguments),
     /// Resume a plan from its recorded blocked state.
     Resume(ResumeArguments),
+    /// Finish global verification and move the plan to Review.
+    Finish(FinishArguments),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -111,6 +120,39 @@ struct CheckRunArguments {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct CriterionArguments {
+    #[command(subcommand)]
+    action: CriterionAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum CriterionAction {
+    /// Mark a criterion satisfied by one compatible evidence record.
+    Pass(CriterionPassArguments),
+}
+
+#[derive(Debug, Args)]
+struct CriterionPassArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    /// Globally unique acceptance-criterion identifier.
+    #[arg(long)]
+    criterion: String,
+    /// Immutable evidence identifier to bind.
+    #[arg(long)]
+    evidence: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CompleteArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    /// Active task identifier.
+    #[arg(long)]
+    task: String,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct BlockArguments {
     #[command(flatten)]
     mutation: MutationArguments,
@@ -121,6 +163,12 @@ pub(crate) struct BlockArguments {
 
 #[derive(Debug, Args)]
 pub(crate) struct ResumeArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct FinishArguments {
     #[command(flatten)]
     mutation: MutationArguments,
 }
@@ -167,6 +215,10 @@ pub(crate) fn execute(start: &Path, action: ExecAction) -> Result<CommandRespons
         ExecAction::Check(arguments) => match arguments.action {
             CheckAction::Run(arguments) => run_check(start, &service, arguments),
         },
+        ExecAction::Criterion(arguments) => match arguments.action {
+            CriterionAction::Pass(arguments) => pass_criterion(start, arguments),
+        },
+        ExecAction::Complete(arguments) => complete_task(start, arguments),
         ExecAction::Block(arguments) => {
             let command = mutation_command(
                 &["block"],
@@ -183,7 +235,50 @@ pub(crate) fn execute(start: &Path, action: ExecAction) -> Result<CommandRespons
             let report = service.resume(request)?;
             response_with_guidance(start, "Plan execution resumed.", report)
         }
+        ExecAction::Finish(arguments) => finish(start, arguments),
     }
+}
+
+fn pass_criterion(
+    start: &Path,
+    arguments: CriterionPassArguments,
+) -> Result<CommandResponse, MinoError> {
+    let command = mutation_command(
+        &["criterion", "pass"],
+        &arguments.mutation,
+        vec![
+            "--criterion".to_owned(),
+            arguments.criterion.clone(),
+            "--evidence".to_owned(),
+            arguments.evidence.clone(),
+        ],
+    );
+    let request = mutation_request(arguments.mutation, command)?;
+    let report = CompletionService::discover(start)?.pass_criterion(
+        request,
+        parse_criterion_id(&arguments.criterion)?,
+        parse_evidence_id(&arguments.evidence)?,
+    )?;
+    response_with_guidance(start, "Criterion evidence attached.", report)
+}
+
+fn complete_task(start: &Path, arguments: CompleteArguments) -> Result<CommandResponse, MinoError> {
+    let command = mutation_command(
+        &["complete"],
+        &arguments.mutation,
+        vec!["--task".to_owned(), arguments.task.clone()],
+    );
+    let request = mutation_request(arguments.mutation, command)?;
+    let report = CompletionService::discover(start)?
+        .complete_task(request, parse_task_id(&arguments.task)?)?;
+    response_with_guidance(start, "Task execution completed.", report)
+}
+
+fn finish(start: &Path, arguments: FinishArguments) -> Result<CommandResponse, MinoError> {
+    let command = mutation_command(&["finish"], &arguments.mutation, Vec::new());
+    let request = mutation_request(arguments.mutation, command)?;
+    let report = CompletionService::discover(start)?.finish(request)?;
+    response_with_guidance(start, "Plan execution finished and entered Review.", report)
 }
 
 fn run_check(
@@ -295,6 +390,14 @@ fn parse_task_id(value: &str) -> Result<TaskId, MinoError> {
 
 fn parse_check_id(value: &str) -> Result<CheckId, MinoError> {
     CheckId::parse(value).map_err(|error| domain_error(&error))
+}
+
+fn parse_criterion_id(value: &str) -> Result<CriterionId, MinoError> {
+    CriterionId::parse(value).map_err(|error| domain_error(&error))
+}
+
+fn parse_evidence_id(value: &str) -> Result<EvidenceId, MinoError> {
+    EvidenceId::parse(value).map_err(|error| domain_error(&error))
 }
 
 fn parse_request_id(value: &str) -> Result<RequestId, MinoError> {

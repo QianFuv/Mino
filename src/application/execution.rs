@@ -225,7 +225,7 @@ impl ExecutionService {
         request: &PlanMutationRequest,
         check_id: &CheckId,
     ) -> Result<CheckExecutionReport, MinoError> {
-        let current = self.plans.load_verified(&request.plan_id)?;
+        let current = self.plans.load_stored(&request.plan_id)?;
         let selected = select_check(&current, check_id)?;
         validate_invocation(&self.root, &selected.check)?;
         let changed_prefix = selected.changed_prefix(check_id);
@@ -335,7 +335,7 @@ impl ExecutionService {
                 "Expected revision overflowed",
             )
         })?;
-        let current = self.plans.load_verified(&request.plan_id)?;
+        let current = self.plans.load_stored(&request.plan_id)?;
         if current.revision() > target_revision {
             self.plans.replay_semantic(request, changed_fields)
         } else {

@@ -503,8 +503,22 @@ impl PlanService {
         self.store
             .replay(&request.plan_id, &store_request)
             .map_err(|error| map_store_error(&error))?;
-        let plan = self.load_verified(&request.plan_id)?;
+        let plan = self
+            .store
+            .load_plan(&request.plan_id)
+            .map_err(|error| map_store_error(&error))?;
         let rendered = render_plan(&plan).map_err(|error| map_render_error(&error))?;
+        let path = projection_path(&self.root, &plan)?;
+        let projection =
+            check_projection(&path, &rendered).map_err(|error| map_render_error(&error))?;
+        match projection.status() {
+            ProjectionStatus::Current => {}
+            ProjectionStatus::Missing => {
+                write_projection(&path, &rendered, None)
+                    .map_err(|error| map_render_error(&error))?;
+            }
+            ProjectionStatus::Drifted => return Err(projection_drift_error(&path)),
+        }
         Ok(operation_report(&plan, &rendered, true, None))
     }
 
@@ -630,6 +644,13 @@ impl PlanService {
             return Err(projection_drift_error(&path));
         }
         Ok(plan)
+    }
+
+    /// Loads current machine state without asserting projection availability.
+    pub(crate) fn load_stored(&self, plan_id: &PlanId) -> Result<Plan, MinoError> {
+        self.store
+            .load_plan(plan_id)
+            .map_err(|error| map_store_error(&error))
     }
 
     /// Loads one immutable historical snapshot for retry reconciliation.

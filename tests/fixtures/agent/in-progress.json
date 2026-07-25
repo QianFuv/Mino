@@ -13,13 +13,14 @@
   "allowed_actions": [
     "exec.check.run",
     "exec.checkpoint",
+    "exec.criterion.pass",
     "exec.complete",
     "exec.block"
   ],
   "blocked_actions": [
     {
       "action": "git.commit",
-      "reason": "Task verification is incomplete"
+      "reason": "Task verification or completion is incomplete"
     }
   ],
   "standards": [],

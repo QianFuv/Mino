@@ -29,6 +29,8 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("exec.check.run", true, false),
     ("exec.checkpoint", true, false),
     ("exec.complete", true, false),
+    ("exec.criterion.pass", true, false),
+    ("exec.finish", true, false),
     ("exec.resume", true, false),
     ("exec.start", true, false),
     ("plan.apply", true, false),
@@ -312,19 +314,7 @@ fn guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
     match plan.status() {
         PlanStatus::Draft => draft_guidance(root, plan),
         PlanStatus::Ready => Ok(ready_guidance(plan)),
-        PlanStatus::InProgress => Ok(Guidance {
-            allowed_actions: action_ids(&[
-                "exec.check.run",
-                "exec.checkpoint",
-                "exec.complete",
-                "exec.block",
-            ]),
-            blocked_actions: vec![blocked("git.commit", "Task verification is incomplete")],
-            approval_required: false,
-            next_actions: next_execution_check(plan)
-                .map(|check_id| vec![check_action(plan, check_id)])
-                .unwrap_or_default(),
-        }),
+        PlanStatus::InProgress => Ok(in_progress_guidance(plan)),
         PlanStatus::Blocked => Ok(Guidance {
             allowed_actions: action_ids(&["exec.resume"]),
             blocked_actions: vec![blocked(
@@ -449,6 +439,65 @@ fn ready_guidance(plan: &Plan) -> Guidance {
     }
 }
 
+fn in_progress_guidance(plan: &Plan) -> Guidance {
+    let active = plan
+        .tasks()
+        .iter()
+        .find(|task| task.status() == TaskStatus::InProgress);
+    let (allowed_actions, next_actions) = if let Some(task) = active {
+        let next_actions = next_execution_check(plan).map_or_else(
+            || {
+                if task.acceptance_criteria().iter().any(|criterion| {
+                    !matches!(
+                        criterion.status(),
+                        crate::domain::CriterionStatus::Passed
+                            | crate::domain::CriterionStatus::AcceptedException
+                    )
+                }) {
+                    vec![evidence_list_action(plan, task.id())]
+                } else {
+                    vec![complete_action(plan, task.id())]
+                }
+            },
+            |check_id| vec![check_action(plan, check_id)],
+        );
+        (
+            action_ids(&[
+                "exec.check.run",
+                "exec.checkpoint",
+                "exec.criterion.pass",
+                "exec.complete",
+                "exec.block",
+            ]),
+            next_actions,
+        )
+    } else if let Some(task_id) = first_incomplete_task(plan) {
+        (
+            action_ids(&["exec.start", "exec.block"]),
+            vec![start_action(plan, task_id)],
+        )
+    } else if let Some(check_id) = next_execution_check(plan) {
+        (
+            action_ids(&["exec.check.run", "exec.block"]),
+            vec![check_action(plan, check_id)],
+        )
+    } else {
+        (
+            action_ids(&["exec.finish", "exec.block"]),
+            vec![finish_action(plan)],
+        )
+    };
+    Guidance {
+        allowed_actions,
+        blocked_actions: vec![blocked(
+            "git.commit",
+            "Task verification or completion is incomplete",
+        )],
+        approval_required: false,
+        next_actions,
+    }
+}
+
 fn active_task(plan: &Plan) -> Option<TaskId> {
     plan.tasks()
         .iter()
@@ -483,6 +532,37 @@ fn check_action(plan: &Plan, check_id: &CheckId) -> NextAction {
         &["exec", "check", "run"],
         vec!["--check".to_owned(), check_id.to_string()],
     )
+}
+
+fn complete_action(plan: &Plan, task_id: &TaskId) -> NextAction {
+    mutation_action(
+        plan,
+        "exec.complete",
+        &["exec", "complete"],
+        vec!["--task".to_owned(), task_id.to_string()],
+    )
+}
+
+fn finish_action(plan: &Plan) -> NextAction {
+    mutation_action(plan, "exec.finish", &["exec", "finish"], Vec::new())
+}
+
+fn evidence_list_action(plan: &Plan, task_id: &TaskId) -> NextAction {
+    NextAction {
+        id: "evidence.list".to_owned(),
+        argv: vec![
+            "mino".to_owned(),
+            "evidence".to_owned(),
+            "list".to_owned(),
+            "--plan".to_owned(),
+            plan.id().to_string(),
+            "--task".to_owned(),
+            task_id.to_string(),
+            "--format".to_owned(),
+            "json".to_owned(),
+            "--no-input".to_owned(),
+        ],
+    }
 }
 
 fn next_execution_check(plan: &Plan) -> Option<&CheckId> {

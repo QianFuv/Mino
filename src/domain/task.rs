@@ -125,6 +125,14 @@ impl AcceptanceCriterion {
     }
 
     fn record_pass(&mut self, evidence_id: EvidenceId) -> Result<(), DomainError> {
+        self.record_evidence(evidence_id, false)
+    }
+
+    fn record_evidence(
+        &mut self,
+        evidence_id: EvidenceId,
+        is_accepted_exception: bool,
+    ) -> Result<(), DomainError> {
         if self.evidence_refs.contains(&evidence_id) {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
@@ -134,7 +142,11 @@ impl AcceptanceCriterion {
                 ),
             ));
         }
-        self.status = CriterionStatus::Passed;
+        self.status = if is_accepted_exception {
+            CriterionStatus::AcceptedException
+        } else {
+            CriterionStatus::Passed
+        };
         self.evidence_refs.push(evidence_id);
         Ok(())
     }
@@ -790,6 +802,32 @@ impl Task {
                 )
             })?;
         criterion.record_pass(evidence_id)
+    }
+
+    pub(crate) fn record_criterion_evidence(
+        &mut self,
+        criterion_id: &CriterionId,
+        evidence_id: EvidenceId,
+        is_accepted_exception: bool,
+    ) -> Result<(), DomainError> {
+        if self.status != TaskStatus::InProgress {
+            return Err(self.invalid_transition("record criterion evidence"));
+        }
+        let criterion = self
+            .acceptance_criteria
+            .iter_mut()
+            .find(|criterion| &criterion.id == criterion_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no criterion {criterion_id}", self.id),
+                )
+            })?;
+        if is_accepted_exception {
+            criterion.record_evidence(evidence_id, true)
+        } else {
+            criterion.record_pass(evidence_id)
+        }
     }
 
     pub(crate) fn record_check_pass(
