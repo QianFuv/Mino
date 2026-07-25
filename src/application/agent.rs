@@ -25,6 +25,9 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("agent.capabilities", false, false),
     ("agent.context", false, false),
     ("agent.next", false, false),
+    ("evidence.add", true, false),
+    ("evidence.list", false, false),
+    ("evidence.show", false, false),
     ("exec.block", true, false),
     ("exec.check.run", true, false),
     ("exec.checkpoint", true, false),
@@ -58,9 +61,6 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("project.migrate.legacy", false, false),
     ("project.scan", false, false),
     ("project.show", false, false),
-    ("review.accept", true, true),
-    ("review.record", true, false),
-    ("review.rework", true, false),
     ("protocol.migrate", true, false),
     ("protocol.status", false, false),
     ("standards.apply", false, false),
@@ -141,7 +141,7 @@ pub struct AgentNextReport {
 pub struct AgentCapability {
     /// Stable canonical action identifier.
     pub id: String,
-    /// Whether the action can create a new plan revision.
+    /// Whether the action requires revision and request-ID mutation policy.
     pub mutates: bool,
     /// Whether the Agent must stop for explicit user approval before invocation.
     pub approval_boundary: bool,
