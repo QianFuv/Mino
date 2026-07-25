@@ -1,0 +1,17 @@
+{
+  "bundle_version": 1,
+  "protocol_version": "2026-05-11",
+  "protocol_revision": "review-rework-git-flow-v1",
+  "schema_version": 1,
+  "renderer_version": 2,
+  "resources": [
+    {
+      "name": "PLAN_EXECUTION.md",
+      "sha256": "sha256:08076f7ecb2892bdb416c00b170af9d53a835bb5a7e7580f768059d318d1976a"
+    },
+    {
+      "name": "PLAN_TEMPLATE.md",
+      "sha256": "sha256:73b55c3b64acc7e890464e180a4546b37c288984594f979e49dc117b7b634e9f"
+    }
+  ]
+}

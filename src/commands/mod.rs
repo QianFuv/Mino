@@ -5,6 +5,7 @@ pub(crate) mod evidence;
 pub(crate) mod exec;
 pub(crate) mod plan;
 pub(crate) mod project;
+pub(crate) mod protocol;
 pub(crate) mod standards;
 
 use serde_json::Value;

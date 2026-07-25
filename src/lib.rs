@@ -20,6 +20,8 @@ pub mod input;
 pub mod output;
 /// Project discovery, initialization, inspection, and diagnosis services.
 pub mod project;
+/// Embedded planning protocol resources and explicit migration registry.
+pub mod protocol;
 /// Deterministic managed Markdown projection and drift detection.
 pub mod render;
 /// Bounded no-shell process execution and recoverable run journals.

@@ -13,6 +13,7 @@ use crate::commands::evidence::{self, EvidenceAction};
 use crate::commands::exec::{self, ExecAction};
 use crate::commands::plan::{self, PlanAction};
 use crate::commands::project::{self, ProjectAction};
+use crate::commands::protocol::{self, ProtocolAction};
 use crate::commands::standards::{self, StandardsAction};
 use crate::{ErrorCategory, MinoError, MinoResult, OutputFormat};
 
@@ -45,6 +46,8 @@ enum Command {
     Evidence(EvidenceArguments),
     /// Execute approved plans with ordered evidence gates.
     Exec(ExecArguments),
+    /// Inspect embedded protocol compatibility and explicit migrations.
+    Protocol(ProtocolArguments),
 }
 
 #[derive(Debug, Args)]
@@ -81,6 +84,12 @@ struct EvidenceArguments {
 struct ExecArguments {
     #[command(subcommand)]
     action: ExecAction,
+}
+
+#[derive(Debug, Args)]
+struct ProtocolArguments {
+    #[command(subcommand)]
+    action: ProtocolAction,
 }
 
 enum CliResponse {
@@ -131,6 +140,9 @@ fn execute(cli: Cli) -> Result<CliResponse, MinoError> {
             .map(crate::commands::CommandResponse::into_result)
             .map(CliResponse::Result),
         Some(Command::Exec(arguments)) => exec::execute(&start, arguments.action)
+            .map(crate::commands::CommandResponse::into_result)
+            .map(CliResponse::Result),
+        Some(Command::Protocol(arguments)) => protocol::execute(&start, arguments.action)
             .map(crate::commands::CommandResponse::into_result)
             .map(CliResponse::Result),
         None => Ok(CliResponse::Result(MinoResult::success(

@@ -2,6 +2,7 @@
 
 mod config;
 mod doctor;
+mod migrate;
 mod root;
 mod scan;
 
@@ -10,12 +11,17 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::protocol::ProtocolRegistry;
 use crate::{ErrorCategory, MinoError};
 
 pub use config::{
     CatalogConfig, LockedStandard, ProjectConfig, ProjectLayout, ProtocolLock, StandardsLock,
 };
 pub use doctor::{DoctorFinding, DoctorReport, FindingSeverity, diagnose};
+pub use migrate::{
+    LegacyDocumentKind, LegacyFinding, LegacyInput, LegacyMapping, LegacyMappingDisposition,
+    LegacyMigrationReport, LegacyProposedChange, LegacySourceSummary, analyze_legacy,
+};
 pub use root::{ProjectRoot, RootSource, discover, discover_for_init};
 pub use scan::{Language, LanguageScore, ProjectScan, ScanEvidence, WorkspaceScan, scan_root};
 
@@ -70,6 +76,12 @@ pub struct ProjectShowReport {
 /// Returns an environment-unavailable error when root discovery or filesystem
 /// creation fails. Existing corrupt files are preserved and reported.
 pub fn initialize(start: &Path) -> Result<ProjectInitReport, MinoError> {
+    ProtocolRegistry::current().map_err(|error| {
+        MinoError::new(
+            ErrorCategory::DriftDetected,
+            format!("Cannot initialize with an invalid protocol bundle: {error}"),
+        )
+    })?;
     let project_root = discover_for_init(start)?;
     let layout = ProjectLayout::new(project_root.path());
     fs::create_dir_all(layout.plans_directory()).map_err(|error| {

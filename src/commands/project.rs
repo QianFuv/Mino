@@ -1,15 +1,15 @@
 //! Project lifecycle CLI command adapter.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::commands::CommandResponse;
-use crate::project::{self, DoctorFinding};
+use crate::project::{self, DoctorFinding, LegacyDocumentKind, LegacyInput};
 use crate::{ErrorCategory, MinoError, NextAction};
 
-#[derive(Clone, Copy, Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub(crate) enum ProjectAction {
     /// Initialize missing local Mino project state without network or Git mutation.
     Init,
@@ -19,6 +19,33 @@ pub(crate) enum ProjectAction {
     Doctor,
     /// Scan workspaces and return evidence-based language rankings.
     Scan,
+    /// Analyze legacy planning workflow documents without modifying them.
+    Migrate(MigrateArguments),
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct MigrateArguments {
+    #[command(subcommand)]
+    action: MigrateAction,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum MigrateAction {
+    /// Map legacy AGENTS, plan template, and execution guide content.
+    Legacy(LegacyArguments),
+}
+
+#[derive(Clone, Debug, Args)]
+struct LegacyArguments {
+    /// Legacy repository AGENTS document.
+    #[arg(long)]
+    agents: Option<PathBuf>,
+    /// Legacy planning template document.
+    #[arg(long)]
+    template: Option<PathBuf>,
+    /// Legacy plan execution guide document.
+    #[arg(long)]
+    execution: Option<PathBuf>,
 }
 
 pub(crate) fn execute(start: &Path, action: ProjectAction) -> Result<CommandResponse, MinoError> {
@@ -70,7 +97,46 @@ pub(crate) fn execute(start: &Path, action: ProjectAction) -> Result<CommandResp
             Vec::new(),
             Vec::new(),
         ),
+        ProjectAction::Migrate(arguments) => match arguments.action {
+            MigrateAction::Legacy(arguments) => migrate_legacy(arguments),
+        },
     }
+}
+
+fn migrate_legacy(arguments: LegacyArguments) -> Result<CommandResponse, MinoError> {
+    let mut inputs = Vec::new();
+    if let Some(path) = arguments.agents {
+        inputs.push(LegacyInput {
+            kind: LegacyDocumentKind::Agents,
+            path,
+        });
+    }
+    if let Some(path) = arguments.template {
+        inputs.push(LegacyInput {
+            kind: LegacyDocumentKind::PlanTemplate,
+            path,
+        });
+    }
+    if let Some(path) = arguments.execution {
+        inputs.push(LegacyInput {
+            kind: LegacyDocumentKind::PlanExecution,
+            path,
+        });
+    }
+    let report = project::analyze_legacy(&inputs)?;
+    let complete = report.findings.is_empty();
+    let missing = report
+        .findings
+        .iter()
+        .map(|finding| finding.code.clone())
+        .collect();
+    response(
+        "Legacy planning workflow analyzed without modifying source files.",
+        complete,
+        report,
+        missing,
+        Vec::new(),
+    )
 }
 
 fn response<T: Serialize>(
