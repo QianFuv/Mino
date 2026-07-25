@@ -49,8 +49,10 @@ return to the required workflow and follow the CLI's canonical next actions.
 - Never infer approval from plan completeness, conversation tone, or a prior
   task. Read [approval-boundaries.md](references/approval-boundaries.md) before
   approval, exception, review/rework, or plan-scoped Git operations.
-- Do not run an unsupported or hidden Git mutation. Mino v0.1 records commit
-  gates but does not expose a Git mutation command.
+- Do not run an unsupported or hidden Git mutation. Invoke branch creation only
+  after its separate explicit approval, and invoke task commit only through an
+  exact returned `git.commit` argv under current Approved Git Flow consent.
+  Never substitute manual staging, commit, cleanup, or destructive Git commands.
 - Never use bundled protocol Markdown as a fallback workflow.
 
 ## References

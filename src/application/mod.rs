@@ -12,5 +12,7 @@ pub mod execution;
 pub mod git_binding;
 /// Approval-gated Git branch proposal, creation, and recovery service.
 pub mod git_branch;
+/// Recoverable plan-scoped Git task-commit service.
+pub mod git_commit;
 /// Plan authoring and read-side application service.
 pub mod plan;

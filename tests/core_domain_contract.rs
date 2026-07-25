@@ -99,6 +99,19 @@ fn satisfy_global(plan: &mut Plan, evidence: u16, minute: u8) {
     .expect("global evidence should be recorded");
 }
 
+fn satisfy_commit(plan: &mut Plan, task_id: &TaskId, evidence: u16, minute: u8) {
+    let commit_digit = char::from_digit(u32::from(evidence % 16), 16)
+        .expect("commit fixture digit should be hexadecimal");
+    plan.record_task_commit(
+        task_id,
+        &commit_digit.to_string().repeat(40),
+        vec![format!("src/domain/{task_id}.rs")],
+        evidence_id(&format!("E{evidence:04}")),
+        timestamp(minute),
+    )
+    .expect("task commit should be recorded");
+}
+
 fn approved_two_task_plan() -> (Plan, TaskId, TaskId) {
     let first_id = task_id("T1");
     let second_id = task_id("T2");
@@ -351,11 +364,12 @@ fn plan_lifecycle_requires_approval_and_preserves_legal_order() {
     satisfy_task(&mut plan, &first_id, 1, 8);
     plan.complete_task(&first_id, timestamp(10))
         .expect("active task should complete");
-    satisfy_global(&mut plan, 3, 11);
-    plan.finish_execution(timestamp(12))
+    satisfy_commit(&mut plan, &first_id, 3, 11);
+    satisfy_global(&mut plan, 4, 12);
+    plan.finish_execution(timestamp(13))
         .expect("completed plan should enter review");
     assert_eq!(plan.status(), PlanStatus::Review);
-    plan.accept_review(timestamp(13))
+    plan.accept_review(timestamp(14))
         .expect("reviewed plan should complete");
     assert_eq!(plan.status(), PlanStatus::Done);
     plan.validate_invariants()
@@ -381,13 +395,15 @@ fn only_the_first_dependency_complete_task_can_run() {
     satisfy_task(&mut plan, &first_id, 1, 10);
     plan.complete_task(&first_id, timestamp(12))
         .expect("first task should complete");
-    plan.start_task(&second_id, timestamp(13))
+    satisfy_commit(&mut plan, &first_id, 3, 13);
+    plan.start_task(&second_id, timestamp(14))
         .expect("dependency-complete second task should start");
-    satisfy_task(&mut plan, &second_id, 3, 14);
-    plan.complete_task(&second_id, timestamp(16))
+    satisfy_task(&mut plan, &second_id, 4, 15);
+    plan.complete_task(&second_id, timestamp(17))
         .expect("second task should complete");
-    satisfy_global(&mut plan, 5, 17);
-    plan.finish_execution(timestamp(18))
+    satisfy_commit(&mut plan, &second_id, 6, 18);
+    satisfy_global(&mut plan, 7, 19);
+    plan.finish_execution(timestamp(20))
         .expect("plan should enter review");
     plan.validate_invariants()
         .expect("ordered lifecycle should satisfy invariants");
@@ -435,10 +451,11 @@ fn blocked_execution_resumes_and_review_rework_reopens_a_task() {
     satisfy_task(&mut plan, &first_id, 1, 9);
     plan.complete_task(&first_id, timestamp(11))
         .expect("resumed task should complete");
-    satisfy_global(&mut plan, 3, 12);
-    plan.finish_execution(timestamp(13))
+    satisfy_commit(&mut plan, &first_id, 3, 12);
+    satisfy_global(&mut plan, 4, 13);
+    plan.finish_execution(timestamp(14))
         .expect("plan should enter review");
-    plan.begin_rework(&first_id, timestamp(14))
+    plan.begin_rework(&first_id, timestamp(15))
         .expect("review should reopen the task");
     assert_eq!(plan.status(), PlanStatus::InProgress);
     assert_eq!(
@@ -446,14 +463,14 @@ fn blocked_execution_resumes_and_review_rework_reopens_a_task() {
         Some(TaskStatus::Ready)
     );
 
-    plan.start_task(&first_id, timestamp(15))
+    plan.start_task(&first_id, timestamp(16))
         .expect("rework task should start");
     let reused_evidence_error = plan
         .record_task_criterion_pass(
             &first_id,
             &criterion_id("T1-A1"),
             evidence_id("E0001"),
-            timestamp(16),
+            timestamp(17),
         )
         .expect_err("rework must not reuse prior evidence");
     assert_eq!(
@@ -461,21 +478,21 @@ fn blocked_execution_resumes_and_review_rework_reopens_a_task() {
         DomainErrorKind::InvariantViolation
     );
     let stale_evidence_error = plan
-        .complete_task(&first_id, timestamp(16))
+        .complete_task(&first_id, timestamp(17))
         .expect_err("rework should require fresh passing state");
     assert_eq!(
         stale_evidence_error.kind(),
         DomainErrorKind::InvariantViolation
     );
-    satisfy_task(&mut plan, &first_id, 4, 17);
-    plan.complete_task(&first_id, timestamp(19))
+    satisfy_task(&mut plan, &first_id, 5, 18);
+    plan.complete_task(&first_id, timestamp(20))
         .expect("rework task should complete");
     let global_error = plan
-        .finish_execution(timestamp(20))
+        .finish_execution(timestamp(21))
         .expect_err("rework should require global verification again");
     assert_eq!(global_error.kind(), DomainErrorKind::InvariantViolation);
-    satisfy_global(&mut plan, 6, 21);
-    plan.finish_execution(timestamp(22))
+    satisfy_global(&mut plan, 7, 22);
+    plan.finish_execution(timestamp(23))
         .expect("reworked plan should return to review");
     plan.accept_review(timestamp(23))
         .expect("reworked plan should be accepted");
@@ -524,6 +541,14 @@ fn completion_gates_and_deserialization_reject_forged_state() {
     forged_plan["status"] = Value::from("Done");
     assert!(serde_json::from_value::<Plan>(forged_plan).is_err());
 
+    let mut forged_commit_gate = serde_json::to_value(
+        plan.task(&first_id)
+            .expect("completed task should remain available"),
+    )
+    .expect("completed task should serialize");
+    forged_commit_gate["commit_gate"]["status"] = Value::from("Committed");
+    assert!(serde_json::from_value::<Task>(forged_commit_gate).is_err());
+
     let mut forged_task =
         serde_json::to_value(configured_task(first_id, "Forged task", Vec::new()))
             .expect("task should serialize");
@@ -563,30 +588,32 @@ fn transition_matrix_rejects_commands_outside_their_legal_states() {
     satisfy_task(&mut plan, &first_id, 1, 10);
     plan.complete_task(&first_id, timestamp(12))
         .expect("first task should complete");
-    plan.start_task(&second_id, timestamp(13))
+    satisfy_commit(&mut plan, &first_id, 3, 13);
+    plan.start_task(&second_id, timestamp(14))
         .expect("second task should start");
-    satisfy_task(&mut plan, &second_id, 3, 14);
-    plan.complete_task(&second_id, timestamp(16))
+    satisfy_task(&mut plan, &second_id, 4, 15);
+    plan.complete_task(&second_id, timestamp(17))
         .expect("second task should complete");
-    satisfy_global(&mut plan, 5, 17);
-    plan.finish_execution(timestamp(18))
+    satisfy_commit(&mut plan, &second_id, 6, 18);
+    satisfy_global(&mut plan, 7, 19);
+    plan.finish_execution(timestamp(20))
         .expect("plan should enter review");
-
-    assert_invalid_transition(plan.start_task(&first_id, timestamp(19)));
-    assert_invalid_transition(plan.complete_task(&first_id, timestamp(19)));
-    assert_invalid_transition(plan.finish_execution(timestamp(19)));
-    assert_invalid_transition(plan.block("too late", timestamp(19)));
-    assert_invalid_transition(plan.resume(timestamp(19)));
-    plan.accept_review(timestamp(20))
-        .expect("review should be accepted");
 
     assert_invalid_transition(plan.start_task(&first_id, timestamp(21)));
     assert_invalid_transition(plan.complete_task(&first_id, timestamp(21)));
     assert_invalid_transition(plan.finish_execution(timestamp(21)));
-    assert_invalid_transition(plan.begin_rework(&first_id, timestamp(21)));
-    assert_invalid_transition(plan.accept_review(timestamp(21)));
-    assert_invalid_transition(plan.block("complete", timestamp(21)));
+    assert_invalid_transition(plan.block("too late", timestamp(21)));
     assert_invalid_transition(plan.resume(timestamp(21)));
+    plan.accept_review(timestamp(22))
+        .expect("review should be accepted");
+
+    assert_invalid_transition(plan.start_task(&first_id, timestamp(23)));
+    assert_invalid_transition(plan.complete_task(&first_id, timestamp(23)));
+    assert_invalid_transition(plan.finish_execution(timestamp(23)));
+    assert_invalid_transition(plan.begin_rework(&first_id, timestamp(23)));
+    assert_invalid_transition(plan.accept_review(timestamp(23)));
+    assert_invalid_transition(plan.block("complete", timestamp(23)));
+    assert_invalid_transition(plan.resume(timestamp(23)));
 }
 
 #[test]

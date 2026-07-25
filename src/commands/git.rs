@@ -6,8 +6,9 @@ use clap::{Args, Subcommand};
 
 use crate::application::git_binding::GitBindingService;
 use crate::application::git_branch::GitBranchService;
+use crate::application::git_commit::GitCommitService;
 use crate::commands::CommandResponse;
-use crate::domain::PlanId;
+use crate::domain::{PlanId, TaskId};
 use crate::{ErrorCategory, MinoError};
 
 #[derive(Debug, Subcommand)]
@@ -18,6 +19,8 @@ pub(crate) enum GitAction {
     Bind(BindArguments),
     /// Propose or create the deterministic Git branch for a plan.
     Branch(BranchArguments),
+    /// Create or recover one approved task-level commit.
+    Commit(CommitArguments),
 }
 
 #[derive(Debug, Args)]
@@ -71,6 +74,16 @@ struct BranchCreateArguments {
     branch: Option<String>,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct CommitArguments {
+    /// Approved plan containing the task commit gate.
+    #[arg(long)]
+    plan: String,
+    /// Done task whose exact commit gate should execute.
+    #[arg(long)]
+    task: String,
+}
+
 pub(crate) fn execute(start: &Path, action: GitAction) -> Result<CommandResponse, MinoError> {
     let service = GitBindingService::discover(start)?;
     let (message, payload) = match action {
@@ -93,6 +106,13 @@ pub(crate) fn execute(start: &Path, action: GitAction) -> Result<CommandResponse
             )
         }
         GitAction::Branch(arguments) => execute_branch(start, arguments.action)?,
+        GitAction::Commit(arguments) => (
+            "Task commit created, evidenced, and recorded.",
+            serde_json::to_value(GitCommitService::discover(start)?.commit(
+                &parse_plan_id(&arguments.plan)?,
+                &parse_task_id(&arguments.task)?,
+            )?),
+        ),
     };
     let payload = payload.map_err(|error| {
         MinoError::new(
@@ -132,5 +152,10 @@ fn execute_branch(
 
 fn parse_plan_id(value: &str) -> Result<PlanId, MinoError> {
     PlanId::parse(value)
+        .map_err(|error| MinoError::new(ErrorCategory::IncompleteOrValidation, error.to_string()))
+}
+
+fn parse_task_id(value: &str) -> Result<TaskId, MinoError> {
+    TaskId::parse(value)
         .map_err(|error| MinoError::new(ErrorCategory::IncompleteOrValidation, error.to_string()))
 }

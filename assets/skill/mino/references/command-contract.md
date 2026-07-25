@@ -48,6 +48,17 @@ disables repository hooks, creates/switches only that local branch at the exact
 captured base, then binds it after post-state verification. Follow returned
 errors; never delete refs, locks, or intent files to force a retry.
 
+Use `mino git commit --plan <id> --task <task-id> --format json --no-input`
+only when returned by Agent context for the first Done task with a pending
+required commit gate. It is already bounded by the current plan approval and
+Approved Git Flow consent; do not request a second generic approval or rebuild
+the command. Mino refuses pre-staged, mixed, unrelated, or out-of-scope changes,
+then journals snapshots, stages exact task paths, runs normal commit hooks with
+the exact planned message, verifies the commit, and records Commit evidence plus
+the gate. On a hook/Git failure, preserve the staged state, use the returned
+`exec resume` action, and retry the exact commit argv. Never reset, unstage,
+delete journals, use `--no-verify`, or create a replacement commit manually.
+
 ## Initial creation
 
 Only when the user explicitly requests formal or durable planning and context
@@ -67,6 +78,8 @@ managed Markdown. Use a fresh UUID for each distinct mutation and the current
 Prefer a returned `exec check run` action for planned commands because it
 captures bounded process output and immutable evidence. Use returned
 checkpoint, criterion, complete, block, resume, and finish actions in order.
+When a completed task has a required commit gate, execute its returned
+`git commit` action before starting the next task or finishing the plan.
 Use `evidence add` only for supplemental files or observations that are not a
 planned check. Never mark a criterion or task complete without the evidence
 references required by the current plan.

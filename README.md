@@ -6,10 +6,11 @@ Markdown projections, ordered execution, immutable evidence, and explicit
 approval boundaries. It is not a template generator and does not contain an
 LLM.
 
-The current package is `mino 0.1.0`. It implements the lifecycle from project
-initialization through `Review`. Review acceptance/rework, Git mutation,
-worktrees, plan variants, scheduled observation, team catalogs, and plugin
-distribution are intentionally not v0.1 commands.
+The current package is `mino 0.1.0`. It contains the stable v0.1 lifecycle from
+project initialization through `Review` plus the v0.2 local Git increment:
+worktree-aware plan binding, explicitly approved branch creation, and exact
+plan-scoped task commits. Review acceptance/rework, plan variants, scheduled
+observation, team catalogs, and plugin distribution remain deferred.
 
 ## What v0.1 provides
 
@@ -27,11 +28,17 @@ distribution are intentionally not v0.1 commands.
   and `.gitignore`.
 - Stable JSON Agent context, next-action, and capability contracts.
 
+The v0.2 Git increment adds strict repository/worktree inspection, explicit
+active-plan binding, recoverable branch intents, and task commits constrained by
+Approved Git Flow consent, File Map, Commit Scope, exact message, evidence, and
+an empty initial index. It does not expose push, merge, rebase, reset, amend,
+force-push, tags, branch deletion, or worktree creation/deletion.
+
 ## Requirements and installation
 
 The crate targets Rust 1.96 with edition 2024. Git is optional for non-Git
-projects, but Git-backed plans can record readiness and use read-only File Map
-inspection.
+projects and required only for Git inspection, binding, branch, File Map, and
+task-commit workflows.
 
 ```text
 cargo build --release
@@ -81,8 +88,9 @@ and read context again. Stop whenever `approval_required` is true. Never edit
   `--request-id`.
 - Planned commands are launched directly as argv, never through a shell, with
   finite time/output limits and a minimal environment allowlist.
-- Mino performs no Git mutation in v0.1. Git Flow consent and commit gates are
-  auditable constraints, not a hidden commit permission or cryptographic
+- Core execution commands perform no Git mutation. The v0.2 `git` commands can
+  create only an explicitly approved deterministic branch or an eligible exact
+  task commit; Git Flow consent is auditable scope, not broad or cryptographic
   authorization.
 - Existing unowned Skills and malformed managed blocks are preserved.
 - Legacy migration produces a report and proposals; it never deletes or edits

@@ -224,7 +224,7 @@ fn validate_command_criterion(
     validate_passing_check_evidence(check, evidence)
 }
 
-fn validate_task_evidence(
+pub(crate) fn validate_task_evidence(
     plan: &Plan,
     task: &Task,
     evidence: &[Evidence],
@@ -450,7 +450,7 @@ fn compatible_change(change: FileChange, file: &ChangedFile) -> bool {
     }
 }
 
-fn validate_task_deviations(plan: &Plan, task: &Task) -> Result<(), MinoError> {
+pub(crate) fn validate_task_deviations(plan: &Plan, task: &Task) -> Result<(), MinoError> {
     if plan
         .execution_state()
         .map_err(|error| map_domain_error(&error))?
@@ -491,6 +491,15 @@ fn validate_global_evidence(plan: &Plan, evidence: &[Evidence]) -> Result<(), Mi
         .any(|task| task.status() != crate::domain::TaskStatus::Done)
     {
         return Err(incomplete("Every task must be Done before finish"));
+    }
+    if let Some(task) = plan.tasks().iter().find(|task| {
+        task.commit_gate()
+            .is_some_and(|gate| gate.is_required() && gate.status() != CommitStatus::Committed)
+    }) {
+        return Err(incomplete(format!(
+            "Task {} required commit gate is not Committed",
+            task.id()
+        )));
     }
     let superseded = superseded_ids(evidence);
     for check in plan

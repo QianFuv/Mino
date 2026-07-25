@@ -40,6 +40,7 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("git.bind", false, false),
     ("git.branch.create", false, true),
     ("git.branch.propose", false, false),
+    ("git.commit", false, false),
     ("git.inspect", false, false),
     ("plan.apply", true, false),
     ("plan.approve", true, true),
@@ -529,6 +530,7 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
         .tasks()
         .iter()
         .find(|task| task.status() == TaskStatus::InProgress);
+    let can_commit = pending_commit_task(plan).is_some();
     let (allowed_actions, next_actions) = if let Some(task) = active {
         let next_actions = next_execution_check(plan).map_or_else(
             || {
@@ -556,6 +558,11 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
             ]),
             next_actions,
         )
+    } else if let Some(task_id) = pending_commit_task(plan) {
+        (
+            action_ids(&["git.commit", "exec.block"]),
+            vec![commit_action(plan, task_id)],
+        )
     } else if let Some(task_id) = first_incomplete_task(plan) {
         (
             action_ids(&["exec.start", "exec.block"]),
@@ -574,10 +581,14 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
     };
     Guidance {
         allowed_actions,
-        blocked_actions: vec![blocked(
-            "git.commit",
-            "Task verification or completion is incomplete",
-        )],
+        blocked_actions: if can_commit {
+            Vec::new()
+        } else {
+            vec![blocked(
+                "git.commit",
+                "Task verification or completion is incomplete",
+            )]
+        },
         approval_required: false,
         next_actions,
     }
@@ -594,6 +605,22 @@ fn first_incomplete_task(plan: &Plan) -> Option<&TaskId> {
     plan.task_order().iter().find(|task_id| {
         plan.task(task_id)
             .is_some_and(|task| task.status() != TaskStatus::Done)
+    })
+}
+
+fn pending_commit_task(plan: &Plan) -> Option<&TaskId> {
+    plan.task_order().iter().find(|task_id| {
+        plan.task(task_id).is_some_and(|task| {
+            task.status() == TaskStatus::Done
+                && task.commit_gate().is_some_and(|gate| {
+                    gate.is_required()
+                        && matches!(
+                            gate.status(),
+                            crate::domain::CommitStatus::Pending
+                                | crate::domain::CommitStatus::Blocked
+                        )
+                })
+        })
     })
 }
 
@@ -630,6 +657,24 @@ fn complete_action(plan: &Plan, task_id: &TaskId) -> NextAction {
 
 fn finish_action(plan: &Plan) -> NextAction {
     mutation_action(plan, "exec.finish", &["exec", "finish"], Vec::new())
+}
+
+fn commit_action(plan: &Plan, task_id: &TaskId) -> NextAction {
+    NextAction {
+        id: "git.commit".to_owned(),
+        argv: vec![
+            "mino".to_owned(),
+            "git".to_owned(),
+            "commit".to_owned(),
+            "--plan".to_owned(),
+            plan.id().to_string(),
+            "--task".to_owned(),
+            task_id.to_string(),
+            "--format".to_owned(),
+            "json".to_owned(),
+            "--no-input".to_owned(),
+        ],
+    }
 }
 
 fn evidence_list_action(plan: &Plan, task_id: &TaskId) -> NextAction {

@@ -26,7 +26,7 @@ flowchart TD
 | Repository Mino Skill | Intent routing, CLI orchestration, approval stops | State transitions, direct managed-file edits, fallback templates |
 | CLI/application services | Commands, concurrency checks, policy gates, evidence binding | Requirement interpretation or hidden approvals |
 | Domain | Valid plan/task/check/criterion states and legal transitions | Filesystem, process, network, or Git side effects |
-| Git adapter and policy services | Read-only Git facts, worktree-local active identity, and one approval-gated prepared branch create | Index, commit, remote, destructive, or implicit mutation |
+| Git adapter and policy services | Read-only Git facts, worktree-local identity, one approval-gated branch create, and exact plan-scoped task commits | Remote, destructive, broad, or implicit Git mutation |
 | `.mino/` | Machine-readable source of truth and immutable history | User-authored documentation |
 | `docs/plan/*.md` | Human review projection | Source state or an editing surface |
 | Standards engine | Embedded packages, recommendation, check resolution, explicit sync | General dependency installation |
@@ -60,9 +60,14 @@ apply flags are present and marker ownership is valid.
 │   ├── active.lock                      bounded active-binding writer lock
 │   ├── git/
 │   │   ├── branch.lock                  bounded branch-operation lock
-│   │   └── branches/<plan-id>/
+│   │   ├── commit.lock                  bounded task-commit operation lock
+│   │   ├── branches/<plan-id>/
 │   │       ├── intent.json              immutable approval-bound branch intent
 │   │       └── completion.json          immutable terminal branch result
+│   │   └── commits/<plan-id>/<task-id>/
+│   │       ├── intent.json              immutable pre-index content snapshot
+│   │       ├── staged.json              immutable staged tree identity
+│   │       └── completion.json          immutable commit/evidence/plan result
 │   ├── cache/standards/                 verified immutable sync generations
 │   └── plans/<plan-id>/
 │       ├── plan.json                    current canonical aggregate
@@ -92,6 +97,7 @@ tracked like other stable repository instructions.
 | `.mino/active.json` | Versioned active-plan bindings; change only through `mino git bind`. |
 | `.mino/active.lock` | Advisory binding lock; Mino owns its lifecycle and contents. |
 | `.mino/git/branches/` | Immutable prepared/completed branch journals; manual editing is prohibited. |
+| `.mino/git/commits/` | Immutable prepared/staged/completed task-commit journals; manual editing is prohibited. |
 | `.mino/plans/` | Canonical plans, history, runs, and evidence; manual editing is prohibited. |
 | `docs/plan/` | Generated Markdown projections; manual editing is prohibited. |
 | `.agents/skills/mino/` | Stable bundled repository Skill; Mino updates only marker-owned bundle files. |
@@ -140,6 +146,31 @@ unchanged source state, an already-applied switch awaiting binding, and a
 completed operation, so it never creates the branch twice or silently cleans an
 unexpected Git state.
 
+## Recoverable task commits
+
+`mino git commit --plan <id> --task <id>` is eligible only for the first Done
+task whose required commit gate is not yet Committed. The plan must remain In
+Progress with current approval and Approved Git Flow consent; the current
+same-worktree binding, branch, HEAD parent, task evidence, File Map, Commit
+Scope, and exact planned message must all match. The policy rejects any initial
+index entry, unrelated or mixed change, rename, unmerged/submodule path,
+symlink/directory, clean filter, Mino-owned path, or content drift.
+
+After pure preflight, Mino captures bounded SHA-256 snapshots and atomically
+publishes `intent.json` before touching the index. It stages only resolved exact
+paths with `git add --`, confirms that no unstaged content remains, writes and
+records the index tree, and invokes `git commit` with the exact one-line message.
+Commit hooks remain enabled. The result is accepted only when one new commit has
+the prepared parent/tree/message/files; immutable Commit evidence and the task
+gate are recorded before terminal `completion.json` publication.
+
+The three immutable phases make external mutation recoverable. A failed hook or
+Git command leaves the prepared task paths staged and blocks the plan without a
+reset or unstage. After `exec resume`, retry verifies the same staged tree. If
+HEAD advanced before evidence, plan, or completion publication, retry inspects
+the existing commit and completes those records without creating another
+commit. A completed journal replays without Git or plan mutation.
+
 ## Plan and task lifecycle
 
 ```mermaid
@@ -156,11 +187,12 @@ stateDiagram-v2
 ```
 
 Finalization changes every Draft task to Ready. Only the first dependency-ready
-task may start, and at most one task may be In Progress or Blocked. A task moves
+task may start, every earlier required task commit must already be Committed,
+and at most one task may be In Progress or Blocked. A task moves
 to Done only after its planned checks, compatible criterion evidence, checkpoint
 requirements, unresolved-deviation checks, and changed-file File Map gate pass.
-`exec finish` requires every task Done and all required global checks passed,
-then moves the plan to Review.
+`exec finish` requires every task Done, every required task commit gate
+Committed, and all required global checks passed, then moves the plan to Review.
 
 The domain includes a `Done` state and review classifications for forward
 schema compatibility, but v0.1 has no CLI transition from Review to Done and no

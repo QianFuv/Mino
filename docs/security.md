@@ -24,6 +24,9 @@ deployment, or messaging operations.
 - `.mino/git/branches/**` contains immutable approval-bound branch intents and
   completions. Prepared records are recovery state, not permission to alter or
   delete Git data manually.
+- `.mino/git/commits/**` contains immutable content snapshots, staged-tree
+  identities, and terminal task-commit results. Do not edit these records or use
+  them as permission for a broader commit.
 - `docs/plan/*.md` is a digest-checked projection. Manual changes cause drift
   and are preserved rather than overwritten.
 - Plan transactions, snapshots, events, run journals, evidence records, and
@@ -98,7 +101,7 @@ disable optional Git locks. `mino git inspect` writes nothing. `mino git bind`
 writes only `.mino/active.json` through a bounded lock and atomic replacement;
 it does not mutate Git state.
 
-`mino git branch create` is the sole implemented Git mutation. It requires an
+`mino git branch create` is the only branch/ref creation path. It requires an
 explicit approval reference, accepts only the deterministic proposed name,
 rechecks clean source/base/worktree identity, prepares an immutable recovery
 intent, disables repository hooks with a command-local `core.hooksPath`, and
@@ -107,10 +110,27 @@ intent or Git mutation. A failed or interrupted attempt preserves its intent
 and observed state for exact retry; Mino never resets, deletes, or cleans up the
 repository to conceal a partial external result.
 
-Mino does not yet stage, commit, push, merge, rebase, reset, amend, force-push,
-tag, delete branches, or create/delete worktrees. A plan's Git Flow consent and
-commit gate still constrain an external authorized commit workflow but do not
-yet execute it.
+`mino git commit` is the only index/commit mutation path. It requires a current
+approved plan with Approved Git Flow consent, a Done first-pending task, current
+same-worktree binding and authorized branch, exact parent HEAD, satisfied
+evidence, and changed paths inside both File Map and Commit Scope. Pure preflight
+rejects every pre-existing staged path, mixed index/worktree content,
+out-of-scope path, unsafe file kind, clean filter, and identity drift. After an
+immutable intent, Mino stages only explicit paths and runs the exact one-line
+message. Repository commit hooks run normally; Mino never uses `--no-verify`.
+Git receives null stdin, terminal prompting is disabled, and combined output and
+runtime are bounded. Hooks still execute as repository code with the Git
+process environment; review and secure them like any other local build script.
+
+If staging or a hook/commit fails, the exact staged state and immutable journal
+remain visible, and the plan becomes Blocked. Mino never resets, cleans, checks
+out, or unstages to hide the failure. An exact retry after `exec resume` verifies
+the recorded source/tree and reconciles an already-created commit before writing
+Commit evidence, the plan gate, and terminal completion. It never creates a
+second commit for the same journal.
+
+Mino does not push, merge, rebase, reset, amend, force-push, tag, delete
+branches, or create/delete worktrees.
 
 Active-plan selection requires the canonical common-directory and worktree to
 match. Branch bindings require the same branch; detached bindings require the
@@ -132,8 +152,10 @@ Agent consumers must use JSON/no-input mode and inspect `approval_required`,
 - `approval_required: true` or exit 4.
 - `git.branch.create`, unless the user explicitly approved that exact proposal
   and supplied the recorded approval reference.
-- An approval/exception/Git operation not already covered by explicit user and
-  repository policy.
+- An approval, exception, or Git operation not already covered by explicit user
+  and repository policy. A returned `git.commit` action is covered only by the
+  current plan's Approved Git Flow gate; branch creation still needs its own
+  explicit approval reference.
 - Exit 5 policy refusal, exit 8 drift/corruption, or malformed integration
   ownership.
 - A material change outside the approved plan outcome, File Map, criteria, or
@@ -143,8 +165,9 @@ Agent consumers must use JSON/no-input mode and inspect `approval_required`,
 Never approve on the user's behalf, infer authorization from conversational
 tone, copy the protocol template as a fallback, or fabricate plan/evidence
 state when Mino is unavailable. There is no hidden Git mutation path: local
-branch creation is exposed only as `git branch create`, while `git bind` is the
-declared Git-adjacent Mino-state write. There is no arbitrary status setter.
+branch creation is exposed only as `git branch create`, exact task commits only
+as `git commit`, and `git bind` is the declared Git-adjacent Mino-state write.
+There is no arbitrary status setter.
 
 ## Recovery guidance
 

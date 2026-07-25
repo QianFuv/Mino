@@ -1,6 +1,7 @@
 //! Task, criterion, verification, file-map, and commit-gate entities.
 
 use std::collections::BTreeSet;
+use std::path::{Component, Path};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -347,6 +348,131 @@ impl CommitGate {
     pub fn scope(&self) -> &[String] {
         &self.scope
     }
+
+    /// Returns the recorded full commit object ID.
+    #[must_use]
+    pub fn actual_commit(&self) -> Option<&str> {
+        self.actual_commit.as_deref()
+    }
+
+    /// Returns exact paths recorded in the task commit.
+    #[must_use]
+    pub fn committed_files(&self) -> &[String] {
+        &self.committed_files
+    }
+
+    /// Returns immutable evidence attached to the commit gate.
+    #[must_use]
+    pub fn evidence_refs(&self) -> &[EvidenceId] {
+        &self.evidence_refs
+    }
+
+    fn block(&mut self) -> Result<(), DomainError> {
+        if !self.required || !matches!(self.status, CommitStatus::Pending | CommitStatus::Blocked) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Only a pending required commit gate can be blocked",
+            ));
+        }
+        self.status = CommitStatus::Blocked;
+        Ok(())
+    }
+
+    fn record_commit(
+        &mut self,
+        commit: &str,
+        files: Vec<String>,
+        evidence_id: EvidenceId,
+    ) -> Result<(), DomainError> {
+        if !self.required || !matches!(self.status, CommitStatus::Pending | CommitStatus::Blocked) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Only a pending or blocked required commit gate can be committed",
+            ));
+        }
+        if !matches!(commit.len(), 40 | 64)
+            || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || files.is_empty()
+            || files.iter().any(|path| !is_safe_repository_path(path))
+            || !files.windows(2).all(|pair| pair[0] < pair[1])
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Committed task gate requires a full object ID and unique sorted files",
+            ));
+        }
+        self.status = CommitStatus::Committed;
+        self.actual_commit = Some(commit.to_ascii_lowercase());
+        self.committed_files = files;
+        self.evidence_refs.push(evidence_id);
+        Ok(())
+    }
+
+    fn validate(&self, task_status: TaskStatus) -> Result<(), DomainError> {
+        let has_terminal_data = self.actual_commit.is_some()
+            || !self.committed_files.is_empty()
+            || !self.evidence_refs.is_empty();
+        let is_valid = match self.status {
+            CommitStatus::NotRequired => !self.required && !has_terminal_data,
+            CommitStatus::Pending => self.required && !has_terminal_data,
+            CommitStatus::Skipped => {
+                self.required
+                    && task_status == TaskStatus::Done
+                    && self.actual_commit.is_none()
+                    && self.committed_files.is_empty()
+                    && self.evidence_refs.len() == 1
+            }
+            CommitStatus::Blocked => {
+                self.required && task_status == TaskStatus::Done && !has_terminal_data
+            }
+            CommitStatus::Committed => {
+                self.required
+                    && task_status != TaskStatus::Draft
+                    && !self.planned_message.trim().is_empty()
+                    && !self.scope.is_empty()
+                    && self.actual_commit.as_deref().is_some_and(|commit| {
+                        matches!(commit.len(), 40 | 64)
+                            && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            && commit == commit.to_ascii_lowercase()
+                    })
+                    && !self.committed_files.is_empty()
+                    && self
+                        .committed_files
+                        .iter()
+                        .all(|path| is_safe_repository_path(path))
+                    && self
+                        .committed_files
+                        .windows(2)
+                        .all(|pair| pair[0] < pair[1])
+                    && self.evidence_refs.len() == 1
+            }
+        };
+        if !is_valid {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Commit gate status and terminal evidence are inconsistent",
+            ));
+        }
+        if self.planned_message.contains(['\r', '\n'])
+            || self.scope.iter().any(|path| path.trim().is_empty())
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Commit gate message or scope is malformed",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn is_safe_repository_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && !value.contains('\\')
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 /// An ordered implementation unit inside a plan.
@@ -738,6 +864,41 @@ impl Task {
         Ok(())
     }
 
+    pub(crate) fn block_commit(&mut self) -> Result<(), DomainError> {
+        if self.status != TaskStatus::Done {
+            return Err(self.invalid_transition("block its commit gate"));
+        }
+        self.commit_gate
+            .as_mut()
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no commit gate", self.id),
+                )
+            })?
+            .block()
+    }
+
+    pub(crate) fn record_commit(
+        &mut self,
+        commit: &str,
+        files: Vec<String>,
+        evidence_id: EvidenceId,
+    ) -> Result<(), DomainError> {
+        if self.status != TaskStatus::Done {
+            return Err(self.invalid_transition("record its Git commit"));
+        }
+        self.commit_gate
+            .as_mut()
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no commit gate", self.id),
+                )
+            })?
+            .record_commit(commit, files, evidence_id)
+    }
+
     pub(crate) fn block(&mut self, reason: impl Into<String>) -> Result<(), DomainError> {
         if self.status != TaskStatus::InProgress {
             return Err(self.invalid_transition("block"));
@@ -963,6 +1124,9 @@ impl Task {
         }
         if self.status != TaskStatus::Draft {
             self.validate_execution_definition()?;
+        }
+        if let Some(commit_gate) = &self.commit_gate {
+            commit_gate.validate(self.status)?;
         }
         self.validate_running_checks()?;
         if self.status == TaskStatus::Blocked {

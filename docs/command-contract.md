@@ -24,10 +24,12 @@ Except for initial `plan create`, mutations against an existing plan or its
 evidence require a current `--expect-revision` and a UUID `--request-id`;
 authored mutations also identify `--actor`. Use a fresh UUID for each distinct
 mutation. Reuse it only for an exact retry. After a successful mutation,
-discard the old revision and read context again. `git bind` and `git branch
-create` do not change a plan revision and therefore do not use the plan
-mutation arguments; branch creation has its own explicit approval reference
-and immutable prepared-intent journal.
+  discard the old revision and read context again. `git bind`, `git branch
+  create`, and `git commit` do not accept caller-selected plan mutation
+  arguments. Binding and branch creation do not change a plan revision; branch
+  creation has its own explicit approval reference. Task commit derives
+  idempotent evidence/plan request IDs from its immutable journal and records the
+  resulting gate revision internally.
 
 ## Complete command inventory
 
@@ -46,7 +48,7 @@ and immutable prepared-intent journal.
 `project init --apply-agents-block` and
 `project init --apply-gitignore-block` modify only their owned marker regions.
 
-### Git inspection, active binding, and branch creation
+### Git inspection, active binding, branches, and task commits
 
 | Command | Mutation | Contract |
 |---|---:|---|
@@ -54,6 +56,7 @@ and immutable prepared-intent journal.
 | `mino git bind` | `.mino/active.json` only | Require `--plan <id> --current`; bind one non-Done plan to the canonical current worktree plus branch, or to the exact detached HEAD. Exact retries preserve the original bytes. |
 | `mino git branch propose` | No | Derive `mino/<plan-id>`, validate it with Git, and report clean/base/source/existing-ref blockers without writing Git or Mino state. |
 | `mino git branch create` | Local branch + Mino journal/binding | Require `--plan <id> --approval-ref <ref>`; optional `--branch` must exactly equal the proposal. Recheck the clean worktree, captured branch/detached mode, and base HEAD before creating and switching. |
+| `mino git commit` | Exact index paths + one local commit + evidence/plan/journal | Require `--plan <id> --task <id>`. Execute only the first Done task with a pending required gate under current plan approval and Approved Git Flow consent, exact same-worktree binding/branch/parent, compatible evidence, and changed paths inside both File Map and Commit Scope. |
 
 Binding status is one of `missing`, `current`, `foreign_worktree`,
 `stale_branch`, `stale_head`, or `not_repository`. Once an active binding file
@@ -71,6 +74,19 @@ repository hooks for the switch, binds only after the exact branch/base state
 is observed, and then publishes `completion.json`. An exact retry either
 retries an unchanged failed source state, reconciles an already-created branch,
 or replays the completed result without a second mutation.
+
+`git commit` is not a new approval boundary: the current plan approval and its
+Approved Git Flow consent authorize only the gate's exact one-line message and
+resolved task paths. Mino refuses any pre-existing staged path, mixed
+index/worktree content, undeclared/out-of-scope path, unsupported submodule,
+symlink, rename, clean filter, branch, or parent drift before mutation. It writes
+`.mino/git/commits/<plan-id>/<task-id>/intent.json` before `git add -- <exact
+paths>`, records `staged.json`, runs normal repository commit hooks, verifies the
+new parent/tree/message/file set, records immutable Commit evidence and the plan
+gate, then publishes `completion.json`. A hook/Git failure leaves exact staged
+state visible and blocks the plan; after `exec resume`, an exact retry recovers
+the staged or already-created commit without duplicating it. Mino never invokes
+`--no-verify` or automatically resets/unstages a failed attempt.
 
 ### Plan authoring and approval
 
@@ -139,19 +155,20 @@ record with `supersedes`; records and blobs are never rewritten.
 
 | Command | Mutation | Contract |
 |---|---:|---|
-| `mino exec start` | Yes | Start only the first eligible Ready task after plan approval. |
+| `mino exec start` | Yes | Start only the first eligible Ready task after plan approval and after every prior required task commit is recorded. |
 | `mino exec checkpoint` | Yes | Record a typed checkpoint for the active task. |
 | `mino exec check run` | Yes + process/evidence | Run one planned task/global check with durable lease/result and evidence attachment. |
 | `mino exec criterion pass` | Yes | Bind one compatible immutable evidence record to one active criterion. |
 | `mino exec complete` | Yes | Complete the active task after check, evidence, deviation, checkpoint, and File Map gates. |
 | `mino exec block` | Yes | Block a Ready/In Progress plan with a non-empty resumable reason. |
 | `mino exec resume` | Yes | Restore the exact recorded Ready/In Progress state. |
-| `mino exec finish` | Yes | Require all tasks/global checks complete and transition In Progress to Review. |
+| `mino exec finish` | Yes | Require all tasks, required task commit gates, and global checks complete, then transition In Progress to Review. |
 
-The v0.1 execution commands perform no Git mutation. The v0.2 Git surfaces can
-write Mino binding/journal state and can create/switch only the deterministic
-approved local branch. They do not stage, commit, push, merge, rebase, reset,
-amend, force-push, tag, delete a branch, or create/delete a worktree.
+The execution commands themselves perform no Git mutation. The v0.2 Git
+surfaces can write binding/journal state, create/switch only the deterministic
+explicitly approved local branch, and create only an eligible plan-scoped task
+commit from exact paths. They do not push, merge, rebase, reset, amend,
+force-push, tag, delete a branch, or create/delete a worktree.
 
 ## Success envelope
 

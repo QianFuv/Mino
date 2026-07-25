@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::execution::EXECUTION_EXTENSION_KEY;
 use super::{
-    CheckId, CheckStatus, CheckpointKind, CriterionId, DomainError, DomainErrorKind,
+    CheckId, CheckStatus, CheckpointKind, CommitStatus, CriterionId, DomainError, DomainErrorKind,
     DraftContextInput, DraftCriterionInput, DraftDecisionInput, DraftEdgeCaseInput, DraftFileInput,
     DraftMetadataInput, DraftPlanInput, DraftScopeInput, DraftTaskInput, DraftVerificationInput,
     EvidenceId, ExecutionState, FileMapEntry, GitFlowConsent, PlanDraftSeed, PlanId, PlanStatus,
@@ -1582,6 +1582,30 @@ impl Plan {
             ));
         }
 
+        let task_position = self
+            .task_order
+            .iter()
+            .position(|candidate| candidate == task_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::TaskOrderViolation,
+                    format!("Task {task_id} is missing from implementation order"),
+                )
+            })?;
+        let uncommitted_prior = self.task_order[..task_position].iter().find(|prior_id| {
+            self.task(prior_id).is_some_and(|prior| {
+                prior.commit_gate().is_some_and(|gate| {
+                    gate.is_required() && gate.status() != CommitStatus::Committed
+                })
+            })
+        });
+        if let Some(prior_id) = uncommitted_prior {
+            return Err(DomainError::new(
+                DomainErrorKind::TaskOrderViolation,
+                format!("Task {prior_id} must be committed before task {task_id} can start"),
+            ));
+        }
+
         let task = self.task(task_id).ok_or_else(|| {
             DomainError::new(
                 DomainErrorKind::TaskNotFound,
@@ -1779,6 +1803,57 @@ impl Plan {
         Ok(())
     }
 
+    /// Blocks the plan after a recoverable task-commit failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan is In Progress, the task is Done with
+    /// a pending required commit gate, and the reason is non-empty.
+    pub fn block_task_commit(
+        &mut self,
+        task_id: &TaskId,
+        reason: impl Into<String>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.require_status(PlanStatus::InProgress, "block a task commit")?;
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "A blocked task commit requires a reason",
+            ));
+        }
+        let next_revision = self.next_revision()?;
+        self.task_mut(task_id)?.block_commit()?;
+        self.resume_status = Some(PlanStatus::InProgress);
+        self.status = PlanStatus::Blocked;
+        self.blocker = Some(reason);
+        self.record_revision(next_revision, updated_at);
+        self.validate_invariants()
+    }
+
+    /// Records one verified task commit and its immutable evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan is In Progress and the task is Done
+    /// with a pending or recoverably blocked required commit gate.
+    pub fn record_task_commit(
+        &mut self,
+        task_id: &TaskId,
+        commit: &str,
+        files: Vec<String>,
+        evidence_id: EvidenceId,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.require_status(PlanStatus::InProgress, "record a task commit")?;
+        let next_revision = self.next_revision()?;
+        self.task_mut(task_id)?
+            .record_commit(commit, files, evidence_id)?;
+        self.record_revision(next_revision, updated_at);
+        self.validate_invariants()
+    }
+
     /// Records passing evidence for a criterion on the active task.
     ///
     /// # Errors
@@ -1948,11 +2023,12 @@ impl Plan {
         Ok(())
     }
 
-    /// Moves an executed plan to Review when every task is Done.
+    /// Moves an executed plan to Review when every task is Done and committed.
     ///
     /// # Errors
     ///
-    /// Returns an error unless the plan is In Progress and all tasks are Done.
+    /// Returns an error unless the plan is In Progress, all tasks are Done,
+    /// every required commit gate is Committed, and global verification passes.
     pub fn finish_execution(&mut self, updated_at: Timestamp) -> Result<(), DomainError> {
         self.require_status(PlanStatus::InProgress, "finish execution")?;
         if self
@@ -1963,6 +2039,18 @@ impl Plan {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
                 "Every task must be Done before plan review",
+            ));
+        }
+        if let Some(task) = self.tasks.iter().find(|task| {
+            task.commit_gate()
+                .is_some_and(|gate| gate.is_required() && gate.status() != CommitStatus::Committed)
+        }) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!(
+                    "Task {} required commit gate must be Committed before plan review",
+                    task.id()
+                ),
             ));
         }
         if !self.global_verification_is_satisfied() {
@@ -2235,7 +2323,14 @@ impl Plan {
                     ));
                 }
                 Some(PlanStatus::InProgress)
-                    if blocked_count != 1
+                    if (blocked_count == 0
+                        && !self.tasks.iter().any(|task| {
+                            task.status() == TaskStatus::Done
+                                && task.commit_gate().is_some_and(|gate| {
+                                    gate.is_required() && gate.status() == CommitStatus::Blocked
+                                })
+                        }))
+                        || blocked_count > 1
                         || self
                             .tasks
                             .iter()

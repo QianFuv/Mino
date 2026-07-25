@@ -91,7 +91,10 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     ),
     (&["exec", "check", "--help"], &["run", "help"]),
     (&["exec", "criterion", "--help"], &["pass", "help"]),
-    (&["git", "--help"], &["inspect", "bind", "branch", "help"]),
+    (
+        &["git", "--help"],
+        &["inspect", "bind", "branch", "commit", "help"],
+    ),
     (&["git", "branch", "--help"], &["propose", "create", "help"]),
     (&["protocol", "--help"], &["status", "migrate", "help"]),
 ];
@@ -114,6 +117,7 @@ const LEAF_COMMANDS: &[&str] = &[
     "git bind",
     "git branch create",
     "git branch propose",
+    "git commit",
     "git inspect",
     "plan apply",
     "plan approve",
@@ -250,6 +254,14 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
                 action["mutates"] == false && action["approval_boundary"] == true
             })
     );
+    assert!(
+        actions
+            .iter()
+            .find(|action| action["id"] == "git.commit")
+            .is_some_and(|action| {
+                action["mutates"] == false && action["approval_boundary"] == false
+            })
+    );
     assert_eq!(
         actions
             .iter()
@@ -304,6 +316,7 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
         ".mino/standards.lock",
         ".mino/active.json",
         ".mino/git/branches/",
+        ".mino/git/commits/",
         ".mino/plans/",
         "docs/plan/",
         ".agents/skills/mino/",

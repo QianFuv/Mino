@@ -580,27 +580,55 @@ fn run_checks_and_finish(binary: &Path, project: &Path, plan_id: &str) {
     ));
     assert_eq!(completed["revision"], 14);
 
+    let next = assert_agent_success(&run_json(binary, project, &strings(&["agent", "next"])));
+    assert_eq!(next["next_actions"][0]["id"], "git.commit");
+    assert!(next["blocked_actions"].as_array().is_some_and(|actions| {
+        actions
+            .iter()
+            .all(|action| action["action"] != "git.commit")
+    }));
+    let bound = assert_success(&run_json(
+        binary,
+        project,
+        &strings(&["git", "bind", "--plan", plan_id, "--current"]),
+    ));
+    assert_eq!(bound["binding"]["plan_id"], plan_id);
+    let committed = assert_success(&run_json(
+        binary,
+        project,
+        &strings(&["git", "commit", "--plan", plan_id, "--task", "T1"]),
+    ));
+    assert_eq!(committed["plan_revision"], 15);
+    assert_eq!(
+        committed["completion"]["message"],
+        "feat(fixture): add verified feature"
+    );
+    assert_eq!(
+        committed["completion"]["files"],
+        serde_json::json!(["feature.txt"])
+    );
+
     let global = assert_success(&run_json(
         binary,
         project,
         &exec_arguments(
             &["check", "run"],
             plan_id,
-            14,
+            15,
             18,
             &["--check", "GLOBAL-SMOKE"],
         ),
     ));
-    assert_eq!(global["plan"]["revision"], 16);
-    assert_eq!(global["evidence"]["id"], "E0004");
-    let finish = exec_arguments(&["finish"], plan_id, 16, 19, &[]);
+    assert_eq!(global["plan"]["revision"], 17);
+    assert_eq!(global["evidence"]["id"], "E0005");
+    let finish = exec_arguments(&["finish"], plan_id, 17, 19, &[]);
     let finished = assert_success(&run_json(binary, project, &finish));
     assert_eq!(finished["status"], "Review");
-    assert_eq!(finished["revision"], 17);
+    assert_eq!(finished["revision"], 18);
     let projection = projection_path(project, plan_id);
     fs::remove_file(&projection).expect("projection-loss fixture should be injected");
     let recovered_projection = assert_success(&run_json(binary, project, &finish));
-    assert_eq!(recovered_projection["revision"], 17);
+    assert_eq!(recovered_projection["revision"], 18);
     assert_eq!(recovered_projection["replayed"], true);
     assert!(projection.is_file());
 }
@@ -608,7 +636,7 @@ fn run_checks_and_finish(binary: &Path, project: &Path, plan_id: &str) {
 fn verify_final_state(binary: &Path, project: &Path, plan_id: &str) {
     let shown = assert_success(&run_json(binary, project, &read_arguments("show", plan_id)));
     assert_eq!(shown["status"], "Review");
-    assert_eq!(shown["revision"], 17);
+    assert_eq!(shown["revision"], 18);
     assert_eq!(shown["tasks"][0]["status"], "Done");
     assert_eq!(
         shown["tasks"][0]["acceptance_criteria"][0]["status"],
@@ -644,19 +672,19 @@ fn verify_final_state(binary: &Path, project: &Path, plan_id: &str) {
     let audit = PlanStore::new(project)
         .audit(&typed_plan)
         .expect("plan store should audit");
-    assert_eq!(audit.revision(), 17);
-    assert_eq!(audit.event_count(), 17);
-    assert_eq!(audit.snapshot_count(), 17);
+    assert_eq!(audit.revision(), 18);
+    assert_eq!(audit.event_count(), 18);
+    assert_eq!(audit.snapshot_count(), 18);
     let evidence = EvidenceStore::new(project);
     let records = evidence.list(&typed_plan).expect("evidence should list");
-    assert_eq!(records.len(), 4);
+    assert_eq!(records.len(), 5);
     assert!(
         evidence
             .audit(&typed_plan)
             .expect("evidence should audit")
             .is_healthy()
     );
-    assert_eq!(git_status(project), b"?? feature.txt\n");
+    assert!(git_status(project).is_empty());
 }
 
 fn verify_legacy_analysis(binary: &Path, project: &Path) {

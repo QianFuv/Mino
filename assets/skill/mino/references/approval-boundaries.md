@@ -8,8 +8,9 @@ Stop and request user action when any of these is true:
 
 - Agent context returns `approval_required: true`.
 - A command exits with the approval-required category or exit code 4.
-- The next operation would approve a plan, accept an exception, mutate Git,
-  replace an unowned Skill, or repair malformed managed markers.
+- The next operation would approve a plan, accept an exception, mutate Git
+  outside a current plan-scoped commit gate or explicitly approved branch
+  proposal, replace an unowned Skill, or repair malformed managed markers.
 - The requested change materially exceeds the approved plan File Map, task
   outcome, acceptance criteria, or commit scope.
 
@@ -35,8 +36,13 @@ then pass the supplied reference to `git branch create`. Plan approval and Git
 Flow consent do not authorize branch creation. Mino records a prepared intent
 for recovery; do not delete it or retry with a different approval reference.
 
-Commit execution is not yet exposed. Stage only declared paths or hunks, never
-`git add .`, and use exactly the planned one-line message when a later
-capability authorizes it. Push, merge, rebase, reset, amend, force-push, tag,
-branch deletion, and worktree mutation remain outside the Skill unless a later
-capability explicitly exposes them and the user authorizes them.
+`git.commit` is executable only when Agent context returns it for a Done task
+under current plan approval and Approved Git Flow consent. That existing plan
+approval authorizes only the recorded one-line message and exact resolved File
+Map/Commit Scope paths, so `git.commit` is not a second approval boundary. Do
+not invoke it for another task, branch, parent, message, or path set. Mino stages
+only explicit paths and leaves hook failures visible and recoverable; never run
+manual `git add`, `git commit`, `--no-verify`, reset, or unstage to bypass it.
+Push, merge, rebase, amend, force-push, tag, branch deletion, and worktree
+mutation remain outside the Skill unless a later capability explicitly exposes
+them and the user authorizes them.
