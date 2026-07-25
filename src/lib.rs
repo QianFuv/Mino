@@ -6,6 +6,8 @@ pub mod domain;
 pub mod error;
 /// Stable human-readable and machine-readable output contracts.
 pub mod output;
+/// Recoverable revisioned storage, locking, hashing, and audit contracts.
+pub mod store;
 
 pub use error::{ErrorCategory, MinoError};
 pub use output::{EmptyPayload, MinoResult, NextAction, OutputFormat};
