@@ -1,6 +1,7 @@
 //! Versioned domain model for plans, tasks, evidence, and audit events.
 
 mod authoring;
+mod check_run;
 mod error;
 mod event;
 mod evidence;
@@ -15,6 +16,11 @@ pub use authoring::{
     DraftCommitGateInput, DraftContextInput, DraftCriterionInput, DraftDecisionInput,
     DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,
     DraftTaskInput, DraftVerificationInput, PlanDraftSeed,
+};
+pub(crate) use check_run::CheckRunCompletion;
+pub use check_run::{
+    AppliedRedaction, CheckRunContext, CheckRunLease, CheckRunLimits, CheckRunOutcome,
+    CheckRunResult,
 };
 pub use error::{DomainError, DomainErrorKind};
 pub use event::{Event, EventResult};
