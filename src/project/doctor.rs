@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::domain::Plan;
+use crate::integration::{IntegrationFindingSeverity, inspect_project};
 use crate::render::{ProjectionStatus, check_projection, render_plan};
 use crate::{ErrorCategory, MinoError};
 
@@ -14,9 +15,6 @@ use super::config::{
     PROTOCOL_LOCK_VERSION, ProjectConfig, ProjectLayout, ProtocolLock, STANDARDS_LOCK_VERSION,
     StandardsLock, parse_toml,
 };
-
-const STANDARDS_BLOCK_START: &str = "<!-- mino:standards:start -->";
-const STANDARDS_BLOCK_END: &str = "<!-- mino:standards:end -->";
 
 /// Severity assigned to a deterministic doctor finding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -383,37 +381,16 @@ fn inspect_integrations(
     layout: &ProjectLayout,
     findings: &mut Vec<DoctorFinding>,
 ) -> Result<(), MinoError> {
-    let skill = layout.skill_file();
-    if !skill.is_file() {
+    for integration_finding in inspect_project(layout.root())?.findings {
+        let severity = match integration_finding.severity {
+            IntegrationFindingSeverity::Warning => FindingSeverity::Warning,
+            IntegrationFindingSeverity::Error => FindingSeverity::Error,
+        };
         findings.push(DoctorFinding::new(
-            "mino_skill_missing",
-            FindingSeverity::Warning,
-            "The repository-level Mino Skill is not installed",
-            Some(skill),
-        ));
-    }
-    let agents = layout.agents_file();
-    if !agents.is_file() {
-        findings.push(DoctorFinding::new(
-            "agents_file_missing",
-            FindingSeverity::Warning,
-            "AGENTS.md is missing; Plan 05 supplies the managed integration block",
-            Some(agents),
-        ));
-        return Ok(());
-    }
-    let contents = fs::read_to_string(&agents).map_err(|error| {
-        MinoError::new(
-            ErrorCategory::EnvironmentUnavailable,
-            format!("Failed to inspect {}: {error}", agents.display()),
-        )
-    })?;
-    if !contents.contains(STANDARDS_BLOCK_START) || !contents.contains(STANDARDS_BLOCK_END) {
-        findings.push(DoctorFinding::new(
-            "agents_standards_block_missing",
-            FindingSeverity::Warning,
-            "AGENTS.md lacks the Mino standards managed block",
-            Some(agents),
+            integration_finding.code,
+            severity,
+            integration_finding.message,
+            Some(integration_finding.path),
         ));
     }
     Ok(())

@@ -6,9 +6,10 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mino::domain::{Plan, PlanId, RequestId, Timestamp};
+use mino::integration::IntegrationOptions;
 use mino::project::{
     FindingSeverity, ProjectConfig, ProjectLayout, ProtocolLock, RootSource, StandardsLock,
-    discover, doctor, initialize, show,
+    discover, doctor, initialize, initialize_with_options, show,
 };
 use mino::render::{render_plan, write_projection};
 use mino::store::PlanStore;
@@ -81,16 +82,15 @@ fn finding_codes(findings: &[mino::project::DoctorFinding]) -> Vec<&str> {
         .collect()
 }
 
-fn install_integration_placeholders(layout: &ProjectLayout) {
-    let skill = layout.skill_file();
-    fs::create_dir_all(skill.parent().expect("skill should have a parent"))
-        .expect("skill directory should be created");
-    fs::write(skill, "---\nname: mino\n---\n").expect("skill placeholder should be written");
-    fs::write(
-        layout.agents_file(),
-        "<!-- mino:standards:start -->\n<!-- mino:standards:end -->\n",
+fn apply_integrations(root: &Path) {
+    initialize_with_options(
+        root,
+        IntegrationOptions {
+            apply_agents_block: true,
+            apply_gitignore_block: true,
+        },
     )
-    .expect("AGENTS placeholder should be written");
+    .expect("repository integrations should apply");
 }
 
 #[test]
@@ -107,9 +107,10 @@ fn fresh_and_repeated_init_are_local_idempotent_and_non_destructive() {
     assert!(first.is_healthy());
     assert_eq!(
         finding_codes(&first.findings),
-        vec!["agents_file_missing", "mino_skill_missing"]
+        vec!["agents_block_missing", "gitignore_block_missing"]
     );
     let layout = ProjectLayout::new(&first.root);
+    assert!(layout.skill_file().is_file());
     let config_before = fs::read(layout.config()).expect("config should exist");
     let protocol_before = fs::read(layout.protocol_lock()).expect("protocol lock should exist");
     let standards_before = fs::read(layout.standards_lock()).expect("standards lock should exist");
@@ -189,7 +190,7 @@ fn doctor_distinguishes_transactions_render_drift_locks_and_integrations() {
     let project = TestProject::new("doctor");
     initialize(project.path()).expect("project should initialize");
     let layout = ProjectLayout::new(project.path());
-    install_integration_placeholders(&layout);
+    apply_integrations(project.path());
     let store = PlanStore::new(project.path());
     let plan = Plan::new(plan_id(), "Diagnose projections.", timestamp());
     store
@@ -225,7 +226,7 @@ fn doctor_distinguishes_transactions_render_drift_locks_and_integrations() {
     assert!(codes.contains(&"incomplete_transaction"));
     assert!(codes.contains(&"render_drift"));
     assert!(codes.contains(&"protocol_lock_corrupt"));
-    assert!(codes.contains(&"mino_skill_missing"));
+    assert!(codes.contains(&"mino_skill_conflict"));
     assert!(
         report
             .findings

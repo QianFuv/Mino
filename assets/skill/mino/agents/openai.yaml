@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mino Planning Workflow"
+  short_description: "Run versioned plans with evidence and Git Flow"
+  default_prompt: "Use $mino to create or resume a durable coding plan and follow its canonical next action."

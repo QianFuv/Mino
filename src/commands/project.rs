@@ -6,13 +6,14 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::commands::CommandResponse;
+use crate::integration::IntegrationOptions;
 use crate::project::{self, DoctorFinding, LegacyDocumentKind, LegacyInput};
 use crate::{ErrorCategory, MinoError, NextAction};
 
 #[derive(Clone, Debug, Subcommand)]
 pub(crate) enum ProjectAction {
     /// Initialize missing local Mino project state without network or Git mutation.
-    Init,
+    Init(InitArguments),
     /// Show parsed project state and doctor findings.
     Show,
     /// Diagnose configuration, locks, transactions, projections, and integrations.
@@ -21,6 +22,16 @@ pub(crate) enum ProjectAction {
     Scan,
     /// Analyze legacy planning workflow documents without modifying them.
     Migrate(MigrateArguments),
+}
+
+#[derive(Clone, Copy, Debug, Args)]
+pub(crate) struct InitArguments {
+    /// Apply or refresh only the owned Mino block in AGENTS.md.
+    #[arg(long)]
+    apply_agents_block: bool,
+    /// Apply or refresh only the owned Mino block in .gitignore.
+    #[arg(long)]
+    apply_gitignore_block: bool,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -50,8 +61,14 @@ struct LegacyArguments {
 
 pub(crate) fn execute(start: &Path, action: ProjectAction) -> Result<CommandResponse, MinoError> {
     match action {
-        ProjectAction::Init => {
-            let report = project::initialize(start)?;
+        ProjectAction::Init(arguments) => {
+            let report = project::initialize_with_options(
+                start,
+                IntegrationOptions {
+                    apply_agents_block: arguments.apply_agents_block,
+                    apply_gitignore_block: arguments.apply_gitignore_block,
+                },
+            )?;
             let complete = report.findings.is_empty();
             let missing = finding_codes(&report.findings);
             let next_actions = integration_next_actions(&report.findings);
@@ -169,24 +186,36 @@ fn finding_codes(findings: &[DoctorFinding]) -> Vec<String> {
 }
 
 fn integration_next_actions(findings: &[DoctorFinding]) -> Vec<NextAction> {
-    if findings.iter().any(|finding| {
-        matches!(
-            finding.code.as_str(),
-            "mino_skill_missing" | "agents_file_missing" | "agents_standards_block_missing"
-        )
-    }) {
-        vec![NextAction {
-            id: "project.doctor".to_owned(),
-            argv: vec![
-                "mino".to_owned(),
-                "project".to_owned(),
-                "doctor".to_owned(),
-                "--format".to_owned(),
-                "json".to_owned(),
-                "--no-input".to_owned(),
-            ],
-        }]
-    } else {
-        Vec::new()
+    let should_install_skill = has_finding(findings, &["mino_skill_missing", "mino_skill_drift"]);
+    let should_apply_agents =
+        has_finding(findings, &["agents_block_missing", "agents_block_drift"]);
+    let should_apply_gitignore = has_finding(
+        findings,
+        &["gitignore_block_missing", "gitignore_block_drift"],
+    );
+    if !should_install_skill && !should_apply_agents && !should_apply_gitignore {
+        return Vec::new();
     }
+    let mut argv = vec!["mino".to_owned(), "project".to_owned(), "init".to_owned()];
+    if should_apply_agents {
+        argv.push("--apply-agents-block".to_owned());
+    }
+    if should_apply_gitignore {
+        argv.push("--apply-gitignore-block".to_owned());
+    }
+    argv.extend([
+        "--format".to_owned(),
+        "json".to_owned(),
+        "--no-input".to_owned(),
+    ]);
+    vec![NextAction {
+        id: "project.init".to_owned(),
+        argv,
+    }]
+}
+
+fn has_finding(findings: &[DoctorFinding], codes: &[&str]) -> bool {
+    findings
+        .iter()
+        .any(|finding| codes.contains(&finding.code.as_str()))
 }

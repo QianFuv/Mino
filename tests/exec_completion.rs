@@ -48,8 +48,8 @@ impl TestProject {
         fs::write(path.join(".gitignore"), ".mino/\ndocs/plan/\n*.pdb\n")
             .expect("ignore rules should be written");
         let helper = compile_helper(&path);
-        initialize_git(&path, &helper);
         initialize(&path).expect("Mino project should initialize");
+        initialize_git(&path, &helper);
         let path = path.canonicalize().expect("project root should resolve");
         let base_revision = create_approved_plan(&path, &helper, task_mode);
         Self {
@@ -128,6 +128,7 @@ fn initialize_git(root: &Path, helper: &Path) {
             "add",
             "--",
             ".gitignore",
+            ".agents/skills/mino",
             "Cargo.toml",
             "src/lib.rs",
             "completion-helper.rs",

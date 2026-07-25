@@ -1,0 +1,7 @@
+/target/
+# mino:runtime:start
+/.mino/
+# mino:runtime:end
+# mino:runtime:start
+/docs/plan/
+# mino:runtime:end

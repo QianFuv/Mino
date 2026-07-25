@@ -16,6 +16,8 @@ pub mod evidence;
 pub mod git;
 /// Bounded strict and guided authoring input adapters.
 pub mod input;
+/// Repository Skill installation and owned integration block management.
+pub mod integration;
 /// Stable human-readable and machine-readable output contracts.
 pub mod output;
 /// Project discovery, initialization, inspection, and diagnosis services.

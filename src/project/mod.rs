@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::integration::{IntegrationOptions, IntegrationReport, integrate_project};
 use crate::protocol::ProtocolRegistry;
 use crate::{ErrorCategory, MinoError};
 
@@ -40,6 +41,8 @@ pub struct ProjectInitReport {
     pub existing_files: Vec<PathBuf>,
     /// Drift, corruption, and missing integration findings.
     pub findings: Vec<DoctorFinding>,
+    /// Repository Skill and owned-block reconciliation results.
+    pub integrations: IntegrationReport,
 }
 
 impl ProjectInitReport {
@@ -76,6 +79,22 @@ pub struct ProjectShowReport {
 /// Returns an environment-unavailable error when root discovery or filesystem
 /// creation fails. Existing corrupt files are preserved and reported.
 pub fn initialize(start: &Path) -> Result<ProjectInitReport, MinoError> {
+    initialize_with_options(start, IntegrationOptions::default())
+}
+
+/// Initializes project state and applies only explicitly selected integrations.
+///
+/// The bundled Skill is installed automatically. Repository instruction and
+/// ignore blocks are modified only when their corresponding option is true.
+///
+/// # Errors
+///
+/// Returns an environment or drift error when project state or a verified
+/// integration write cannot be created safely.
+pub fn initialize_with_options(
+    start: &Path,
+    integration_options: IntegrationOptions,
+) -> Result<ProjectInitReport, MinoError> {
     ProtocolRegistry::current().map_err(|error| {
         MinoError::new(
             ErrorCategory::DriftDetected,
@@ -125,6 +144,7 @@ pub fn initialize(start: &Path) -> Result<ProjectInitReport, MinoError> {
         &mut existing_files,
         &mut initialization_findings,
     )?;
+    let integrations = integrate_project(layout.root(), integration_options)?;
     let mut doctor = diagnose(&layout)?;
     doctor.findings.extend(initialization_findings);
     doctor
@@ -136,6 +156,7 @@ pub fn initialize(start: &Path) -> Result<ProjectInitReport, MinoError> {
         created_files,
         existing_files,
         findings: doctor.findings,
+        integrations,
     })
 }
 
