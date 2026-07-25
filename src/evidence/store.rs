@@ -11,7 +11,8 @@ use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    Evidence, EvidenceFields, EvidenceId, EvidenceType, PlanId, Redaction, RequestId,
+    CheckRunResult, CheckStatus, Evidence, EvidenceFields, EvidenceId, EvidenceType, Plan, PlanId,
+    Redaction, RequestId, VerificationCheck,
 };
 use crate::runner::Redactor;
 use crate::store::{PlanStore, StoreError, StoreErrorKind, canonical_json_bytes, sha256_digest};
@@ -152,6 +153,51 @@ struct FingerprintInput<'a> {
     artifact_digest: Option<&'a str>,
     redactions: &'a [Redaction],
     supersedes: Option<&'a EvidenceId>,
+}
+
+#[derive(Serialize)]
+struct CommandFingerprintInput<'a> {
+    request_command: &'a [String],
+    result: &'a CheckRunResult,
+}
+
+/// Immutable terminal check result prepared for command-evidence persistence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandEvidenceRequest {
+    result: CheckRunResult,
+    request_command: Vec<String>,
+}
+
+impl CommandEvidenceRequest {
+    /// Creates one command-evidence request from a journaled terminal result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-request error when the result or canonical invoking
+    /// command is incomplete.
+    pub fn new(
+        result: CheckRunResult,
+        request_command: Vec<String>,
+    ) -> Result<Self, EvidenceError> {
+        result
+            .validate()
+            .map_err(|error| invalid(error.to_string()))?;
+        if request_command.is_empty() || request_command.iter().any(|part| part.trim().is_empty()) {
+            return Err(invalid(
+                "Command evidence requires a complete canonical invoking command",
+            ));
+        }
+        Ok(Self {
+            result,
+            request_command,
+        })
+    }
+
+    /// Returns the immutable terminal check result.
+    #[must_use]
+    pub const fn result(&self) -> &CheckRunResult {
+        &self.result
+    }
 }
 
 struct PreparedInput {
@@ -353,6 +399,70 @@ impl EvidenceStore {
             evidence,
             replayed: false,
             blob_reused,
+        })
+    }
+
+    /// Persists a journaled planned-command result as immutable evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale revisions, mismatched check bindings, request
+    /// conflicts, lock failures, or corrupt immutable state.
+    pub fn record_command_result(
+        &self,
+        request: &CommandEvidenceRequest,
+    ) -> Result<EvidenceAddReport, EvidenceError> {
+        let result = request.result();
+        let lease = result.lease();
+        self.require_plan(lease.plan_id())?;
+        let paths = EvidencePaths::new(&self.project_root, lease.plan_id());
+        paths.prepare()?;
+        let _lock = EvidenceLock::acquire(&paths.lock_file(), self.lock_timeout)?;
+        let envelopes = Self::recover_locked(&paths)?;
+        let fingerprint = canonical_json_bytes(&CommandFingerprintInput {
+            request_command: &request.request_command,
+            result,
+        })
+        .map(|bytes| sha256_digest(&bytes))
+        .map_err(|error| serialization_error("encode command evidence request", &error))?;
+        if let Some(envelope) = envelopes
+            .iter()
+            .find(|envelope| envelope.request_id == *lease.request_id())
+        {
+            if envelope.request_fingerprint != fingerprint {
+                return Err(EvidenceError::new(
+                    EvidenceErrorKind::RequestConflict,
+                    format!(
+                        "Request {} was reused with a different command result",
+                        lease.request_id()
+                    ),
+                ));
+            }
+            return Ok(EvidenceAddReport {
+                evidence: envelope.evidence.clone(),
+                replayed: true,
+                blob_reused: false,
+            });
+        }
+        let plan = PlanStore::new(&self.project_root)
+            .load_plan(lease.plan_id())
+            .map_err(|error| map_store_error(&error))?;
+        validate_command_plan(&plan, result)?;
+        let evidence = command_evidence(envelopes.len(), result)?;
+        let envelope = StoredEvidence {
+            storage_version: EVIDENCE_STORAGE_VERSION,
+            request_id: lease.request_id().clone(),
+            request_command: request.request_command.clone(),
+            request_fingerprint: fingerprint,
+            evidence: evidence.clone(),
+        };
+        let record_bytes = canonical_envelope(&envelope)?;
+        blob::publish_immutable(&paths.record(&evidence), &record_bytes)?;
+        append_index(&paths.index_file(), &record_bytes)?;
+        Ok(EvidenceAddReport {
+            evidence,
+            replayed: false,
+            blob_reused: false,
         })
     }
 
@@ -877,6 +987,95 @@ fn redact_text(redactor: &Redactor, text: &str) -> (String, Vec<Redaction>) {
         .map(|redaction| Redaction::new(redaction.rule_id(), redaction.replacements()))
         .collect();
     (redacted, redactions)
+}
+
+fn command_output_summary(result: &CheckRunResult) -> String {
+    let mut sections = Vec::new();
+    if !result.stdout_summary().is_empty() {
+        sections.push(format!("stdout:\n{}", result.stdout_summary()));
+    }
+    if !result.stderr_summary().is_empty() {
+        sections.push(format!("stderr:\n{}", result.stderr_summary()));
+    }
+    if let Some(error) = result.error_summary() {
+        sections.push(format!("error:\n{error}"));
+    }
+    if sections.is_empty() {
+        "No output captured.".to_owned()
+    } else {
+        sections.join("\n\n")
+    }
+}
+
+fn validate_command_plan(plan: &Plan, result: &CheckRunResult) -> Result<(), EvidenceError> {
+    let lease = result.lease();
+    if plan.revision() != lease.plan_revision() {
+        return Err(EvidenceError::new(
+            EvidenceErrorKind::RevisionConflict,
+            format!(
+                "Expected plan revision {}, found {}",
+                lease.plan_revision(),
+                plan.revision()
+            ),
+        ));
+    }
+    let check_status = match lease.task_id() {
+        Some(task_id) => plan
+            .task(task_id)
+            .and_then(|task| {
+                task.verification_checks()
+                    .iter()
+                    .find(|check| check.id() == lease.check_id())
+            })
+            .map(VerificationCheck::status),
+        None => plan
+            .global_verification()
+            .iter()
+            .find(|check| check.id() == lease.check_id())
+            .map(VerificationCheck::status),
+    };
+    if check_status == Some(CheckStatus::Running) {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "Check {} is not Running at leased revision {}",
+            lease.check_id(),
+            lease.plan_revision()
+        )))
+    }
+}
+
+fn command_evidence(
+    existing_count: usize,
+    result: &CheckRunResult,
+) -> Result<Evidence, EvidenceError> {
+    let lease = result.lease();
+    Evidence::new(EvidenceFields {
+        id: next_evidence_id(existing_count)?,
+        plan_id: lease.plan_id().clone(),
+        captured_revision: lease.plan_revision(),
+        task_id: lease.task_id().cloned(),
+        criterion_id: None,
+        check_id: Some(lease.check_id().clone()),
+        kind: EvidenceType::Command,
+        command: lease.command().to_vec(),
+        cwd: Some(lease.cwd().to_owned()),
+        exit_code: result.exit_code(),
+        duration_milliseconds: Some(result.duration_milliseconds()),
+        output_summary: Some(command_output_summary(result)),
+        output_digest: Some(result.output_digest().to_owned()),
+        artifact_path: None,
+        artifact_digest: None,
+        actor: lease.actor().to_owned(),
+        captured_at: result.finished_at().clone(),
+        redactions: result
+            .redactions()
+            .iter()
+            .map(|redaction| Redaction::new(redaction.rule_id(), redaction.replacements()))
+            .collect(),
+        supersedes: None,
+    })
+    .map_err(|error| invalid(error.to_string()))
 }
 
 fn merge_redactions(target: &mut Vec<Redaction>, additional: Vec<Redaction>) {

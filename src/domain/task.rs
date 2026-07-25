@@ -235,6 +235,46 @@ impl VerificationCheck {
         Ok(())
     }
 
+    pub(crate) fn begin_run(&mut self) -> Result<(), DomainError> {
+        if matches!(self.status, CheckStatus::Running | CheckStatus::Blocked) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Check {} cannot start from {:?}", self.id, self.status),
+            ));
+        }
+        self.status = CheckStatus::Running;
+        Ok(())
+    }
+
+    pub(crate) fn record_run(
+        &mut self,
+        evidence_id: EvidenceId,
+        passed: bool,
+    ) -> Result<(), DomainError> {
+        if self.status != CheckStatus::Running {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Check {} is not Running", self.id),
+            ));
+        }
+        if self.evidence_refs.contains(&evidence_id) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!(
+                    "Check {} already references evidence {evidence_id}",
+                    self.id
+                ),
+            ));
+        }
+        self.status = if passed {
+            CheckStatus::Passed
+        } else {
+            CheckStatus::Failed
+        };
+        self.evidence_refs.push(evidence_id);
+        Ok(())
+    }
+
     pub(crate) fn reset_for_rework(&mut self) {
         self.status = CheckStatus::Pending;
     }
@@ -773,6 +813,45 @@ impl Task {
         check.record_pass(evidence_id)
     }
 
+    pub(crate) fn begin_check_run(&mut self, check_id: &CheckId) -> Result<(), DomainError> {
+        if self.status != TaskStatus::InProgress {
+            return Err(self.invalid_transition("run a verification check"));
+        }
+        let check = self
+            .verification_checks
+            .iter_mut()
+            .find(|check| &check.id == check_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no check {check_id}", self.id),
+                )
+            })?;
+        check.begin_run()
+    }
+
+    pub(crate) fn record_check_run(
+        &mut self,
+        check_id: &CheckId,
+        evidence_id: EvidenceId,
+        passed: bool,
+    ) -> Result<(), DomainError> {
+        if self.status != TaskStatus::InProgress {
+            return Err(self.invalid_transition("record a verification check run"));
+        }
+        let check = self
+            .verification_checks
+            .iter_mut()
+            .find(|check| &check.id == check_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no check {check_id}", self.id),
+                )
+            })?;
+        check.record_run(evidence_id, passed)
+    }
+
     pub(crate) fn validate_invariants(&self) -> Result<(), DomainError> {
         if self.title.trim().is_empty() {
             return Err(DomainError::new(
@@ -821,7 +900,6 @@ impl Task {
                 format!("Task {} contains an invalid file map", self.id),
             ));
         }
-
         let criterion_ids = self
             .acceptance_criteria
             .iter()
@@ -848,6 +926,7 @@ impl Task {
         if self.status != TaskStatus::Draft {
             self.validate_execution_definition()?;
         }
+        self.validate_running_checks()?;
         if self.status == TaskStatus::Blocked {
             if self.resume_status != Some(TaskStatus::InProgress)
                 || self.blocker.as_deref().is_none_or(str::is_empty)
@@ -869,13 +948,38 @@ impl Task {
                 ),
             ));
         }
+        self.validate_completion_state()?;
+        Ok(())
+    }
+
+    fn validate_completion_state(&self) -> Result<(), DomainError> {
         if self.status == TaskStatus::Done && !self.completion_evidence_is_satisfied() {
-            return Err(DomainError::new(
+            Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
                 format!("Done task {} lacks complete evidence", self.id),
-            ));
+            ))
+        } else {
+            Ok(())
         }
-        Ok(())
+    }
+
+    fn validate_running_checks(&self) -> Result<(), DomainError> {
+        if self.status != TaskStatus::InProgress
+            && self
+                .verification_checks
+                .iter()
+                .any(|check| check.status == CheckStatus::Running)
+        {
+            Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!(
+                    "Only an In Progress task may contain a Running check: {}",
+                    self.id
+                ),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     fn validate_execution_definition(&self) -> Result<(), DomainError> {

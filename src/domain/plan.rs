@@ -5,13 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 
+use super::execution::EXECUTION_EXTENSION_KEY;
 use super::{
-    CheckId, CheckStatus, CriterionId, DomainError, DomainErrorKind, DraftContextInput,
-    DraftCriterionInput, DraftDecisionInput, DraftEdgeCaseInput, DraftFileInput,
+    CheckId, CheckStatus, CheckpointKind, CriterionId, DomainError, DomainErrorKind,
+    DraftContextInput, DraftCriterionInput, DraftDecisionInput, DraftEdgeCaseInput, DraftFileInput,
     DraftMetadataInput, DraftPlanInput, DraftScopeInput, DraftTaskInput, DraftVerificationInput,
-    EvidenceId, FileMapEntry, GitFlowConsent, PlanDraftSeed, PlanId, PlanStatus, ProtocolVersion,
-    ReviewClassification, ReviewStatus, SchemaVersion, Task, TaskId, TaskStatus, Timestamp,
-    VerificationCheck,
+    EvidenceId, ExecutionState, FileMapEntry, GitFlowConsent, PlanDraftSeed, PlanId, PlanStatus,
+    ProtocolVersion, ReviewClassification, ReviewStatus, SchemaVersion, Task, TaskId, TaskStatus,
+    Timestamp, VerificationCheck,
 };
 
 /// Human and repository metadata associated with a plan.
@@ -823,6 +824,28 @@ impl Plan {
         &self.global_verification
     }
 
+    /// Returns typed execution checkpoints stored in the extension namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when the execution extension is malformed.
+    pub fn execution_state(&self) -> Result<ExecutionState, DomainError> {
+        self.extensions
+            .get(EXECUTION_EXTENSION_KEY)
+            .cloned()
+            .map_or_else(
+                || Ok(ExecutionState::default()),
+                |value| {
+                    serde_json::from_value(value).map_err(|error| {
+                        DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            format!("Execution extension is malformed: {error}"),
+                        )
+                    })
+                },
+            )
+    }
+
     /// Returns a task by identifier.
     #[must_use]
     pub fn task(&self, task_id: &TaskId) -> Option<&Task> {
@@ -1595,6 +1618,141 @@ impl Plan {
         Ok(())
     }
 
+    /// Records one typed checkpoint for the active task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan and selected task are In Progress and
+    /// the checkpoint fields are complete.
+    pub fn record_checkpoint(
+        &mut self,
+        task_id: &TaskId,
+        kind: CheckpointKind,
+        summary: impl Into<String>,
+        actor: impl Into<String>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.require_status(PlanStatus::InProgress, "record a checkpoint")?;
+        if self
+            .task(task_id)
+            .is_none_or(|task| task.status() != TaskStatus::InProgress)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Task {task_id} is not the active In Progress task"),
+            ));
+        }
+        let next_revision = self.next_revision()?;
+        let mut execution = self.execution_state()?;
+        execution.record_checkpoint(
+            task_id.clone(),
+            kind,
+            summary.into(),
+            actor.into(),
+            updated_at.clone(),
+        )?;
+        let value = serde_json::to_value(execution).map_err(|error| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Failed to encode execution extension: {error}"),
+            )
+        })?;
+        self.extensions
+            .insert(EXECUTION_EXTENSION_KEY.to_owned(), value);
+        self.record_revision(next_revision, updated_at);
+        self.validate_invariants()
+    }
+
+    /// Leases one task or global verification check for external execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the check is uniquely addressable and eligible
+    /// at the current ordered execution position.
+    pub fn begin_check_run(
+        &mut self,
+        check_id: &CheckId,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.require_status(PlanStatus::InProgress, "run a verification check")?;
+        if self.running_check_count() != 0 {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Another verification check is already Running",
+            ));
+        }
+        let next_revision = self.next_revision()?;
+        if let Some(task_index) = self.tasks.iter().position(|task| {
+            task.verification_checks()
+                .iter()
+                .any(|check| check.id() == check_id)
+        }) {
+            self.tasks[task_index].begin_check_run(check_id)?;
+        } else {
+            if self
+                .tasks
+                .iter()
+                .any(|task| task.status() != TaskStatus::Done)
+            {
+                return Err(DomainError::new(
+                    DomainErrorKind::TaskOrderViolation,
+                    "Global verification may run only after every task is Done",
+                ));
+            }
+            let check = self
+                .global_verification
+                .iter_mut()
+                .find(|check| check.id() == check_id)
+                .ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Check {check_id} does not exist"),
+                    )
+                })?;
+            check.begin_run()?;
+        }
+        self.record_revision(next_revision, updated_at);
+        self.validate_invariants()
+    }
+
+    /// Attaches immutable command evidence to a Running verification check.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the addressed check is Running at the current
+    /// ordered execution position.
+    pub fn record_check_run(
+        &mut self,
+        check_id: &CheckId,
+        evidence_id: EvidenceId,
+        passed: bool,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.require_status(PlanStatus::InProgress, "record a verification check run")?;
+        let next_revision = self.next_revision()?;
+        if let Some(task_index) = self.tasks.iter().position(|task| {
+            task.verification_checks()
+                .iter()
+                .any(|check| check.id() == check_id)
+        }) {
+            self.tasks[task_index].record_check_run(check_id, evidence_id, passed)?;
+        } else {
+            let check = self
+                .global_verification
+                .iter_mut()
+                .find(|check| check.id() == check_id)
+                .ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Check {check_id} does not exist"),
+                    )
+                })?;
+            check.record_run(evidence_id, passed)?;
+        }
+        self.record_revision(next_revision, updated_at);
+        self.validate_invariants()
+    }
+
     /// Completes the active task after its local evidence gates are satisfied.
     ///
     /// # Errors
@@ -1701,6 +1859,12 @@ impl Plan {
     ) -> Result<(), DomainError> {
         if !matches!(self.status, PlanStatus::Ready | PlanStatus::InProgress) {
             return Err(self.invalid_transition("block"));
+        }
+        if self.running_check_count() != 0 {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "A plan cannot be blocked while a verification check is Running",
+            ));
         }
         let reason = reason.into();
         if reason.trim().is_empty() {
@@ -1833,7 +1997,45 @@ impl Plan {
         self.validate_lifecycle()?;
         self.validate_approval_state()?;
         self.validate_global_verification()?;
+        self.validate_execution_state()?;
         Ok(())
+    }
+
+    fn validate_execution_state(&self) -> Result<(), DomainError> {
+        let task_ids = self.tasks.iter().map(Task::id).collect::<BTreeSet<_>>();
+        self.execution_state()?.validate(&task_ids)?;
+        let running_count = self.running_check_count();
+        if running_count > 1 {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "At most one verification check may be Running",
+            ));
+        }
+        if self
+            .global_verification
+            .iter()
+            .any(|check| check.status() == CheckStatus::Running)
+            && (self.status != PlanStatus::InProgress
+                || self
+                    .tasks
+                    .iter()
+                    .any(|task| task.status() != TaskStatus::Done))
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "A global Running check requires an In Progress plan with every task Done",
+            ));
+        }
+        Ok(())
+    }
+
+    fn running_check_count(&self) -> usize {
+        self.tasks
+            .iter()
+            .flat_map(Task::verification_checks)
+            .chain(self.global_verification.iter())
+            .filter(|check| check.status() == CheckStatus::Running)
+            .count()
     }
 
     fn validate_required_fields(&self) -> Result<(), DomainError> {

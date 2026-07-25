@@ -24,5 +24,26 @@
   ],
   "standards": [],
   "approval_required": false,
-  "next_actions": []
+  "next_actions": [
+    {
+      "id": "exec.check.run",
+      "argv": [
+        "mino",
+        "exec",
+        "check",
+        "run",
+        "--plan",
+        "2026-07-26-agent-fixture",
+        "--check",
+        "TASK-V1",
+        "--expect-revision",
+        "6",
+        "--request-id",
+        "<REQUEST_ID>",
+        "--format",
+        "json",
+        "--no-input"
+      ]
+    }
+  ]
 }

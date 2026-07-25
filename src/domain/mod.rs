@@ -5,6 +5,7 @@ mod check_run;
 mod error;
 mod event;
 mod evidence;
+mod execution;
 mod id;
 mod plan;
 mod state;
@@ -26,6 +27,7 @@ pub use error::{DomainError, DomainErrorKind};
 pub use event::{Event, EventResult};
 pub(crate) use evidence::EvidenceFields;
 pub use evidence::{Evidence, EvidenceType, Redaction};
+pub use execution::{Checkpoint, CheckpointKind, ExecutionState};
 pub use id::{CheckId, CriterionId, EvidenceId, PlanId, RequestId, TaskId};
 pub use plan::{
     Approach, Approval, ApprovalKind, ContextReference, Decision, EdgeCase, FinalOutcome,

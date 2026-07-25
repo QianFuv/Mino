@@ -356,6 +356,38 @@ impl PlanStore {
         self.commit_with_options(plan_id, request, CommitOptions::default(), mutation)
     }
 
+    /// Verifies and returns an already committed idempotent mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request was not committed, its identity was
+    /// reused with different inputs, or the plan store cannot be recovered.
+    pub fn replay(
+        &self,
+        plan_id: &PlanId,
+        request: &MutationRequest,
+    ) -> Result<CommitReceipt, StoreError> {
+        self.require_plan_directory(plan_id)?;
+        let _lock = PlanLock::acquire(&self.paths.lock_file(plan_id), self.lock_options)?;
+        self.recover_locked(plan_id)?;
+        let events = self.read_events(plan_id)?;
+        replay_receipt(
+            plan_id,
+            &events,
+            &request.request_id,
+            request.expected_revision,
+            &request.actor,
+            &request.command,
+            &request.changed_fields,
+        )?
+        .ok_or_else(|| {
+            StoreError::new(
+                StoreErrorKind::InvalidMutation,
+                format!("Request {} has not been committed", request.request_id),
+            )
+        })
+    }
+
     /// Applies a semantic mutation with an optional injected publication failure.
     ///
     /// # Errors

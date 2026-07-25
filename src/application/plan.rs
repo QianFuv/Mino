@@ -486,6 +486,28 @@ impl PlanService {
         ))
     }
 
+    /// Verifies an older semantic phase after later revisions have committed.
+    pub(crate) fn replay_semantic(
+        &self,
+        request: PlanMutationRequest,
+        changed_fields: Vec<String>,
+    ) -> Result<PlanOperationReport, MinoError> {
+        let store_request = MutationRequest::new(
+            request.expected_revision,
+            request.request_id,
+            request.actor,
+            request.command,
+            changed_fields,
+        )
+        .map_err(|error| map_store_error(&error))?;
+        self.store
+            .replay(&request.plan_id, &store_request)
+            .map_err(|error| map_store_error(&error))?;
+        let plan = self.load_verified(&request.plan_id)?;
+        let rendered = render_plan(&plan).map_err(|error| map_render_error(&error))?;
+        Ok(operation_report(&plan, &rendered, true, None))
+    }
+
     /// Returns deterministic missing fields and the next canonical action.
     ///
     /// # Errors
@@ -608,6 +630,13 @@ impl PlanService {
             return Err(projection_drift_error(&path));
         }
         Ok(plan)
+    }
+
+    /// Loads one immutable historical snapshot for retry reconciliation.
+    pub(crate) fn load_snapshot(&self, plan_id: &PlanId, revision: u64) -> Result<Plan, MinoError> {
+        self.store
+            .load_snapshot(plan_id, revision)
+            .map_err(|error| map_store_error(&error))
     }
 
     fn build_initial_plan(

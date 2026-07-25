@@ -8,7 +8,9 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 pub use policy::{AddEvidenceRequest, EvidenceRequestContext, EvidenceSource};
-pub use store::{EvidenceAddReport, EvidenceAudit, EvidenceFinding, EvidenceStore};
+pub use store::{
+    CommandEvidenceRequest, EvidenceAddReport, EvidenceAudit, EvidenceFinding, EvidenceStore,
+};
 
 /// Stable categories for evidence-policy and persistence failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

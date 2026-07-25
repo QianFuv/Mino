@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use crate::commands::agent::{self, AgentAction};
 use crate::commands::evidence::{self, EvidenceAction};
+use crate::commands::exec::{self, ExecAction};
 use crate::commands::plan::{self, PlanAction};
 use crate::commands::project::{self, ProjectAction};
 use crate::commands::standards::{self, StandardsAction};
@@ -42,6 +43,8 @@ enum Command {
     Agent(AgentArguments),
     /// Capture and query immutable execution evidence.
     Evidence(EvidenceArguments),
+    /// Execute approved plans with ordered evidence gates.
+    Exec(ExecArguments),
 }
 
 #[derive(Debug, Args)]
@@ -72,6 +75,12 @@ struct AgentArguments {
 struct EvidenceArguments {
     #[command(subcommand)]
     action: EvidenceAction,
+}
+
+#[derive(Debug, Args)]
+struct ExecArguments {
+    #[command(subcommand)]
+    action: ExecAction,
 }
 
 enum CliResponse {
@@ -119,6 +128,9 @@ fn execute(cli: Cli) -> Result<CliResponse, MinoError> {
             agent::execute(&start, arguments.action, no_input, format).map(CliResponse::Direct)
         }
         Some(Command::Evidence(arguments)) => evidence::execute(&start, arguments.action)
+            .map(crate::commands::CommandResponse::into_result)
+            .map(CliResponse::Result),
+        Some(Command::Exec(arguments)) => exec::execute(&start, arguments.action)
             .map(crate::commands::CommandResponse::into_result)
             .map(CliResponse::Result),
         None => Ok(CliResponse::Result(MinoResult::success(

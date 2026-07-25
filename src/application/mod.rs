@@ -4,5 +4,7 @@
 pub mod agent;
 /// Plan finalization, review, show, and explicit approval service.
 pub mod approval;
+/// Ordered execution, checkpointing, planned checks, and evidence attachment.
+pub mod execution;
 /// Plan authoring and read-side application service.
 pub mod plan;

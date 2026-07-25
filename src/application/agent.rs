@@ -8,8 +8,8 @@ use crate::application::plan::{
     PlanService, derived_request_id, draft_missing, draft_next_actions,
 };
 use crate::domain::{
-    CURRENT_PROTOCOL_REVISION, CURRENT_PROTOCOL_VERSION, Plan, PlanId, PlanStatus, TaskId,
-    TaskStatus,
+    CURRENT_PROTOCOL_REVISION, CURRENT_PROTOCOL_VERSION, CheckId, CheckStatus, Plan, PlanId,
+    PlanStatus, TaskId, TaskStatus,
 };
 use crate::validation::validate_plan;
 use crate::{MinoError, NextAction};
@@ -321,7 +321,9 @@ fn guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
             ]),
             blocked_actions: vec![blocked("git.commit", "Task verification is incomplete")],
             approval_required: false,
-            next_actions: Vec::new(),
+            next_actions: next_execution_check(plan)
+                .map(|check_id| vec![check_action(plan, check_id)])
+                .unwrap_or_default(),
         }),
         PlanStatus::Blocked => Ok(Guidance {
             allowed_actions: action_ids(&["exec.resume"]),
@@ -472,6 +474,41 @@ fn start_action(plan: &Plan, task_id: &TaskId) -> NextAction {
 
 fn resume_action(plan: &Plan) -> NextAction {
     mutation_action(plan, "exec.resume", &["exec", "resume"], Vec::new())
+}
+
+fn check_action(plan: &Plan, check_id: &CheckId) -> NextAction {
+    mutation_action(
+        plan,
+        "exec.check.run",
+        &["exec", "check", "run"],
+        vec!["--check".to_owned(), check_id.to_string()],
+    )
+}
+
+fn next_execution_check(plan: &Plan) -> Option<&CheckId> {
+    if let Some(task) = plan
+        .tasks()
+        .iter()
+        .find(|task| task.status() == TaskStatus::InProgress)
+    {
+        return task
+            .verification_checks()
+            .iter()
+            .find(|check| matches!(check.status(), CheckStatus::Pending | CheckStatus::Failed))
+            .map(crate::domain::VerificationCheck::id);
+    }
+    if plan
+        .tasks()
+        .iter()
+        .all(|task| task.status() == TaskStatus::Done)
+    {
+        return plan
+            .global_verification()
+            .iter()
+            .find(|check| matches!(check.status(), CheckStatus::Pending | CheckStatus::Failed))
+            .map(crate::domain::VerificationCheck::id);
+    }
+    None
 }
 
 fn mutation_action(plan: &Plan, id: &str, command: &[&str], extra: Vec<String>) -> NextAction {
