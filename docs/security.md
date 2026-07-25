@@ -18,6 +18,9 @@ deployment, or messaging operations.
   artifact paths must remain project-relative; absolute paths and traversal are
   rejected where the protocol requires repository ownership.
 - `.mino/plans/**` is the canonical store. Do not edit it manually.
+- `.mino/active.json` is a versioned worktree/branch binding store. Change it
+  only through `mino git bind`; malformed or stale identity is diagnosed
+  instead of silently repaired.
 - `docs/plan/*.md` is a digest-checked projection. Manual changes cause drift
   and are preserved rather than overwritten.
 - Plan transactions, snapshots, events, run journals, evidence records, and
@@ -85,11 +88,22 @@ not fetch them.
 
 ## Git and external side effects
 
-Mino v0.1 invokes Git only for read-only root discovery and changed-file
-inspection. It does not stage, commit, push, merge, rebase, reset, amend,
+The implemented Git adapter invokes Git only for read-only root discovery and
+repository/worktree/HEAD/index/status inspection. Commands run directly
+without a shell, disable terminal prompting and optional locks, bound captured
+output, and strictly parse machine-readable results. `mino git inspect` writes
+nothing. `mino git bind` writes only `.mino/active.json` through a bounded lock
+and atomic replacement; it does not mutate Git state.
+
+Mino does not yet stage, commit, push, merge, rebase, reset, amend,
 force-push, tag, create/delete branches, or create/delete worktrees. A plan's
-Git Flow consent and commit gate constrain an external authorized workflow but
-do not execute it.
+Git Flow consent and commit gate still constrain an external authorized
+workflow but do not yet execute it.
+
+Active-plan selection requires the canonical common-directory and worktree to
+match. Branch bindings require the same branch; detached bindings require the
+same exact HEAD. Stale and foreign bindings expose no active plan, preventing a
+plan or authorization decision from leaking across linked worktrees.
 
 File Map matching accepts normalized exact paths plus narrow `*`/`**` patterns.
 Traversal, absolute paths, malformed Git porcelain, duplicate paths, and
@@ -114,8 +128,9 @@ Agent consumers must use JSON/no-input mode and inspect `approval_required`,
 
 Never approve on the user's behalf, infer authorization from conversational
 tone, copy the protocol template as a fallback, or fabricate plan/evidence
-state when Mino is unavailable. There is no hidden Git mutation path and no
-arbitrary status setter.
+state when Mino is unavailable. There is no hidden Git mutation path: the only
+implemented Git-adjacent write is the declared `.mino/active.json` binding.
+There is no arbitrary status setter.
 
 ## Recovery guidance
 

@@ -1,4 +1,4 @@
-# Mino v0.1 architecture
+# Mino architecture
 
 ## Responsibility boundary
 
@@ -26,6 +26,7 @@ flowchart TD
 | Repository Mino Skill | Intent routing, CLI orchestration, approval stops | State transitions, direct managed-file edits, fallback templates |
 | CLI/application services | Commands, concurrency checks, policy gates, evidence binding | Requirement interpretation or hidden approvals |
 | Domain | Valid plan/task/check/criterion states and legal transitions | Filesystem, process, network, or Git side effects |
+| Git adapter and binding service | Read-only Git facts and explicit worktree-local active-plan identity | Branch, index, commit, or remote mutation |
 | `.mino/` | Machine-readable source of truth and immutable history | User-authored documentation |
 | `docs/plan/*.md` | Human review projection | Source state or an editing surface |
 | Standards engine | Embedded packages, recommendation, check resolution, explicit sync | General dependency installation |
@@ -55,6 +56,8 @@ apply flags are present and marker ownership is valid.
 │   ├── config.toml                      project format and optional catalog URL
 │   ├── protocol.lock                    schema/protocol/renderer lock
 │   ├── standards.lock                   selected standards and catalog generation
+│   ├── active.json                      worktree-keyed active-plan bindings
+│   ├── active.lock                      bounded active-binding writer lock
 │   ├── cache/standards/                 verified immutable sync generations
 │   └── plans/<plan-id>/
 │       ├── plan.json                    current canonical aggregate
@@ -81,11 +84,37 @@ tracked like other stable repository instructions.
 | `.mino/config.toml` | Mino project configuration; change only through supported configuration workflows. |
 | `.mino/protocol.lock` | Mino protocol lock; never hand-rewrite to claim compatibility. |
 | `.mino/standards.lock` | Mino standards lock; explicit sync may atomically replace it. |
+| `.mino/active.json` | Versioned active-plan bindings; change only through `mino git bind`. |
+| `.mino/active.lock` | Advisory binding lock; Mino owns its lifecycle and contents. |
 | `.mino/plans/` | Canonical plans, history, runs, and evidence; manual editing is prohibited. |
 | `docs/plan/` | Generated Markdown projections; manual editing is prohibited. |
 | `.agents/skills/mino/` | Stable bundled repository Skill; Mino updates only marker-owned bundle files. |
 | `AGENTS.md` | User-owned except for the exact Mino workflow marker region. |
 | `.gitignore` | User-owned except for the exact Mino runtime marker region. |
+
+## Worktree-aware active-plan identity
+
+`mino git inspect` runs a narrow read-only Git adapter without a shell and
+parses NUL-delimited porcelain v2. It reports canonical worktree,
+common-directory, worktree-specific Git directory, resolved index path, branch
+or detached HEAD, upstream divergence, and sorted staged/unstaged/untracked
+facts. Normal, unborn, detached, bare, linked-worktree, and non-repository
+states remain explicit rather than being inferred from display text.
+
+`mino git bind --plan <id> --current` publishes `.mino/active.json` under a
+bounded lock and atomic replacement. A binding keys the canonical Git common
+directory and canonical worktree root, then records either the branch name or
+the exact detached HEAD. A branch binding remains current when that branch
+advances; a detached binding requires the same commit. Switching branch or
+leaving detached mode produces `stale_branch` or `stale_head`. An explicit bind
+atomically replaces only the current worktree entry, which permits selecting a
+later plan without changing another linked worktree's selection.
+
+Agent context and active-plan lookup use only a `current` same-worktree
+binding. `foreign_worktree`, stale, and non-repository states expose no active
+plan. For compatibility, absence of `active.json` retains the v0.1 single
+non-Done-plan lookup; once the binding file exists, there is no cross-worktree
+fallback.
 
 ## Plan and task lifecycle
 

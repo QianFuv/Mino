@@ -12,6 +12,7 @@ use crate::domain::{
     GitReadiness, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId, StandardSelection, TaskId,
     Timestamp, VerificationCheck,
 };
+use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter};
 use crate::project;
 use crate::render::{
     ProjectionStatus, RenderError, RenderErrorKind, RenderedPlan, check_projection, render_plan,
@@ -561,6 +562,48 @@ impl PlanService {
     /// Returns a typed error for malformed private state, projection drift, I/O
     /// failure, or more than one active non-Done plan.
     pub fn active_plan(&self) -> Result<Option<Plan>, MinoError> {
+        let facts = GitAdapter::new(&self.root)
+            .inspect()
+            .map_err(|error| crate::application::git_binding::map_git_error(&error))?;
+        let binding = ActiveBindingStore::new(&self.root)
+            .resolve(&facts)
+            .map_err(|error| crate::application::git_binding::map_git_error(&error))?;
+        match binding.status {
+            ActiveBindingStatus::Current => {
+                let binding = binding.binding.ok_or_else(|| {
+                    MinoError::new(
+                        ErrorCategory::DriftDetected,
+                        "Current active binding has no plan identity",
+                    )
+                })?;
+                let plan = self.load_verified(&binding.plan_id)?;
+                if plan.revision() < binding.plan_revision {
+                    return Err(MinoError::new(
+                        ErrorCategory::DriftDetected,
+                        format!(
+                            "Active binding records plan {} revision {}, but current state is revision {}",
+                            binding.plan_id,
+                            binding.plan_revision,
+                            plan.revision()
+                        ),
+                    ));
+                }
+                return if plan.status() == PlanStatus::Done {
+                    Ok(None)
+                } else {
+                    Ok(Some(plan))
+                };
+            }
+            ActiveBindingStatus::ForeignWorktree | ActiveBindingStatus::NotRepository => {
+                return Ok(None);
+            }
+            ActiveBindingStatus::StaleBranch | ActiveBindingStatus::StaleHead => return Ok(None),
+            ActiveBindingStatus::Missing => {}
+        }
+        self.legacy_active_plan()
+    }
+
+    fn legacy_active_plan(&self) -> Result<Option<Plan>, MinoError> {
         let plans_directory = self.store.paths().plans_directory();
         let entries = fs::read_dir(&plans_directory).map_err(|error| {
             MinoError::new(

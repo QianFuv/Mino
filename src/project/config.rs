@@ -63,6 +63,12 @@ impl ProjectLayout {
         self.mino_directory().join("standards.lock")
     }
 
+    /// Returns the worktree-aware active-plan binding path.
+    #[must_use]
+    pub fn active_bindings(&self) -> PathBuf {
+        self.mino_directory().join("active.json")
+    }
+
     /// Returns the plan-state directory.
     #[must_use]
     pub fn plans_directory(&self) -> PathBuf {

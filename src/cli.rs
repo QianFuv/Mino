@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use crate::commands::agent::{self, AgentAction};
 use crate::commands::evidence::{self, EvidenceAction};
 use crate::commands::exec::{self, ExecAction};
+use crate::commands::git::{self, GitAction};
 use crate::commands::plan::{self, PlanAction};
 use crate::commands::project::{self, ProjectAction};
 use crate::commands::protocol::{self, ProtocolAction};
@@ -46,6 +47,8 @@ enum Command {
     Evidence(EvidenceArguments),
     /// Execute approved plans with ordered evidence gates.
     Exec(ExecArguments),
+    /// Inspect Git facts and manage worktree-aware active-plan bindings.
+    Git(GitArguments),
     /// Inspect embedded protocol compatibility and explicit migrations.
     Protocol(ProtocolArguments),
 }
@@ -84,6 +87,12 @@ struct EvidenceArguments {
 struct ExecArguments {
     #[command(subcommand)]
     action: ExecAction,
+}
+
+#[derive(Debug, Args)]
+struct GitArguments {
+    #[command(subcommand)]
+    action: GitAction,
 }
 
 #[derive(Debug, Args)]
@@ -140,6 +149,9 @@ fn execute(cli: Cli) -> Result<CliResponse, MinoError> {
             .map(crate::commands::CommandResponse::into_result)
             .map(CliResponse::Result),
         Some(Command::Exec(arguments)) => exec::execute(&start, arguments.action)
+            .map(crate::commands::CommandResponse::into_result)
+            .map(CliResponse::Result),
+        Some(Command::Git(arguments)) => git::execute(&start, arguments.action)
             .map(crate::commands::CommandResponse::into_result)
             .map(CliResponse::Result),
         Some(Command::Protocol(arguments)) => protocol::execute(&start, arguments.action)

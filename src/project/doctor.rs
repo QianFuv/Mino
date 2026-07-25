@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::domain::Plan;
+use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter};
 use crate::integration::{IntegrationFindingSeverity, inspect_project};
 use crate::render::{ProjectionStatus, check_projection, render_plan};
 use crate::{ErrorCategory, MinoError};
@@ -94,6 +95,7 @@ pub fn diagnose(layout: &ProjectLayout) -> Result<DoctorReport, MinoError> {
     inspect_protocol_lock(layout, &mut findings);
     inspect_standards_lock(layout, &mut findings);
     inspect_transactions_and_projections(layout, &mut findings)?;
+    inspect_active_binding(layout, &mut findings);
     inspect_integrations(layout, &mut findings)?;
     findings.sort_by(|left, right| {
         left.code
@@ -104,6 +106,65 @@ pub fn diagnose(layout: &ProjectLayout) -> Result<DoctorReport, MinoError> {
         root: layout.root().to_path_buf(),
         findings,
     })
+}
+
+fn inspect_active_binding(layout: &ProjectLayout, findings: &mut Vec<DoctorFinding>) {
+    let path = layout.active_bindings();
+    if !path.exists() {
+        return;
+    }
+    let facts = match GitAdapter::new(layout.root()).inspect() {
+        Ok(facts) => facts,
+        Err(error) => {
+            findings.push(DoctorFinding::new(
+                "active_binding_git_unavailable",
+                FindingSeverity::Error,
+                error.to_string(),
+                Some(path),
+            ));
+            return;
+        }
+    };
+    let resolution = match ActiveBindingStore::new(layout.root()).resolve(&facts) {
+        Ok(resolution) => resolution,
+        Err(error) => {
+            findings.push(DoctorFinding::new(
+                "active_binding_corrupt",
+                FindingSeverity::Error,
+                error.to_string(),
+                Some(path),
+            ));
+            return;
+        }
+    };
+    let code = match resolution.status {
+        ActiveBindingStatus::Current => {
+            if resolution.binding.as_ref().is_some_and(|binding| {
+                layout
+                    .plans_directory()
+                    .join(binding.plan_id.as_str())
+                    .join("plan.json")
+                    .is_file()
+            }) {
+                return;
+            }
+            "active_binding_plan_missing"
+        }
+        ActiveBindingStatus::ForeignWorktree => "active_binding_worktree_mismatch",
+        ActiveBindingStatus::StaleBranch => "active_binding_branch_stale",
+        ActiveBindingStatus::StaleHead => "active_binding_head_stale",
+        ActiveBindingStatus::NotRepository => "active_binding_repository_missing",
+        ActiveBindingStatus::Missing => return,
+    };
+    findings.push(DoctorFinding::new(
+        code,
+        FindingSeverity::Error,
+        format!(
+            "Active plan binding does not match the current Git identity: {:?}",
+            resolution.status
+        ),
+        Some(path),
+    ));
 }
 
 fn inspect_config(layout: &ProjectLayout, findings: &mut Vec<DoctorFinding>) {

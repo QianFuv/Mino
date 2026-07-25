@@ -1,4 +1,4 @@
-//! Executable inventory checks for the authoritative v0.1 documentation.
+//! Executable inventory checks for the authoritative command documentation.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -17,6 +17,7 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
             "agent",
             "evidence",
             "exec",
+            "git",
             "protocol",
             "help",
         ],
@@ -90,6 +91,7 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     ),
     (&["exec", "check", "--help"], &["run", "help"]),
     (&["exec", "criterion", "--help"], &["pass", "help"]),
+    (&["git", "--help"], &["inspect", "bind", "help"]),
     (&["protocol", "--help"], &["status", "migrate", "help"]),
 ];
 
@@ -108,6 +110,8 @@ const LEAF_COMMANDS: &[&str] = &[
     "exec finish",
     "exec resume",
     "exec start",
+    "git bind",
+    "git inspect",
     "plan apply",
     "plan approve",
     "plan context add",
@@ -177,7 +181,7 @@ fn help_commands(output: &Output) -> Vec<String> {
 }
 
 #[test]
-fn recursive_help_inventory_is_exact_and_has_no_v0_2_review_group() {
+fn recursive_help_inventory_is_exact_and_has_no_review_group() {
     for (arguments, expected) in HELP_CASES {
         assert_eq!(
             help_commands(&run_mino(arguments)),
@@ -187,7 +191,7 @@ fn recursive_help_inventory_is_exact_and_has_no_v0_2_review_group() {
     }
     let top_level = help_commands(&run_mino(&["--help"]));
     assert!(!top_level.contains(&"review".to_owned()));
-    assert!(!top_level.contains(&"git".to_owned()));
+    assert!(top_level.contains(&"git".to_owned()));
 }
 
 #[test]
@@ -228,6 +232,12 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             .iter()
             .find(|action| action["id"] == "evidence.add")
             .is_some_and(|action| action["mutates"] == true)
+    );
+    assert!(
+        actions
+            .iter()
+            .find(|action| action["id"] == "git.bind")
+            .is_some_and(|action| action["mutates"] == false)
     );
     assert_eq!(
         actions
@@ -281,6 +291,7 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
         ".mino/config.toml",
         ".mino/protocol.lock",
         ".mino/standards.lock",
+        ".mino/active.json",
         ".mino/plans/",
         "docs/plan/",
         ".agents/skills/mino/",

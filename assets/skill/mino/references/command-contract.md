@@ -22,6 +22,22 @@ The context fields that control behavior are `active_plan`,
 an `id` and an `argv` array. Execute argv as an argument vector without shell
 parsing. Re-read context after each successful mutation.
 
+## Git identity and active binding
+
+Agent context includes canonical Git worktree identity, branch or detached
+HEAD, cleanliness, staged/unstaged paths, and active-binding status when the
+project is in a Git worktree. `current` is the only binding status that may
+select an active plan. Treat `foreign_worktree`, `stale_branch`, `stale_head`,
+and `not_repository` as no active plan; do not fall back to another plan.
+
+Use `mino git inspect --plan <id> --format json --no-input` for a complete
+read-only relationship report. Use
+`mino git bind --plan <id> --current --format json --no-input` only to bind the
+named non-Done plan to the exact current worktree and branch or detached HEAD.
+Binding writes `.mino/active.json`; it does not stage, commit, switch branches,
+or otherwise mutate Git. Exact repeated binds are idempotent; binding another
+plan explicitly replaces only the current worktree's prior selection.
+
 ## Initial creation
 
 Only when the user explicitly requests formal or durable planning and context

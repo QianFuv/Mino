@@ -8,5 +8,7 @@ pub mod approval;
 pub mod completion;
 /// Ordered execution, checkpointing, planned checks, and evidence attachment.
 pub mod execution;
+/// Git inspection and worktree-aware active-plan binding service.
+pub mod git_binding;
 /// Plan authoring and read-side application service.
 pub mod plan;

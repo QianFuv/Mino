@@ -1,7 +1,9 @@
-# Mino v0.1 command and JSON contract
+# Mino command and JSON contract
 
-This document is the authoritative v0.1 CLI inventory. `mino --help` remains
-the source for individual argument spelling and value choices.
+This document is the authoritative implemented CLI inventory. The v0.1 plan
+protocol remains stable while explicitly labeled v0.2 Git surfaces are added.
+`mino --help` remains the source for individual argument spelling and value
+choices.
 
 ## Invocation rules
 
@@ -22,7 +24,9 @@ Except for initial `plan create`, mutations against an existing plan or its
 evidence require a current `--expect-revision` and a UUID `--request-id`;
 authored mutations also identify `--actor`. Use a fresh UUID for each distinct
 mutation. Reuse it only for an exact retry. After a successful mutation,
-discard the old revision and read context again.
+discard the old revision and read context again. `git bind` changes only the
+worktree-local active binding, not a plan revision, and therefore does not use
+the plan mutation arguments.
 
 ## Complete command inventory
 
@@ -40,6 +44,21 @@ discard the old revision and read context again.
 
 `project init --apply-agents-block` and
 `project init --apply-gitignore-block` modify only their owned marker regions.
+
+### Git inspection and active binding
+
+| Command | Mutation | Contract |
+|---|---:|---|
+| `mino git inspect` | No | Return repository, common-directory, worktree, Git-directory, index, HEAD, upstream, porcelain-v2 status, and active-binding facts; optional `--plan` verifies one plan and reports whether it is bound. |
+| `mino git bind` | `.mino/active.json` only | Require `--plan <id> --current`; bind one non-Done plan to the canonical current worktree plus branch, or to the exact detached HEAD. Exact retries preserve the original bytes. |
+
+Binding status is one of `missing`, `current`, `foreign_worktree`,
+`stale_branch`, `stale_head`, or `not_repository`. Once an active binding file
+exists, a foreign or stale binding never falls back to a plan from another
+worktree or branch. An explicit bind replaces only the current worktree's prior
+binding and preserves entries for other worktrees. `git inspect` does not
+modify Git or Mino state. `git bind` does not stage files or change HEAD,
+branches, refs, the index, or commits.
 
 ### Plan authoring and approval
 
@@ -88,7 +107,7 @@ cached packages. Only sync uses the configured network catalog.
 |---|---|
 | `mino agent context` | Complete dynamic project/active-plan state, allowed/blocked actions, approval boundary, and canonical next argv. |
 | `mino agent next` | Focused active-plan, approval, blocked-action, and next-action view. |
-| `mino agent capabilities` | Static v0.1 action inventory and invocation/mutation requirements. |
+| `mino agent capabilities` | Static implemented action inventory and invocation/mutation requirements. |
 
 These commands return their direct schemas, not a `mino.result/v1` wrapper.
 They fail with exit 5 unless JSON and no-input mode are both selected.
@@ -117,8 +136,9 @@ record with `supersedes`; records and blobs are never rewritten.
 | `mino exec resume` | Yes | Restore the exact recorded Ready/In Progress state. |
 | `mino exec finish` | Yes | Require all tasks/global checks complete and transition In Progress to Review. |
 
-Mino v0.1 executes checks but performs no Git commit, push, merge, rebase,
-reset, amend, tag, branch, or worktree mutation.
+The v0.1 execution commands perform no Git commit, push, merge, rebase, reset,
+amend, tag, branch, or worktree mutation. The v0.2 `git bind` surface writes
+only Mino's local active-binding file; Git repository state is unchanged.
 
 ## Success envelope
 
@@ -202,7 +222,10 @@ Check states are `Pending`, `Running`, `Passed`, `Failed`, and `Blocked`.
 Criterion states are `Pending`, `Passed`, `Failed`, and `Accepted Exception`.
 Git Flow consent is `Pending`, `Approved`, or `Disabled`.
 
-Only transitions exposed by the command inventory are v0.1 promises. In
-particular, Review-to-Done and review rework are not v0.1 CLI operations.
+Active binding states are `missing`, `current`, `foreign_worktree`,
+`stale_branch`, `stale_head`, and `not_repository`.
+
+Only transitions exposed by the command inventory are implemented promises. In
+particular, Review-to-Done and review rework are not current CLI operations.
 No command accepts an arbitrary status value: every status change is a named
 semantic transition with state-specific preconditions.

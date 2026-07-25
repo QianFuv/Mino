@@ -11,6 +11,7 @@ use crate::domain::{
     CURRENT_PROTOCOL_REVISION, CURRENT_PROTOCOL_VERSION, CheckId, CheckStatus, Plan, PlanId,
     PlanStatus, TaskId, TaskStatus,
 };
+use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitHeadState};
 use crate::validation::validate_plan;
 use crate::{MinoError, NextAction};
 
@@ -36,6 +37,8 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("exec.finish", true, false),
     ("exec.resume", true, false),
     ("exec.start", true, false),
+    ("git.bind", false, false),
+    ("git.inspect", false, false),
     ("plan.apply", true, false),
     ("plan.approve", true, true),
     ("plan.context.add", true, false),
@@ -78,6 +81,31 @@ pub struct AgentProject {
     pub protocol: String,
 }
 
+/// Current Git worktree and active-binding facts exposed to an Agent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AgentGitContext {
+    /// Canonical worktree root.
+    pub worktree: String,
+    /// Canonical shared common-directory identity.
+    pub common_dir: String,
+    /// Current branch, absent for detached HEAD.
+    pub branch: Option<String>,
+    /// Current full HEAD object ID, absent on an unborn branch.
+    pub head: Option<String>,
+    /// Explicit branch, unborn, or detached classification.
+    pub head_state: GitHeadState,
+    /// Whether porcelain v2 reports no index/worktree/untracked changes.
+    pub is_clean: bool,
+    /// Sorted staged paths.
+    pub staged_paths: Vec<String>,
+    /// Sorted unstaged and untracked paths.
+    pub unstaged_paths: Vec<String>,
+    /// Current binding relationship for this worktree.
+    pub binding_status: ActiveBindingStatus,
+    /// Bound plan when the resolution contains one.
+    pub bound_plan: Option<PlanId>,
+}
+
 /// Current plan identity and active execution slot exposed to an Agent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct AgentActivePlan {
@@ -107,6 +135,9 @@ pub struct AgentContext {
     pub kind: &'static str,
     /// Discovered project and protocol identity.
     pub project: AgentProject,
+    /// Git worktree facts when the project belongs to a repository.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git: Option<AgentGitContext>,
     /// Only active non-Done plan, when one exists.
     pub active_plan: Option<AgentActivePlan>,
     /// Legal action identifiers in deterministic order.
@@ -270,10 +301,12 @@ pub fn build_agent_context(
         root: root.to_string_lossy().into_owned(),
         protocol: protocol_name(),
     };
+    let git = agent_git_context(root)?;
     let Some(plan) = active_plan else {
         return Ok(AgentContext {
             kind: AGENT_CONTEXT_KIND,
             project,
+            git,
             active_plan: None,
             allowed_actions: vec!["plan.create".to_owned()],
             blocked_actions: Vec::new(),
@@ -297,6 +330,7 @@ pub fn build_agent_context(
     Ok(AgentContext {
         kind: AGENT_CONTEXT_KIND,
         project,
+        git,
         active_plan: Some(active_plan),
         allowed_actions: guidance.allowed_actions,
         blocked_actions: guidance.blocked_actions,
@@ -304,6 +338,52 @@ pub fn build_agent_context(
         approval_required: guidance.approval_required,
         next_actions: guidance.next_actions,
     })
+}
+
+fn agent_git_context(root: &Path) -> Result<Option<AgentGitContext>, MinoError> {
+    let Ok(facts) = GitAdapter::new(root).inspect() else {
+        return Ok(None);
+    };
+    if !facts.repository || !facts.is_worktree {
+        return Ok(None);
+    }
+    let resolution = ActiveBindingStore::new(root)
+        .resolve(&facts)
+        .map_err(|error| crate::application::git_binding::map_git_error(&error))?;
+    let worktree = facts
+        .worktree
+        .as_deref()
+        .and_then(Path::to_str)
+        .ok_or_else(|| {
+            MinoError::new(
+                crate::ErrorCategory::DriftDetected,
+                "Git worktree path is not valid UTF-8",
+            )
+        })?
+        .replace('\\', "/");
+    let common_dir = facts
+        .common_dir
+        .as_deref()
+        .and_then(Path::to_str)
+        .ok_or_else(|| {
+            MinoError::new(
+                crate::ErrorCategory::DriftDetected,
+                "Git common-directory path is not valid UTF-8",
+            )
+        })?
+        .replace('\\', "/");
+    Ok(Some(AgentGitContext {
+        worktree,
+        common_dir,
+        branch: facts.branch,
+        head: facts.head,
+        head_state: facts.head_state,
+        is_clean: facts.is_clean,
+        staged_paths: facts.staged_paths,
+        unstaged_paths: facts.unstaged_paths,
+        binding_status: resolution.status,
+        bound_plan: resolution.binding.map(|binding| binding.plan_id),
+    }))
 }
 
 struct Guidance {
