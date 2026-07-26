@@ -150,6 +150,21 @@ success; attempts exhausted, deadline, and cancellation return exit 6 with the
 complete report. Do not replace this command with loops, tails, watchers,
 background processes, schedulers, manual polling, or rebuilt attempt argv.
 
+Emit a complete external scheduled-task handoff without creating it using:
+
+```text
+mino exec schedule spec --plan <id> --expect-revision <revision> --check <check-id> --execution-request-id <uuid> --actor <actor> --execution-environment <environment> --max-attempts <1..100> --interval-milliseconds <1..60000> --deadline-milliseconds <1..86400000> --trigger-at <rfc3339> --expires-at <rfc3339> --max-dispatch-attempts <1..100> --dispatch-retry-milliseconds <1..86400000> --success-condition <text> --stop-condition <text> --failure-handling <text> --result-destination <project-relative-file> --format json --no-input
+```
+
+The expiry window must cover every bounded monitor dispatch and retry delay and
+cannot exceed 31 days. The result path must use existing regular in-project
+parents and cannot target `.mino/**` or `docs/plan/**`. Verify the
+`mino.scheduled-task-spec/v1` digest, exact argv/revision context, explicit
+outcome policy, false emission side effects, and separate-authorization fields.
+This command never contacts or mutates a scheduler. Stop and obtain separate
+explicit user authorization before creating or updating external scheduled
+work; do not convert the handoff into a loop, daemon, or hidden API call.
+
 ## Plan alternatives
 
 Create an independent Draft from one exact retained revision with:

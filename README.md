@@ -13,8 +13,8 @@ review feedback, rework, final acceptance, typed Minor/Material plan changes,
 conservative legacy-plan import, and explicit source-bound standards-conflict
 decisions, historical plan forks, semantic plan diffs, and approval-bound
 non-destructive archive state. Finite foreground check monitoring and optional
-advisory pre/post commit hooks are also available. Persistent scheduling, team
-catalogs, and plugin distribution remain deferred.
+advisory pre/post commit hooks are also available. External scheduler execution,
+team catalogs, and plugin distribution remain deferred.
 
 ## What v0.1 provides
 
@@ -86,6 +86,14 @@ attempt exhaustion, deadline, or an optional safe cancellation file. Every
 attempt retains normal command evidence, while one immutable request-bound
 `mino.monitor/v1` summary makes exact retries read-only. Monitoring stays in
 the foreground and creates no daemon, scheduler, or background service.
+
+The v0.3 scheduled-task increment adds `exec schedule spec`. It emits a
+digest-bound `mino.scheduled-task-spec/v1` handoff containing the exact
+project, plan revision, check identity, bounded monitor argv, execution
+environment, trigger/expiry/retry budget, outcome policies, and safe result
+destination. Emission is read-only: it does not contact a scheduler or network
+and does not write Mino state. Creating or updating an external scheduled task
+always requires separate explicit authorization.
 
 ## Requirements and installation
 
@@ -169,6 +177,10 @@ and read context again. Stop whenever `approval_required` is true. Never edit
   check, and records its immutable terminal summary inside the plan store.
   Cancellation is a project-relative regular file, never an unbounded signal
   watcher or background process.
+- Scheduled-task specification output verifies current plan, snapshot,
+  projection, and check identity without repair. It refuses unbounded windows
+  and managed/escaping result paths, and never treats specification emission as
+  authorization to create external scheduled work.
 
 ## Documentation
 

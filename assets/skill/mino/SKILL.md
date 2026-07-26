@@ -1,6 +1,6 @@
 ---
 name: mino
-description: Create, fork, compare, validate, execute, resume, update, amend, archive, review, rework, audit, and optionally integrate advisory Git hooks for durable implementation plans through the Mino CLI. Use when a user explicitly requests a formal plan, work requires durable planning, plan alternatives must be compared, an existing Mino plan must be resumed or updated, verification evidence must be recorded, review or rework must be handled, or plan-scoped Git Flow must be followed.
+description: Create, fork, compare, validate, execute, resume, update, amend, archive, review, rework, audit, emit scheduler-neutral task handoffs, and optionally integrate advisory Git hooks for durable implementation plans through the Mino CLI. Use when a user explicitly requests a formal plan, work requires durable planning, plan alternatives must be compared, an existing Mino plan must be resumed or updated, verification evidence must be recorded, bounded scheduled work must be specified, review or rework must be handled, or plan-scoped Git Flow must be followed.
 ---
 
 <!-- mino-managed-skill:v1 -->
@@ -92,11 +92,23 @@ deadline, and cancellation as exit-6 terminal reports whose attempt evidence
 must be preserved. Never emulate monitoring with a shell loop, tail, watcher,
 daemon, scheduler, repeated manual polling, or reconstructed child requests.
 
+## Scheduled-task handoffs
+
+Use `exec schedule spec` only to emit an inert handoff for one current runnable
+check. Read [command-contract.md](references/command-contract.md), supply the
+exact plan revision, bounded monitor and dispatch policy, execution environment,
+trigger/expiry, success/stop/failure handling, and safe result destination.
+Verify the returned digest and show that `external_creation_required` is true
+and `authorization_granted` is false. Stop before using any external scheduler
+until the user separately authorizes creation or update in that scheduler.
+Never infer scheduler consent from plan approval, Git Flow, or specification
+emission, and never emulate scheduling with a background loop or daemon.
+
 ## References
 
 - Read [command-contract.md](references/command-contract.md) when starting a
   plan, interpreting JSON or exit codes, recording execution evidence, or
-  invoking bounded check monitoring.
+  invoking bounded check monitoring or scheduled-task handoff output.
 - Read [approval-boundaries.md](references/approval-boundaries.md) whenever
   context requires approval or the next step involves review, exceptions,
   rework, or Git.

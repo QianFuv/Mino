@@ -38,6 +38,7 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("exec.criterion.pass", true, false),
     ("exec.finish", true, false),
     ("exec.resume", true, false),
+    ("exec.schedule.spec", false, false),
     ("exec.start", true, false),
     ("git.bind", false, false),
     ("git.branch.create", false, true),

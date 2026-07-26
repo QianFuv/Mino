@@ -30,6 +30,8 @@ pub mod protocol;
 pub mod render;
 /// Bounded no-shell process execution and recoverable run journals.
 pub mod runner;
+/// Scheduler-neutral, side-effect-free task handoff specifications.
+pub mod schedule;
 /// Embedded inert standards catalog, recommendations, and check resolution.
 pub mod standards;
 /// Recoverable revisioned storage, locking, hashing, and audit contracts.

@@ -120,6 +120,20 @@ summaries are bounded, canonical, request-hash-bound, and published without
 overwriting existing bytes. A failed, timed-out, or cancelled monitor still
 retains every completed attempt's immutable evidence and returns exit 6.
 
+`exec schedule spec` is an inert local read. It verifies current plan, snapshot,
+projection, revision, check eligibility, and a bounded trigger/expiry/retry
+budget, but it does not create or update an external scheduler task, access the
+network, or change plan, event, evidence, binding, projection, or result bytes.
+The output explicitly sets external creation as required and authorization as
+not granted; prior plan approval or Git Flow consent is not scheduler consent.
+
+External result destinations must be normalized project-relative files beneath
+existing regular directories. Absolute paths, traversal, symbolic parents,
+non-files, missing parents, `.mino/**`, and `docs/plan/**` are refused. The
+handoff command uses explicit argv boundaries and one idempotent bounded monitor
+request; it contains no shell, daemon, indefinite recurrence, or hidden
+scheduler API path.
+
 ## Output redaction and evidence
 
 Output is redacted before hashing or persistence. The default policy replaces

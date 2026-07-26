@@ -349,6 +349,22 @@ all produce a canonical request-hash-bound `mino.monitor/v1` record at
 directories and no-clobber publication make the terminal record immutable;
 an exact retry reads it before plan or evidence mutation.
 
+`exec schedule spec` composes one scheduler-neutral handoff around an exact
+bounded monitor command. The read path directly verifies canonical current plan
+bytes against the same-revision immutable snapshot and managed Markdown, then
+validates check eligibility on an in-memory plan clone. No PlanStore mutation,
+recovery publication, scheduler client, network client, or result write is
+invoked.
+
+The versioned `mino.scheduled-task-spec/v1` payload binds canonical project
+root, plan/check/projection digests, exact revision and execution request ID,
+complete Mino argv, environment, one trigger and hard expiry, finite dispatch
+attempts/retry budget, success/stop/failure policies, and a safe relative result
+destination. Its self-digest excludes only the digest field. The payload always
+records that external creation is still unauthorized and that emission changed
+no scheduler, network, or Mino state; another system may act only after a
+separate explicit authorization.
+
 ## Version ownership
 
 The v0.1 plan schema is `1`, renderer is `2`, and planning protocol is

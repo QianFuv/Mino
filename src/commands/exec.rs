@@ -14,6 +14,7 @@ use crate::commands::CommandResponse;
 use crate::domain::{
     CheckId, CheckpointKind, CriterionId, EvidenceId, PlanId, RequestId, TaskId, Timestamp,
 };
+use crate::schedule::{ScheduleSpecRequest, ScheduleSpecService};
 use crate::{ErrorCategory, MinoError};
 
 #[derive(Debug, Subcommand)]
@@ -24,6 +25,8 @@ pub(crate) enum ExecAction {
     Checkpoint(CheckpointArguments),
     /// Run one planned verification check.
     Check(CheckArguments),
+    /// Emit an inert scheduler-neutral task handoff.
+    Schedule(ScheduleArguments),
     /// Bind compatible immutable evidence to acceptance criteria.
     Criterion(CriterionArguments),
     /// Complete the active task after every evidence and scope gate passes.
@@ -144,6 +147,73 @@ struct CheckMonitorArguments {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct ScheduleArguments {
+    #[command(subcommand)]
+    action: ScheduleAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum ScheduleAction {
+    /// Emit one complete, bounded, scheduler-neutral task specification.
+    Spec(ScheduleSpecArguments),
+}
+
+#[derive(Debug, Args)]
+struct ScheduleSpecArguments {
+    /// Exact current plan identifier.
+    #[arg(long)]
+    plan: String,
+    /// Exact current plan revision bound into the scheduled command.
+    #[arg(long)]
+    expect_revision: u64,
+    /// Existing uniquely identified planned check.
+    #[arg(long)]
+    check: String,
+    /// Idempotency UUID for the eventual bounded monitor invocation.
+    #[arg(long)]
+    execution_request_id: String,
+    /// Actor recorded by eventual monitor attempts.
+    #[arg(long, default_value = "user")]
+    actor: String,
+    /// Human-readable external execution-environment identifier.
+    #[arg(long)]
+    execution_environment: String,
+    /// Maximum number of internal planned-check invocations.
+    #[arg(long)]
+    max_attempts: u32,
+    /// Delay between internal failed attempts in milliseconds.
+    #[arg(long)]
+    interval_milliseconds: u64,
+    /// Complete internal attempt-and-wait deadline in milliseconds.
+    #[arg(long)]
+    deadline_milliseconds: u64,
+    /// Earliest RFC3339 external dispatch instant.
+    #[arg(long)]
+    trigger_at: String,
+    /// Hard RFC3339 instant after which external dispatch must stop.
+    #[arg(long)]
+    expires_at: String,
+    /// Maximum number of external dispatch or recovery attempts.
+    #[arg(long)]
+    max_dispatch_attempts: u32,
+    /// Delay between failed external dispatch attempts in milliseconds.
+    #[arg(long)]
+    dispatch_retry_milliseconds: u64,
+    /// Explicit condition defining successful scheduled work.
+    #[arg(long)]
+    success_condition: String,
+    /// Explicit condition ending all external observation or dispatch.
+    #[arg(long)]
+    stop_condition: String,
+    /// Explicit response to dispatch or execution failure.
+    #[arg(long)]
+    failure_handling: String,
+    /// Safe project-relative file for the external scheduler's result.
+    #[arg(long)]
+    result_destination: PathBuf,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct CriterionArguments {
     #[command(subcommand)]
     action: CriterionAction,
@@ -239,6 +309,9 @@ pub(crate) fn execute(start: &Path, action: ExecAction) -> Result<CommandRespons
         ExecAction::Check(arguments) => match arguments.action {
             CheckAction::Run(arguments) => run_check(start, &service, arguments),
             CheckAction::Monitor(arguments) => monitor_check(start, arguments),
+        },
+        ExecAction::Schedule(arguments) => match arguments.action {
+            ScheduleAction::Spec(arguments) => schedule_spec(start, arguments),
         },
         ExecAction::Criterion(arguments) => match arguments.action {
             CriterionAction::Pass(arguments) => pass_criterion(start, arguments),
@@ -397,6 +470,39 @@ fn monitor_check(
         "Bounded monitoring stopped after the planned check passed.",
         report,
         guidance.next_actions,
+    )
+}
+
+fn schedule_spec(
+    start: &Path,
+    arguments: ScheduleSpecArguments,
+) -> Result<CommandResponse, MinoError> {
+    let monitor_bounds = MonitorBounds::new(
+        arguments.max_attempts,
+        arguments.interval_milliseconds,
+        arguments.deadline_milliseconds,
+    )?;
+    let spec = ScheduleSpecService::discover(start)?.generate(ScheduleSpecRequest {
+        plan_id: parse_plan_id(&arguments.plan)?,
+        expected_revision: arguments.expect_revision,
+        check_id: parse_check_id(&arguments.check)?,
+        execution_request_id: parse_request_id(&arguments.execution_request_id)?,
+        actor: arguments.actor,
+        execution_environment: arguments.execution_environment,
+        monitor_bounds,
+        trigger_at: Timestamp::parse(arguments.trigger_at).map_err(|error| domain_error(&error))?,
+        expires_at: Timestamp::parse(arguments.expires_at).map_err(|error| domain_error(&error))?,
+        max_dispatch_attempts: arguments.max_dispatch_attempts,
+        dispatch_retry_milliseconds: arguments.dispatch_retry_milliseconds,
+        success_condition: arguments.success_condition,
+        stop_condition: arguments.stop_condition,
+        failure_handling: arguments.failure_handling,
+        result_destination: arguments.result_destination,
+    })?;
+    response(
+        "Scheduler-neutral task specification emitted without external mutation.",
+        spec,
+        Vec::new(),
     )
 }
 

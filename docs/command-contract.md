@@ -252,6 +252,7 @@ satisfy completion. No evidence may be added while a proposal awaits apply.
 | `mino exec checkpoint` | Yes | Record a typed checkpoint for the active task. |
 | `mino exec check run` | Yes + process/evidence | Run one planned task/global check with durable lease/result and evidence attachment. |
 | `mino exec check monitor` | Yes + bounded processes/evidence | Re-run one existing planned check in the foreground under required attempt, interval, and elapsed-deadline bounds; stop on pass, attempt exhaustion, deadline, or an optional safe cancellation file. |
+| `mino exec schedule spec` | No | Emit one complete, digest-bound, scheduler-neutral handoff for a current runnable check; never create/update an external task, access the network, or write Mino state. |
 | `mino exec criterion pass` | Yes | Bind one compatible immutable evidence record to one active criterion. |
 | `mino exec complete` | Yes | Complete the active task after check, evidence, deviation, checkpoint, and File Map gates. |
 | `mino exec block` | Yes | Block a Ready/In Progress plan with a non-empty resumable reason. |
@@ -277,6 +278,27 @@ An exact retry returns it without executing, sleeping, or mutating state;
 different inputs under the same request ID return exit 3. A passing terminal
 reason returns exit 0. Attempt exhaustion, deadline, and cancellation return
 exit 6 with the complete `monitor` report and all completed attempt evidence.
+
+`exec schedule spec` binds an exact current `--plan`, `--expect-revision`, and
+`--check` to a complete future `exec check monitor` argv using the supplied
+`--execution-request-id`, actor, execution environment, and three internal
+monitor bounds. The external handoff additionally requires RFC3339
+`--trigger-at` and `--expires-at`, finite `--max-dispatch-attempts` and
+`--dispatch-retry-milliseconds`, non-empty success/stop/failure policies, and a
+safe project-relative `--result-destination`. The trigger-to-expiry window is
+limited to 31 days and must cover every possible monitor deadline plus every
+dispatch retry interval.
+
+The command read-only verifies canonical current plan bytes, the matching
+immutable snapshot, the managed projection, exact revision, unique check,
+check eligibility, working directory, and result path. Results cannot target
+`.mino/**`, `docs/plan/**`, an escaping path, a symbolic/non-directory parent,
+or a non-file existing destination. The returned
+`mino.scheduled-task-spec/v1` includes project/check digests, complete argv,
+explicit outcome policies, a false side-effect declaration, and
+`external_creation_required: true` with `authorization_granted: false`.
+Specification emission is not scheduler authorization and returns no scheduler
+creation action.
 
 The execution commands themselves perform no Git mutation. The v0.2 Git
 surfaces can write binding/journal state, create/switch only the deterministic
@@ -339,6 +361,7 @@ overwriting the common keys.
 | `mino.plan-review/v1` | Revision-bound `plan review` payload |
 | `mino.check-run/v1` | Persisted check lease/result `schema_version` |
 | `mino.monitor/v1` | Immutable terminal `exec check monitor` summary under `monitor_kind` |
+| `mino.scheduled-task-spec/v1` | Digest-bound inert `exec schedule spec` handoff under `spec_kind` |
 | `mino.plan-diff/v1` | Read-only semantic `plan diff` payload under `diff_kind` |
 | `mino.git-hook-status/v1` | Read-only `git hook status` and proposal status payload |
 | `mino.git-hook-proposal/v1` | Hash-bound `git hook propose` payload |
