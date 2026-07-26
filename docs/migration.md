@@ -59,6 +59,38 @@ At least one input is required. Each input is read as non-empty UTF-8 with a
 
 The command never edits, renames, or deletes a legacy source.
 
+## Legacy plan import
+
+Import one historical managed Markdown plan only when the project has no active
+plan:
+
+```text
+mino project import legacy --source legacy-plan.md --name imported-change --request-id 00000000-0000-0000-0000-000000000001 --actor user --format json --no-input
+```
+
+The source must be a non-empty, NUL-free UTF-8 regular file no larger than 1
+MiB. Parsing is code-fence aware and recognizes simple front matter plus the
+managed Metadata, Summary, Context, Scope, Decisions, Approach, File Map,
+Interfaces, Edge Cases, `T<n>` tasks, Git Flow declarations, and Verification
+Plan shapes. The report identifies the exact source path, byte count, SHA-256,
+source line and fragment for each mapping, stable warnings, and the new plan ID
+and revision.
+
+Only authored definitions enter strict `DraftPlanInput`. Imported tasks must be
+unique contiguous original `T1..Tn` tasks. Absolute, traversal, backslash,
+`.mino/**`, and `docs/plan/**` paths are omitted. Shell-control syntax and known
+shell or destructive executables are omitted from imported checks. Unknown,
+duplicate, partial, placeholder, or unsafe content remains a warning and can
+leave the Draft incomplete.
+
+Historical lifecycle/task/check/criterion/commit/review/approval/evidence
+values are never applied. Checked criteria and completed rows become Pending
+definitions without evidence. The command creates a separate revision-two
+Draft through normal plan create/apply operations, returns `complete: false`,
+and requires explicit review and normal validation/finalization/approval before
+execution. It never edits, renames, or deletes the source. Exact retries use the
+same request UUID and replay both phases; a changed source digest is drift.
+
 ## Ownership mapping
 
 | Historical concern | v0.1 destination |
@@ -86,9 +118,11 @@ The command never edits, renames, or deletes a legacy source.
 4. If the proposed blocks are acceptable, run init with the explicit AGENTS and
    `.gitignore` apply flags.
 5. Run `project doctor` and `protocol status` until no blocking finding remains.
-6. Create new plans through the CLI. Legacy plan documents remain references;
-   v0.1 does not import them into live plan state.
-7. Delete or simplify old files only after separate user review. Mino never
+6. Either create a new plan normally or run `project import legacy` for one
+   supported legacy plan, then review every mapping, warning, and missing field.
+7. Validate, finalize, and approve the imported Draft only after rechecking all
+   authored commands, paths, criteria, and commit declarations.
+8. Delete or simplify old files only after separate user review. Mino never
    performs that cleanup.
 
 ## Conflict and recovery behavior
@@ -100,6 +134,9 @@ The command never edits, renames, or deletes a legacy source.
 - Missing blocks are proposals until their apply flag is present. Valid owned
   but stale blocks can be refreshed. Duplicate, reversed, partial, non-UTF-8,
   symlinked, or non-file marker targets are conflicts and are not overwritten.
-- Protocol migration errors and legacy-analysis errors do not write plan state.
+- Protocol migration errors, legacy-analysis errors, and legacy-import parse or
+  digest errors do not write plan state. An interruption after import creation
+  may leave its safe revision-one Draft; retry the exact import to apply the
+  authored batch once.
 - Prepared plan transactions are recovered by normal plan loads/doctor. Do not
   manually delete `.mino/**` transaction or history files.

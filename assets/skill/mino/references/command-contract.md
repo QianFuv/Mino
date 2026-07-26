@@ -62,8 +62,20 @@ delete journals, use `--no-verify`, or create a replacement commit manually.
 ## Initial creation
 
 Only when the user explicitly requests formal or durable planning and context
-has no active plan, create a UTF-8 request file containing the exact request,
-then invoke:
+has no active plan, either create a new plan or explicitly import a supplied
+legacy managed Markdown plan. For import, invoke:
+
+```text
+mino project import legacy --source <legacy-plan.md> --name <stable-name> --request-id <uuid> --actor <actor> --format json --no-input
+```
+
+Review every returned mapping, warning, missing field, and authored command or
+path. The result must remain Draft; never infer lifecycle, approval, check,
+commit, review, or evidence state from the source, and never finalize it without
+explicit review. The source must remain byte-identical.
+
+For a new plan, create a UTF-8 request file containing the exact request, then
+invoke:
 
 ```text
 mino plan create --name <stable-name> --trigger durable --request-file <path> --request-id <uuid> --actor <actor> --format json --no-input

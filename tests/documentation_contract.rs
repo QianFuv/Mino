@@ -25,9 +25,12 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     ),
     (
         &["project", "--help"],
-        &["init", "show", "doctor", "scan", "migrate", "help"],
+        &[
+            "init", "show", "doctor", "scan", "migrate", "import", "help",
+        ],
     ),
     (&["project", "migrate", "--help"], &["legacy", "help"]),
+    (&["project", "import", "--help"], &["legacy", "help"]),
     (
         &["plan", "--help"],
         &[
@@ -153,6 +156,7 @@ const LEAF_COMMANDS: &[&str] = &[
     "plan validate",
     "plan verification add",
     "project doctor",
+    "project import legacy",
     "project init",
     "project migrate legacy",
     "project scan",

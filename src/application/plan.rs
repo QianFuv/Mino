@@ -331,7 +331,7 @@ impl PlanService {
         }
         let proposed = if state_path.exists() {
             self.store
-                .load_plan(&plan_id)
+                .load_snapshot(&plan_id, 1)
                 .map_err(|error| map_store_error(&error))?
         } else {
             self.build_initial_plan(plan_id.clone(), projection_relative, &request)?

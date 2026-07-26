@@ -5,9 +5,14 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use crate::application::plan::{
+    CreatePlanRequest, DraftMutation, PlanMutationRequest, PlanOperationReport, PlanService,
+};
 use crate::commands::CommandResponse;
+use crate::domain::{PlanStatus, RequestId, Timestamp};
 use crate::integration::IntegrationOptions;
 use crate::project::{self, DoctorFinding, LegacyDocumentKind, LegacyInput};
+use crate::store::sha256_digest;
 use crate::{ErrorCategory, MinoError, NextAction};
 
 #[derive(Clone, Debug, Subcommand)]
@@ -22,6 +27,8 @@ pub(crate) enum ProjectAction {
     Scan,
     /// Analyze legacy planning workflow documents without modifying them.
     Migrate(MigrateArguments),
+    /// Import legacy plan authoring into a separate current Draft.
+    Import(ImportArguments),
 }
 
 #[derive(Clone, Copy, Debug, Args)]
@@ -44,6 +51,50 @@ pub(crate) struct MigrateArguments {
 enum MigrateAction {
     /// Map legacy AGENTS, plan template, and execution guide content.
     Legacy(LegacyArguments),
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct ImportArguments {
+    #[command(subcommand)]
+    action: ImportAction,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum ImportAction {
+    /// Conservatively import one legacy managed Markdown plan.
+    Legacy(LegacyPlanImportArguments),
+}
+
+#[derive(Clone, Debug, Args)]
+struct LegacyPlanImportArguments {
+    /// Legacy Markdown plan to read without modification.
+    #[arg(long)]
+    source: PathBuf,
+    /// ASCII-bearing stable name for the new plan identifier.
+    #[arg(long)]
+    name: String,
+    /// Idempotency UUID for the two-phase import.
+    #[arg(long)]
+    request_id: String,
+    /// Actor recorded in the plan event log.
+    #[arg(long, default_value = "user")]
+    actor: String,
+    /// Canonical source digest accepted only for replayable normalized argv.
+    #[arg(long, hide = true)]
+    source_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct LegacyPlanImportReport {
+    source: project::LegacyPlanSource,
+    suggested_name: Option<String>,
+    mappings: Vec<project::LegacyPlanMapping>,
+    warnings: Vec<project::LegacyPlanWarning>,
+    #[serde(flatten)]
+    imported_plan: PlanOperationReport,
+    source_preserved: bool,
+    historical_execution_trusted: bool,
+    draft_review_required: bool,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -117,7 +168,121 @@ pub(crate) fn execute(start: &Path, action: ProjectAction) -> Result<CommandResp
         ProjectAction::Migrate(arguments) => match arguments.action {
             MigrateAction::Legacy(arguments) => migrate_legacy(arguments),
         },
+        ProjectAction::Import(arguments) => match arguments.action {
+            ImportAction::Legacy(arguments) => import_legacy_plan(start, arguments),
+        },
     }
+}
+
+fn import_legacy_plan(
+    start: &Path,
+    arguments: LegacyPlanImportArguments,
+) -> Result<CommandResponse, MinoError> {
+    let request_id = RequestId::parse(&arguments.request_id)
+        .map_err(|error| validation_error(error.to_string()))?;
+    let parsed = project::parse_legacy_plan(&arguments.source)?;
+    require_matching_digest(
+        arguments.source_digest.as_deref(),
+        parsed.source.digest.as_str(),
+    )?;
+    project::verify_legacy_plan_source(&parsed.source)?;
+    let service = PlanService::discover(start)?;
+    let command = vec![
+        "mino".to_owned(),
+        "project".to_owned(),
+        "import".to_owned(),
+        "legacy".to_owned(),
+        "--source".to_owned(),
+        arguments.source.to_string_lossy().into_owned(),
+        "--name".to_owned(),
+        arguments.name.clone(),
+        "--source-digest".to_owned(),
+        parsed.source.digest.clone(),
+        "--request-id".to_owned(),
+        request_id.to_string(),
+        "--actor".to_owned(),
+        arguments.actor.clone(),
+    ];
+    let created = service.create(CreatePlanRequest {
+        name: arguments.name,
+        trigger: "legacy-import".to_owned(),
+        original_request: parsed.original_request.clone(),
+        request_id: request_id.clone(),
+        actor: arguments.actor.clone(),
+        command: command.clone(),
+        created_at: Timestamp::now_utc(),
+    })?;
+    project::verify_legacy_plan_source(&parsed.source)?;
+    let apply_request_id = derived_import_request_id(&request_id, &parsed.source.digest)?;
+    let imported_plan = service.mutate(
+        PlanMutationRequest {
+            plan_id: created.plan_id,
+            expected_revision: 1,
+            request_id: apply_request_id,
+            actor: arguments.actor,
+            command,
+            updated_at: Timestamp::now_utc(),
+        },
+        &DraftMutation::Apply(parsed.draft.clone()),
+    )?;
+    project::verify_legacy_plan_source(&parsed.source)?;
+    if imported_plan.status != PlanStatus::Draft {
+        return Err(MinoError::new(
+            ErrorCategory::DriftDetected,
+            "Legacy import produced a non-Draft plan",
+        ));
+    }
+    let guidance = service.next(&imported_plan.plan_id)?;
+    let report = LegacyPlanImportReport {
+        source: parsed.source,
+        suggested_name: parsed.suggested_name,
+        mappings: parsed.mappings,
+        warnings: parsed.warnings,
+        imported_plan,
+        source_preserved: true,
+        historical_execution_trusted: false,
+        draft_review_required: true,
+    };
+    response(
+        "Legacy plan authoring imported into a separate Draft; historical execution remains unverified.",
+        false,
+        report,
+        guidance.missing,
+        guidance.next_actions,
+    )
+}
+
+fn derived_import_request_id(
+    request_id: &RequestId,
+    source_digest: &str,
+) -> Result<RequestId, MinoError> {
+    let digest = sha256_digest(
+        format!("project.import.legacy.apply:{request_id}:{source_digest}").as_bytes(),
+    );
+    let value = &digest["sha256:".len().."sha256:".len() + 32];
+    RequestId::parse(format!(
+        "{}-{}-{}-{}-{}",
+        &value[0..8],
+        &value[8..12],
+        &value[12..16],
+        &value[16..20],
+        &value[20..32]
+    ))
+    .map_err(|error| validation_error(error.to_string()))
+}
+
+fn require_matching_digest(provided: Option<&str>, actual: &str) -> Result<(), MinoError> {
+    if provided.is_none_or(|provided| provided == actual) {
+        Ok(())
+    } else {
+        Err(validation_error(
+            "Provided normalized source digest does not match the legacy plan",
+        ))
+    }
+}
+
+fn validation_error(message: impl Into<String>) -> MinoError {
+    MinoError::new(ErrorCategory::IncompleteOrValidation, message)
 }
 
 fn migrate_legacy(arguments: LegacyArguments) -> Result<CommandResponse, MinoError> {

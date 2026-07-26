@@ -47,6 +47,16 @@ bundled repository Skill, and diagnoses integrations. It does not run network
 or Git mutations. `AGENTS.md` and `.gitignore` change only when their explicit
 apply flags are present and marker ownership is valid.
 
+`project import legacy` is a two-phase adapter over the same plan service. It
+first reads and parses the complete bounded source, previews the authored batch
+against current Draft invariants, and records exact mappings and warnings. It
+then creates a revision-one plan and applies the batch as revision two with a
+derived idempotency UUID. Exact retry replays the immutable revision-one
+snapshot and the authored mutation; an interrupted retry can complete the
+second phase. The resulting aggregate is always Draft, while the legacy source
+path, byte count, and SHA-256 are retained as provenance rather than trusted
+execution state.
+
 ## Source-of-truth layout
 
 ```text

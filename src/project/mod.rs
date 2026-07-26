@@ -2,6 +2,7 @@
 
 mod config;
 mod doctor;
+mod import;
 mod migrate;
 mod root;
 mod scan;
@@ -19,6 +20,10 @@ pub use config::{
     CatalogConfig, LockedStandard, ProjectConfig, ProjectLayout, ProtocolLock, StandardsLock,
 };
 pub use doctor::{DoctorFinding, DoctorReport, FindingSeverity, diagnose};
+pub use import::{
+    LegacyPlanMapping, LegacyPlanMappingDisposition, LegacyPlanParseReport, LegacyPlanSource,
+    LegacyPlanWarning, parse_legacy_plan, verify_legacy_plan_source,
+};
 pub use migrate::{
     LegacyDocumentKind, LegacyFinding, LegacyInput, LegacyMapping, LegacyMappingDisposition,
     LegacyMigrationReport, LegacyProposedChange, LegacySourceSummary, analyze_legacy,

@@ -43,11 +43,18 @@ mutation. Reuse it only for an exact retry. After a successful mutation,
 | `mino project doctor` | No | Diagnose locks, transactions, projections, Skill, and managed blocks. |
 | `mino project scan` | No | Return ignore-aware workspace/language evidence. |
 | `mino project migrate legacy` | No | Analyze supplied AGENTS/template/execution files and propose mappings without writes. |
+| `mino project import legacy` | New Draft only | Require `--source`, `--name`, and `--request-id`; preserve the source, map supported authored fields through normal create/apply APIs, and report all ignored or unsupported content. |
 | `mino protocol status` | No | Verify embedded resource digests and project-lock compatibility. |
 | `mino protocol migrate` | Plan when a transform exists | Require explicit target/revision/request ID. v0.1 only supports an already-current no-op; other targets fail without writes. |
 
 `project init --apply-agents-block` and
 `project init --apply-gitignore-block` modify only their owned marker regions.
+`project import legacy` refuses an existing active plan or name collision. A
+successful import returns `complete: false`, `draft_review_required: true`,
+`source_preserved: true`, and `historical_execution_trusted: false`; lifecycle,
+approval, check-result, commit-result, and evidence assertions never enter the
+new aggregate. Reuse the same source bytes, name, actor, and request UUID only
+for an exact two-phase retry.
 
 ### Git inspection, active binding, branches, and task commits
 

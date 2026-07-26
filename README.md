@@ -9,9 +9,10 @@ LLM.
 The current package is `mino 0.1.0`. It contains the stable v0.1 lifecycle plus
 the v0.2 local Git, review, and protected-amendment increments: worktree-aware plan binding,
 explicitly approved branch creation, exact plan-scoped task commits, classified
-review feedback, rework, final acceptance, and typed Minor/Material plan
-changes. Legacy import, standards-conflict resolution, plan variants, scheduled
-observation, team catalogs, and plugin distribution remain deferred.
+review feedback, rework, final acceptance, typed Minor/Material plan changes,
+and conservative legacy-plan import. Standards-conflict resolution, plan
+variants, scheduled observation, team catalogs, and plugin distribution remain
+deferred.
 
 ## What v0.1 provides
 
@@ -47,6 +48,12 @@ allowlist; Material changes block, require an explicit approval reference,
 invalidate prior plan approval and affected review/evidence state, reset
 execution gates, and return the plan to Ready for validation and reapproval.
 
+The v0.2 import increment adds `project import legacy`. It parses supported
+authored fields from one bounded legacy Markdown plan, reports every mapping and
+warning, and creates a separate Draft through the normal plan APIs. Source bytes
+are preserved; historical status, approval, check, commit, and evidence claims
+are always ignored and marked unverified.
+
 ## Requirements and installation
 
 The crate targets Rust 1.96 with edition 2024. Git is optional for non-Git
@@ -79,6 +86,13 @@ mino project init --apply-agents-block --apply-gitignore-block --format json --n
 mino project doctor --format json --no-input
 ```
 
+To adopt an existing managed Markdown plan, import it under a new stable name
+and review the returned mappings, warnings, `missing`, and `next_actions`:
+
+```text
+mino project import legacy --source legacy-plan.md --name imported-change --request-id 00000000-0000-0000-0000-000000000001 --actor user --format json --no-input
+```
+
 Create a durable Draft from the exact request bytes:
 
 ```text
@@ -106,8 +120,9 @@ and read context again. Stop whenever `approval_required` is true. Never edit
   task commit; Git Flow consent is auditable scope, not broad or cryptographic
   authorization.
 - Existing unowned Skills and malformed managed blocks are preserved.
-- Legacy migration produces a report and proposals; it never deletes or edits
-  legacy sources.
+- Legacy workflow analysis produces inert proposals. Legacy plan import may
+  create one separate Draft, but neither command deletes, renames, or edits a
+  legacy source.
 
 ## Documentation
 

@@ -43,7 +43,13 @@ pending `C<n>` proposal and carry a non-empty external approval reference.
 - Skill/block integration refuses symbolic-link components, non-file block
   targets, unowned Skill bytes, and malformed/duplicate markers. Valid updates
   replace only owned bytes and retain a backup until publication succeeds.
-- Legacy migration is read-only and enforces UTF-8/non-empty/1 MiB bounds.
+- Legacy workflow analysis is read-only. Legacy plan import enforces regular
+  file, UTF-8/non-empty/NUL-free/1 MiB bounds and preserves exact source bytes;
+  its only write is a separate Draft through the normal recoverable plan store.
+- Imported lifecycle, approval, result, commit, review, and evidence assertions
+  are ignored. Unsafe or Mino-owned paths, shell-control syntax, and known shell
+  or destructive check executables are omitted with warnings. Import never
+  finalizes, approves, executes, or commits the Draft.
 
 The managed `.gitignore` block excludes `/.mino/` and `/docs/plan/`, but ignore
 rules are not access control or encryption. `.mino` may contain request text,

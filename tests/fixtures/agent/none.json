@@ -5,7 +5,7 @@
     "protocol": "2026-05-11.review-rework-git-flow-v1"
   },
   "active_plan": null,
-  "allowed_actions": ["plan.create"],
+  "allowed_actions": ["plan.create", "project.import.legacy"],
   "blocked_actions": [],
   "standards": [],
   "approval_required": false,
