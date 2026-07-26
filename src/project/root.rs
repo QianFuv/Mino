@@ -1,5 +1,6 @@
 //! Deterministic Git-first project-root discovery.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -82,7 +83,7 @@ fn discover_inner(start: &Path, allow_fallback: bool) -> Result<ProjectRoot, Min
         });
     }
     for ancestor in normalized_start.ancestors() {
-        if ancestor.join(".mino").is_dir() {
+        if has_mino_marker(ancestor)? {
             return Ok(ProjectRoot {
                 path: ancestor.to_path_buf(),
                 source: RootSource::MinoDirectory,
@@ -111,6 +112,18 @@ fn discover_inner(start: &Path, allow_fallback: bool) -> Result<ProjectRoot, Min
                 normalized_start.display()
             ),
         ))
+    }
+}
+
+fn has_mino_marker(root: &Path) -> Result<bool, MinoError> {
+    let path = root.join(".mino");
+    match fs::symlink_metadata(&path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(MinoError::new(
+            ErrorCategory::EnvironmentUnavailable,
+            format!("Failed to inspect {}: {error}", path.display()),
+        )),
     }
 }
 

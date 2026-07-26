@@ -6,11 +6,11 @@ use serde::Serialize;
 
 use crate::application::plan::{
     PlanMutationRequest, PlanOperationReport, PlanService, detect_git_readiness, map_render_error,
-    map_store_error, operation_report, plan_id_for, projection_path,
+    map_store_error, operation_report, plan_id_for, projection_managed_path,
 };
 use crate::diff::{PlanDiff, diff_plans};
 use crate::domain::{Lineage, Plan, PlanId, RequestId, Timestamp};
-use crate::render::{render_plan, write_projection};
+use crate::render::{render_plan, write_managed_projection};
 use crate::store::{PlanStore, StoreErrorKind, canonical_json_bytes, sha256_digest};
 use crate::{ErrorCategory, MinoError, NextAction};
 
@@ -134,8 +134,9 @@ impl PlanVariantService {
             .load_plan(&plan_id)
             .map_err(|error| map_store_error(&error))?;
         let rendered = render_plan(&plan).map_err(|error| map_render_error(&error))?;
-        let projection = projection_path(&self.root, &plan)?;
-        write_projection(&projection, &rendered, None).map_err(|error| map_render_error(&error))?;
+        let projection = projection_managed_path(&plan)?;
+        write_managed_projection(self.plans.filesystem(), &projection, &rendered, None)
+            .map_err(|error| map_render_error(&error))?;
         let lineage = plan.lineage().cloned().ok_or_else(|| {
             MinoError::new(
                 ErrorCategory::DriftDetected,

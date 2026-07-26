@@ -7,12 +7,12 @@ mod migrate;
 mod root;
 mod scan;
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::integration::{IntegrationOptions, IntegrationReport, integrate_project};
+use crate::managed_fs::{ManagedPath, ProjectFs};
 use crate::protocol::ProtocolRegistry;
 use crate::{ErrorCategory, MinoError};
 
@@ -31,7 +31,7 @@ pub use migrate::{
 pub use root::{ProjectRoot, RootSource, discover, discover_for_init};
 pub use scan::{Language, LanguageScore, ProjectScan, ScanEvidence, WorkspaceScan, scan_root};
 
-use config::{create_file, parse_toml, serialize_toml};
+use config::{create_file, map_managed_error, parse_managed_toml, serialize_toml};
 
 /// Result of idempotently initializing project-owned Mino state.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -108,35 +108,26 @@ pub fn initialize_with_options(
     })?;
     let project_root = discover_for_init(start)?;
     let layout = ProjectLayout::new(project_root.path());
-    fs::create_dir_all(layout.plans_directory()).map_err(|error| {
-        MinoError::new(
-            ErrorCategory::EnvironmentUnavailable,
-            format!(
-                "Failed to create {}: {error}",
-                layout.plans_directory().display()
-            ),
-        )
-    })?;
-    fs::create_dir_all(layout.standards_cache()).map_err(|error| {
-        MinoError::new(
-            ErrorCategory::EnvironmentUnavailable,
-            format!(
-                "Failed to create {}: {error}",
-                layout.standards_cache().display()
-            ),
-        )
-    })?;
+    let filesystem = ProjectFs::open(layout.root()).map_err(map_managed_error)?;
+    filesystem
+        .ensure_directory(&ProjectLayout::plans_directory_managed())
+        .map_err(map_managed_error)?;
+    filesystem
+        .ensure_directory(&ProjectLayout::standards_cache_managed())
+        .map_err(map_managed_error)?;
     let mut created_files = Vec::new();
     let mut existing_files = Vec::new();
     let mut initialization_findings = Vec::new();
     ensure_config_file(
-        &layout.config(),
+        &filesystem,
+        &ProjectLayout::config_managed(),
         &mut created_files,
         &mut existing_files,
         &mut initialization_findings,
     )?;
     ensure_owned_file(
-        &layout.protocol_lock(),
+        &filesystem,
+        &ProjectLayout::protocol_lock_managed(),
         &ProtocolLock::default(),
         "protocol_lock_mismatch",
         &mut created_files,
@@ -144,7 +135,8 @@ pub fn initialize_with_options(
         &mut initialization_findings,
     )?;
     ensure_standards_lock(
-        &layout.standards_lock(),
+        &filesystem,
+        &ProjectLayout::standards_lock_managed(),
         &mut created_files,
         &mut existing_files,
         &mut initialization_findings,
@@ -166,70 +158,84 @@ pub fn initialize_with_options(
 }
 
 fn ensure_config_file(
-    path: &Path,
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
     created_files: &mut Vec<PathBuf>,
     existing_files: &mut Vec<PathBuf>,
     findings: &mut Vec<DoctorFinding>,
 ) -> Result<(), MinoError> {
-    if !path.exists() {
-        create_file(path, &serialize_toml(&ProjectConfig::default())?)?;
-        created_files.push(path.to_path_buf());
+    let display_path = filesystem.display_path(path);
+    if !filesystem.exists(path).map_err(map_managed_error)? {
+        create_file(
+            filesystem,
+            path,
+            &serialize_toml(&ProjectConfig::default())?,
+        )?;
+        created_files.push(display_path);
         return Ok(());
     }
-    match parse_toml::<ProjectConfig>(path) {
-        Ok(config) if config.is_supported() => existing_files.push(path.to_path_buf()),
+    match parse_managed_toml::<ProjectConfig>(filesystem, path) {
+        Ok(config) if config.is_supported() => existing_files.push(display_path),
         Ok(_) => findings.push(DoctorFinding::new(
             "config_drift",
             FindingSeverity::Error,
             format!(
                 "Existing project configuration {} is unsupported and was preserved",
-                path.display()
+                display_path.display()
             ),
-            Some(path.to_path_buf()),
+            Some(display_path),
         )),
+        Err(error) if error.category() == ErrorCategory::DriftDetected => return Err(error),
         Err(error) => findings.push(DoctorFinding::new(
             "config_drift_corrupt",
             FindingSeverity::Error,
             format!(
                 "Existing project configuration {} was preserved: {error}",
-                path.display()
+                display_path.display()
             ),
-            Some(path.to_path_buf()),
+            Some(display_path),
         )),
     }
     Ok(())
 }
 
 fn ensure_standards_lock(
-    path: &Path,
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
     created_files: &mut Vec<PathBuf>,
     existing_files: &mut Vec<PathBuf>,
     findings: &mut Vec<DoctorFinding>,
 ) -> Result<(), MinoError> {
-    if !path.exists() {
-        create_file(path, &serialize_toml(&StandardsLock::default())?)?;
-        created_files.push(path.to_path_buf());
+    let display_path = filesystem.display_path(path);
+    if !filesystem.exists(path).map_err(map_managed_error)? {
+        create_file(
+            filesystem,
+            path,
+            &serialize_toml(&StandardsLock::default())?,
+        )?;
+        created_files.push(display_path);
         return Ok(());
     }
-    match parse_toml::<StandardsLock>(path) {
-        Ok(lock) if lock.is_supported() => existing_files.push(path.to_path_buf()),
+    match parse_managed_toml::<StandardsLock>(filesystem, path) {
+        Ok(lock) if lock.is_supported() => existing_files.push(display_path),
         Ok(_) => findings.push(DoctorFinding::new(
             "standards_lock_drift",
             FindingSeverity::Error,
             format!(
                 "Existing standards lock {} is unsupported and was preserved",
-                path.display()
+                display_path.display()
             ),
-            Some(path.to_path_buf()),
+            Some(display_path),
         )),
+        Err(error) if error.category() == ErrorCategory::DriftDetected => return Err(error),
         Err(error) => findings.push(DoctorFinding::new(
             "standards_lock_drift_corrupt",
             FindingSeverity::Error,
             format!(
                 "Existing standards lock {} was preserved: {error}",
-                path.display()
+                display_path.display()
             ),
-            Some(path.to_path_buf()),
+            Some(display_path),
         )),
     }
     Ok(())
@@ -244,9 +250,12 @@ fn ensure_standards_lock(
 pub fn show(start: &Path) -> Result<ProjectShowReport, MinoError> {
     let project_root = discover(start)?;
     let layout = ProjectLayout::new(project_root.path());
-    let config = parse_toml(&layout.config()).ok();
-    let protocol_lock = parse_toml(&layout.protocol_lock()).ok();
-    let standards_lock = parse_toml(&layout.standards_lock()).ok();
+    let filesystem = ProjectFs::open(layout.root()).map_err(map_managed_error)?;
+    let config = parse_managed_toml(&filesystem, &ProjectLayout::config_managed()).ok();
+    let protocol_lock =
+        parse_managed_toml(&filesystem, &ProjectLayout::protocol_lock_managed()).ok();
+    let standards_lock =
+        parse_managed_toml(&filesystem, &ProjectLayout::standards_lock_managed()).ok();
     let doctor = diagnose(&layout)?;
     Ok(ProjectShowReport {
         root: project_root.path().to_path_buf(),
@@ -279,7 +288,8 @@ pub fn scan(start: &Path) -> Result<ProjectScan, MinoError> {
 }
 
 fn ensure_owned_file<T>(
-    path: &Path,
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
     expected: &T,
     drift_code: &str,
     created_files: &mut Vec<PathBuf>,
@@ -289,30 +299,32 @@ fn ensure_owned_file<T>(
 where
     T: for<'de> serde::Deserialize<'de> + PartialEq + Serialize,
 {
-    if !path.exists() {
-        create_file(path, &serialize_toml(expected)?)?;
-        created_files.push(path.to_path_buf());
+    let display_path = filesystem.display_path(path);
+    if !filesystem.exists(path).map_err(map_managed_error)? {
+        create_file(filesystem, path, &serialize_toml(expected)?)?;
+        created_files.push(display_path);
         return Ok(());
     }
-    match parse_toml::<T>(path) {
-        Ok(actual) if &actual == expected => existing_files.push(path.to_path_buf()),
+    match parse_managed_toml::<T>(filesystem, path) {
+        Ok(actual) if &actual == expected => existing_files.push(display_path),
         Ok(_) => findings.push(DoctorFinding::new(
             drift_code,
             FindingSeverity::Error,
             format!(
                 "Existing Mino-owned file {} differs and was preserved",
-                path.display()
+                display_path.display()
             ),
-            Some(path.to_path_buf()),
+            Some(display_path),
         )),
+        Err(error) if error.category() == ErrorCategory::DriftDetected => return Err(error),
         Err(error) => findings.push(DoctorFinding::new(
             format!("{drift_code}_corrupt"),
             FindingSeverity::Error,
             format!(
                 "Existing Mino-owned file {} was preserved: {error}",
-                path.display()
+                display_path.display()
             ),
-            Some(path.to_path_buf()),
+            Some(display_path),
         )),
     }
     Ok(())

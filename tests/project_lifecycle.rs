@@ -5,6 +5,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::fs::symlink_dir;
+
 use mino::domain::{Plan, PlanId, RequestId, Timestamp};
 use mino::integration::IntegrationOptions;
 use mino::project::{
@@ -93,6 +98,47 @@ fn apply_integrations(root: &Path) {
     .expect("repository integrations should apply");
 }
 
+#[cfg(any(unix, windows))]
+fn create_directory_symlink(target: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    let result = symlink(target, link);
+    #[cfg(windows)]
+    let result = symlink_dir(target, link);
+    match result {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
+        Err(error) => panic!("managed symlink should be created: {error}"),
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn assert_init_rejects_directory_symlink(relative: &str) {
+    let project = TestProject::new(&format!("symlink-{}", relative.replace('/', "-")));
+    let external = TestProject::new("symlink-external");
+    let sentinel = external.path().join("sentinel.txt");
+    fs::write(&sentinel, b"outside\n").expect("outside sentinel should be written");
+    let link = project.path().join(relative);
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent).expect("managed parent should be created");
+    }
+    if !create_directory_symlink(external.path(), &link) {
+        return;
+    }
+
+    let error = initialize(project.path()).expect_err("managed symlink must be rejected");
+    assert_eq!(error.category(), mino::ErrorCategory::DriftDetected);
+    assert_eq!(
+        fs::read(&sentinel).expect("outside sentinel should remain readable"),
+        b"outside\n"
+    );
+    assert_eq!(
+        fs::read_dir(external.path())
+            .expect("outside directory should remain readable")
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn fresh_and_repeated_init_are_local_idempotent_and_non_destructive() {
     let project = TestProject::new("init");
@@ -143,6 +189,37 @@ fn fresh_and_repeated_init_are_local_idempotent_and_non_destructive() {
     assert_eq!(
         fs::read(layout.standards_lock()).expect("standards lock should remain"),
         standards_before
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn init_rejects_symlinked_managed_directory_ancestors() {
+    for relative in [".mino", ".mino/plans", ".mino/cache"] {
+        assert_init_rejects_directory_symlink(relative);
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn doctor_reports_a_symlinked_mino_directory_without_following_it() {
+    let project = TestProject::new("doctor-symlink");
+    initialize(project.path()).expect("project should initialize");
+    let external = TestProject::new("doctor-symlink-external");
+    let external_state = external.path().join("state");
+    fs::rename(project.path().join(".mino"), &external_state)
+        .expect("managed state should move outside for the fixture");
+    let sentinel = external_state.join("sentinel.txt");
+    fs::write(&sentinel, b"outside\n").expect("outside sentinel should be written");
+    if !create_directory_symlink(&external_state, &project.path().join(".mino")) {
+        return;
+    }
+
+    let report = doctor(project.path()).expect("doctor should report unsafe managed state");
+    assert!(finding_codes(&report.findings).contains(&"managed_path_unsafe"));
+    assert_eq!(
+        fs::read(&sentinel).expect("outside sentinel should remain readable"),
+        b"outside\n"
     );
 }
 

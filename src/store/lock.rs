@@ -1,11 +1,12 @@
 //! Bounded cross-platform advisory file locking.
 
-use std::fs::{File, OpenOptions};
-use std::path::Path;
+use std::fs::File;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use fs4::{FileExt, TryLockError};
+
+use crate::managed_fs::{ManagedPath, ProjectFs};
 
 use super::{StoreError, StoreErrorKind};
 
@@ -62,13 +63,15 @@ pub(crate) struct PlanLock {
 }
 
 impl PlanLock {
-    pub(crate) fn acquire(path: &Path, options: LockOptions) -> Result<Self, StoreError> {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .truncate(false)
-            .write(true)
-            .open(path)?;
+    pub(crate) fn acquire(
+        filesystem: &ProjectFs,
+        path: &ManagedPath,
+        options: LockOptions,
+    ) -> Result<Self, StoreError> {
+        let display_path = filesystem.display_path(path);
+        let file = filesystem
+            .open_lock_file(path)
+            .map_err(|error| StoreError::new(StoreErrorKind::Io, error.to_string()))?;
         let started_at = Instant::now();
         loop {
             match FileExt::try_lock(&file) {
@@ -83,7 +86,7 @@ impl PlanLock {
                         format!(
                             "Timed out after {} ms acquiring plan lock {}",
                             options.timeout.as_millis(),
-                            path.display()
+                            display_path.display()
                         ),
                     ));
                 }

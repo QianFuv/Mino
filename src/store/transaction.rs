@@ -1,15 +1,13 @@
 //! Revision commits, write-ahead recovery, idempotency, and audits.
 
 use std::collections::BTreeSet;
-#[cfg(unix)]
-use std::fs::File;
-use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{DomainError, Event, EventResult, Plan, PlanId, RequestId, Timestamp};
+use crate::managed_fs::{ManagedEntryKind, ManagedFsError, ManagedPath, ProjectFs};
 
 use super::canonical::{canonical_json_bytes, sha256_digest};
 use super::lock::PlanLock;
@@ -252,15 +250,23 @@ struct TransactionJournal {
 pub struct PlanStore {
     paths: StorePaths,
     lock_options: LockOptions,
+    filesystem: Result<ProjectFs, ManagedFsError>,
 }
 
 impl PlanStore {
     /// Creates a store with the default bounded-lock policy.
     #[must_use]
     pub fn new(project_root: impl Into<std::path::PathBuf>) -> Self {
+        let project_root = project_root.into();
+        let filesystem = ProjectFs::open(&project_root);
+        let layout_root = filesystem.as_ref().map_or_else(
+            |_| project_root.clone(),
+            |filesystem| filesystem.root().to_path_buf(),
+        );
         Self {
-            paths: StorePaths::new(project_root),
+            paths: StorePaths::new(layout_root),
             lock_options: LockOptions::default(),
+            filesystem,
         }
     }
 
@@ -270,9 +276,16 @@ impl PlanStore {
         project_root: impl Into<std::path::PathBuf>,
         lock_options: LockOptions,
     ) -> Self {
+        let project_root = project_root.into();
+        let filesystem = ProjectFs::open(&project_root);
+        let layout_root = filesystem.as_ref().map_or_else(
+            |_| project_root.clone(),
+            |filesystem| filesystem.root().to_path_buf(),
+        );
         Self {
-            paths: StorePaths::new(project_root),
+            paths: StorePaths::new(layout_root),
             lock_options,
+            filesystem,
         }
     }
 
@@ -305,7 +318,11 @@ impl PlanStore {
         let plan_id = plan.id().clone();
         let request = MutationRequest::new(0, request_id, actor, command, vec!["*".to_owned()])?;
         self.prepare_plan_directories(&plan_id)?;
-        let _lock = PlanLock::acquire(&self.paths.lock_file(&plan_id), self.lock_options)?;
+        let _lock = PlanLock::acquire(
+            self.filesystem()?,
+            &self.paths.lock_managed(&plan_id),
+            self.lock_options,
+        )?;
         self.recover_locked(&plan_id)?;
         let events = self.read_events(&plan_id)?;
         if let Some(receipt) = replay_receipt(
@@ -329,7 +346,7 @@ impl PlanStore {
             }
             return Ok(receipt);
         }
-        if self.paths.current_plan(&plan_id).exists() {
+        if self.managed_exists(&self.paths.current_plan_managed(&plan_id))? {
             return Err(StoreError::new(
                 StoreErrorKind::PlanAlreadyExists,
                 format!("Plan {plan_id} already exists"),
@@ -368,7 +385,11 @@ impl PlanStore {
         request: &MutationRequest,
     ) -> Result<CommitReceipt, StoreError> {
         self.require_plan_directory(plan_id)?;
-        let _lock = PlanLock::acquire(&self.paths.lock_file(plan_id), self.lock_options)?;
+        let _lock = PlanLock::acquire(
+            self.filesystem()?,
+            &self.paths.lock_managed(plan_id),
+            self.lock_options,
+        )?;
         self.recover_locked(plan_id)?;
         let events = self.read_events(plan_id)?;
         replay_receipt(
@@ -405,7 +426,11 @@ impl PlanStore {
         F: FnOnce(&mut Plan) -> Result<(), DomainError>,
     {
         self.require_plan_directory(plan_id)?;
-        let _lock = PlanLock::acquire(&self.paths.lock_file(plan_id), self.lock_options)?;
+        let _lock = PlanLock::acquire(
+            self.filesystem()?,
+            &self.paths.lock_managed(plan_id),
+            self.lock_options,
+        )?;
         self.recover_locked(plan_id)?;
         let events = self.read_events(plan_id)?;
         if let Some(receipt) = replay_receipt(
@@ -458,7 +483,11 @@ impl PlanStore {
     /// Returns an error when the plan is missing, locked, corrupt, or unreadable.
     pub fn load_plan(&self, plan_id: &PlanId) -> Result<Plan, StoreError> {
         self.require_plan_directory(plan_id)?;
-        let _lock = PlanLock::acquire(&self.paths.lock_file(plan_id), self.lock_options)?;
+        let _lock = PlanLock::acquire(
+            self.filesystem()?,
+            &self.paths.lock_managed(plan_id),
+            self.lock_options,
+        )?;
         self.recover_locked(plan_id)?;
         self.read_current_plan(plan_id)
     }
@@ -471,19 +500,29 @@ impl PlanStore {
     /// or corrupt, or snapshot bytes are not canonical for the requested identity.
     pub fn load_snapshot(&self, plan_id: &PlanId, revision: u64) -> Result<Plan, StoreError> {
         self.require_plan_directory(plan_id)?;
-        let _lock = PlanLock::acquire(&self.paths.lock_file(plan_id), self.lock_options)?;
+        let _lock = PlanLock::acquire(
+            self.filesystem()?,
+            &self.paths.lock_managed(plan_id),
+            self.lock_options,
+        )?;
         self.recover_locked(plan_id)?;
-        let path = self.paths.snapshot(plan_id, revision);
-        let bytes = fs::read(&path).map_err(|error| {
+        let path = self.paths.snapshot_managed(plan_id, revision);
+        let display_path = self.filesystem()?.display_path(&path);
+        if !self.managed_exists(&path)? {
+            return Err(StoreError::new(
+                StoreErrorKind::PlanNotFound,
+                format!(
+                    "Plan {plan_id} revision {revision} does not exist at {}",
+                    display_path.display()
+                ),
+            ));
+        }
+        let bytes = self.read_managed(&path).map_err(|error| {
             StoreError::new(
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    StoreErrorKind::PlanNotFound
-                } else {
-                    StoreErrorKind::Io
-                },
+                error.kind(),
                 format!(
                     "Failed to read plan {plan_id} revision {revision} at {}: {error}",
-                    path.display()
+                    display_path.display()
                 ),
             )
         })?;
@@ -509,7 +548,11 @@ impl PlanStore {
     /// Returns an error when the plan is missing, locked, corrupt, or unreadable.
     pub fn events(&self, plan_id: &PlanId) -> Result<Vec<Event>, StoreError> {
         self.require_plan_directory(plan_id)?;
-        let _lock = PlanLock::acquire(&self.paths.lock_file(plan_id), self.lock_options)?;
+        let _lock = PlanLock::acquire(
+            self.filesystem()?,
+            &self.paths.lock_managed(plan_id),
+            self.lock_options,
+        )?;
         self.recover_locked(plan_id)?;
         self.read_events(plan_id)
     }
@@ -521,7 +564,11 @@ impl PlanStore {
     /// Returns an error when recovery cannot prove a single complete revision.
     pub fn recover(&self, plan_id: &PlanId) -> Result<RecoveryReport, StoreError> {
         self.require_plan_directory(plan_id)?;
-        let _lock = PlanLock::acquire(&self.paths.lock_file(plan_id), self.lock_options)?;
+        let _lock = PlanLock::acquire(
+            self.filesystem()?,
+            &self.paths.lock_managed(plan_id),
+            self.lock_options,
+        )?;
         let was_recovered = self.recover_locked(plan_id)?;
         let plan = self.read_current_plan(plan_id)?;
         Ok(RecoveryReport {
@@ -537,7 +584,11 @@ impl PlanStore {
     /// Returns an error for any missing, extra, malformed, or digest-mismatched artifact.
     pub fn audit(&self, plan_id: &PlanId) -> Result<StoreAudit, StoreError> {
         self.require_plan_directory(plan_id)?;
-        let _lock = PlanLock::acquire(&self.paths.lock_file(plan_id), self.lock_options)?;
+        let _lock = PlanLock::acquire(
+            self.filesystem()?,
+            &self.paths.lock_managed(plan_id),
+            self.lock_options,
+        )?;
         self.recover_locked(plan_id)?;
         self.audit_locked(plan_id)
     }
@@ -562,7 +613,9 @@ impl PlanStore {
         let previous_state_hash = if expected_revision == 0 {
             None
         } else {
-            Some(sha256_digest(&fs::read(self.paths.current_plan(&plan_id))?))
+            Some(sha256_digest(
+                &self.read_managed(&self.paths.current_plan_managed(&plan_id))?,
+            ))
         };
         let sequence = u64::try_from(existing_events.len())
             .ok()
@@ -605,29 +658,39 @@ impl PlanStore {
         journal: &TransactionJournal,
         plan_bytes: &[u8],
     ) -> Result<(), StoreError> {
-        let transaction_directory = self.paths.transaction_directory(&journal.plan_id);
-        if transaction_directory.exists() {
+        let transaction_directory = self.paths.transaction_managed(&journal.plan_id);
+        if self.managed_exists(&transaction_directory)? {
             return Err(StoreError::new(
                 StoreErrorKind::CorruptState,
                 format!(
                     "Transaction directory {} remained after recovery",
-                    transaction_directory.display()
+                    self.filesystem()?
+                        .display_path(&transaction_directory)
+                        .display()
                 ),
             ));
         }
-        fs::create_dir(&transaction_directory)?;
-        write_new_file(&self.paths.next_plan(&journal.plan_id), plan_bytes)?;
+        self.filesystem()?
+            .ensure_directory(&transaction_directory)
+            .map_err(managed_store_error)?;
+        self.write_new_file(&self.paths.next_plan_managed(&journal.plan_id), plan_bytes)?;
         let journal_bytes = canonical_json_bytes(journal)?;
-        write_new_file(
-            &self.paths.pending_journal(&journal.plan_id),
+        self.write_new_file(
+            &self.paths.pending_journal_managed(&journal.plan_id),
             &journal_bytes,
         )?;
-        fs::rename(
-            self.paths.pending_journal(&journal.plan_id),
-            self.paths.journal(&journal.plan_id),
-        )?;
-        sync_directory(&transaction_directory)?;
-        sync_directory(&self.paths.plan_directory(&journal.plan_id))?;
+        self.filesystem()?
+            .rename(
+                &self.paths.pending_journal_managed(&journal.plan_id),
+                &self.paths.journal_managed(&journal.plan_id),
+            )
+            .map_err(managed_store_error)?;
+        self.filesystem()?
+            .sync_directory(Some(&transaction_directory))
+            .map_err(managed_store_error)?;
+        self.filesystem()?
+            .sync_directory(Some(&self.paths.plan_managed(&journal.plan_id)))
+            .map_err(managed_store_error)?;
         Ok(())
     }
 
@@ -656,16 +719,17 @@ impl PlanStore {
     }
 
     fn recover_locked(&self, plan_id: &PlanId) -> Result<bool, StoreError> {
-        let transaction_directory = self.paths.transaction_directory(plan_id);
-        if !transaction_directory.exists() {
+        let transaction_directory = self.paths.transaction_managed(plan_id);
+        if !self.managed_exists(&transaction_directory)? {
             return Ok(false);
         }
-        let journal_path = self.paths.journal(plan_id);
-        if !journal_path.exists() {
+        let journal_path = self.paths.journal_managed(plan_id);
+        if !self.managed_exists(&journal_path)? {
             self.cleanup_uncommitted_preparation(plan_id)?;
             return Ok(false);
         }
-        let journal: TransactionJournal = serde_json::from_slice(&fs::read(journal_path)?)?;
+        let journal: TransactionJournal =
+            serde_json::from_slice(&self.read_managed(&journal_path)?)?;
         self.validate_journal(plan_id, &journal)?;
         self.publish_transaction(&journal, CommitOptions::default())?;
         Ok(true)
@@ -705,19 +769,20 @@ impl PlanStore {
     }
 
     fn transaction_plan_bytes(&self, journal: &TransactionJournal) -> Result<Vec<u8>, StoreError> {
-        let next_path = self.paths.next_plan(&journal.plan_id);
-        let bytes = if next_path.exists() {
-            fs::read(next_path)?
+        let next_path = self.paths.next_plan_managed(&journal.plan_id);
+        let bytes = if self.managed_exists(&next_path)? {
+            self.read_managed(&next_path)?
         } else {
-            fs::read(self.paths.current_plan(&journal.plan_id)).map_err(|error| {
-                StoreError::new(
-                    StoreErrorKind::CorruptState,
-                    format!(
-                        "Transaction for plan {} lost both next and current state: {error}",
-                        journal.plan_id
-                    ),
-                )
-            })?
+            self.read_managed(&self.paths.current_plan_managed(&journal.plan_id))
+                .map_err(|error| {
+                    StoreError::new(
+                        StoreErrorKind::CorruptState,
+                        format!(
+                            "Transaction for plan {} lost both next and current state: {error}",
+                            journal.plan_id
+                        ),
+                    )
+                })?
         };
         if sha256_digest(&bytes) != journal.state_hash {
             return Err(StoreError::new(
@@ -738,8 +803,8 @@ impl PlanStore {
     ) -> Result<(), StoreError> {
         let snapshot = self
             .paths
-            .snapshot(&journal.plan_id, journal.target_revision);
-        publish_immutable(&snapshot, plan_bytes, &journal.snapshot_digest)
+            .snapshot_managed(&journal.plan_id, journal.target_revision);
+        self.publish_immutable(&snapshot, plan_bytes, &journal.snapshot_digest)
     }
 
     fn publish_event(&self, journal: &TransactionJournal) -> Result<(), StoreError> {
@@ -751,14 +816,16 @@ impl PlanStore {
         match matching.as_slice() {
             [] => {
                 let event_bytes = canonical_json_bytes(&journal.event)?;
-                let event_log = self.paths.event_log(&journal.plan_id);
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&event_log)?;
+                let event_log = self.paths.event_log_managed(&journal.plan_id);
+                let mut file = self
+                    .filesystem()?
+                    .open_append_file(&event_log)
+                    .map_err(managed_store_error)?;
                 file.write_all(&event_bytes)?;
                 file.sync_all()?;
-                sync_parent_directory(&event_log)?;
+                self.filesystem()?
+                    .sync_parent(&event_log)
+                    .map_err(managed_store_error)?;
                 Ok(())
             }
             [event] if **event == journal.event => Ok(()),
@@ -777,19 +844,19 @@ impl PlanStore {
     }
 
     fn backup_current_plan(&self, journal: &TransactionJournal) -> Result<(), StoreError> {
-        let current_path = self.paths.current_plan(&journal.plan_id);
-        let previous_path = self.paths.previous_plan(&journal.plan_id);
-        if previous_path.exists() {
+        let current_path = self.paths.current_plan_managed(&journal.plan_id);
+        let previous_path = self.paths.previous_plan_managed(&journal.plan_id);
+        if self.managed_exists(&previous_path)? {
             let expected = journal.previous_state_hash.as_deref().ok_or_else(|| {
                 StoreError::new(
                     StoreErrorKind::CorruptState,
                     "An initial plan transaction unexpectedly has a previous-state backup",
                 )
             })?;
-            verify_file_digest(&previous_path, expected)?;
+            self.verify_file_digest(&previous_path, expected)?;
         }
-        if !current_path.exists() {
-            if journal.previous_state_hash.is_some() && !previous_path.exists() {
+        if !self.managed_exists(&current_path)? {
+            if journal.previous_state_hash.is_some() && !self.managed_exists(&previous_path)? {
                 return Err(StoreError::new(
                     StoreErrorKind::CorruptState,
                     format!(
@@ -800,12 +867,12 @@ impl PlanStore {
             }
             return Ok(());
         }
-        let current_digest = sha256_digest(&fs::read(&current_path)?);
+        let current_digest = sha256_digest(&self.read_managed(&current_path)?);
         if current_digest == journal.state_hash {
             return Ok(());
         }
         if journal.previous_state_hash.as_deref() != Some(current_digest.as_str())
-            || previous_path.exists()
+            || self.managed_exists(&previous_path)?
         {
             return Err(StoreError::new(
                 StoreErrorKind::CorruptState,
@@ -815,19 +882,23 @@ impl PlanStore {
                 ),
             ));
         }
-        fs::rename(&current_path, &previous_path)?;
-        sync_directory(&self.paths.plan_directory(&journal.plan_id))?;
+        self.filesystem()?
+            .rename(&current_path, &previous_path)
+            .map_err(managed_store_error)?;
+        self.filesystem()?
+            .sync_directory(Some(&self.paths.plan_managed(&journal.plan_id)))
+            .map_err(managed_store_error)?;
         Ok(())
     }
 
     fn publish_next_plan(&self, journal: &TransactionJournal) -> Result<(), StoreError> {
-        let current_path = self.paths.current_plan(&journal.plan_id);
-        if current_path.exists() {
-            verify_file_digest(&current_path, &journal.state_hash)?;
+        let current_path = self.paths.current_plan_managed(&journal.plan_id);
+        if self.managed_exists(&current_path)? {
+            self.verify_file_digest(&current_path, &journal.state_hash)?;
             return Ok(());
         }
-        let next_path = self.paths.next_plan(&journal.plan_id);
-        if !next_path.exists() {
+        let next_path = self.paths.next_plan_managed(&journal.plan_id);
+        if !self.managed_exists(&next_path)? {
             return Err(StoreError::new(
                 StoreErrorKind::CorruptState,
                 format!(
@@ -836,54 +907,67 @@ impl PlanStore {
                 ),
             ));
         }
-        fs::rename(next_path, &current_path)?;
-        sync_directory(&self.paths.plan_directory(&journal.plan_id))?;
-        verify_file_digest(&current_path, &journal.state_hash)
+        self.filesystem()?
+            .rename(&next_path, &current_path)
+            .map_err(managed_store_error)?;
+        self.filesystem()?
+            .sync_directory(Some(&self.paths.plan_managed(&journal.plan_id)))
+            .map_err(managed_store_error)?;
+        self.verify_file_digest(&current_path, &journal.state_hash)
     }
 
     fn cleanup_transaction(&self, journal: &TransactionJournal) -> Result<(), StoreError> {
-        verify_file_digest(
-            &self.paths.current_plan(&journal.plan_id),
+        self.verify_file_digest(
+            &self.paths.current_plan_managed(&journal.plan_id),
             &journal.state_hash,
         )?;
-        remove_file_if_exists(&self.paths.previous_plan(&journal.plan_id))?;
-        remove_file_if_exists(&self.paths.next_plan(&journal.plan_id))?;
-        remove_file_if_exists(&self.paths.pending_journal(&journal.plan_id))?;
-        remove_file_if_exists(&self.paths.journal(&journal.plan_id))?;
-        fs::remove_dir(self.paths.transaction_directory(&journal.plan_id))?;
-        sync_directory(&self.paths.plan_directory(&journal.plan_id))?;
+        self.remove_file_if_exists(&self.paths.previous_plan_managed(&journal.plan_id))?;
+        self.remove_file_if_exists(&self.paths.next_plan_managed(&journal.plan_id))?;
+        self.remove_file_if_exists(&self.paths.pending_journal_managed(&journal.plan_id))?;
+        self.remove_file_if_exists(&self.paths.journal_managed(&journal.plan_id))?;
+        self.filesystem()?
+            .remove_directory(&self.paths.transaction_managed(&journal.plan_id))
+            .map_err(managed_store_error)?;
+        self.filesystem()?
+            .sync_directory(Some(&self.paths.plan_managed(&journal.plan_id)))
+            .map_err(managed_store_error)?;
         Ok(())
     }
 
     fn cleanup_uncommitted_preparation(&self, plan_id: &PlanId) -> Result<(), StoreError> {
-        let transaction_directory = self.paths.transaction_directory(plan_id);
-        let previous_path = self.paths.previous_plan(plan_id);
-        if previous_path.exists() {
+        let transaction_directory = self.paths.transaction_managed(plan_id);
+        let previous_path = self.paths.previous_plan_managed(plan_id);
+        if self.managed_exists(&previous_path)? {
             return Err(StoreError::new(
                 StoreErrorKind::CorruptState,
                 format!("Plan {plan_id} has a backup without a durable journal"),
             ));
         }
-        remove_file_if_exists(&self.paths.next_plan(plan_id))?;
-        remove_file_if_exists(&self.paths.pending_journal(plan_id))?;
-        let mut entries = fs::read_dir(&transaction_directory)?;
-        if entries.next().transpose()?.is_some() {
+        self.remove_file_if_exists(&self.paths.next_plan_managed(plan_id))?;
+        self.remove_file_if_exists(&self.paths.pending_journal_managed(plan_id))?;
+        if !self
+            .filesystem()?
+            .read_directory(&transaction_directory)
+            .map_err(managed_store_error)?
+            .is_empty()
+        {
             return Err(StoreError::new(
                 StoreErrorKind::CorruptState,
                 format!("Plan {plan_id} has unknown unjournaled transaction files"),
             ));
         }
-        drop(entries);
-        fs::remove_dir(transaction_directory)?;
+        self.filesystem()?
+            .remove_directory(&transaction_directory)
+            .map_err(managed_store_error)?;
         Ok(())
     }
 
     fn repair_partial_event_tail(&self, plan_id: &PlanId) -> Result<(), StoreError> {
-        let event_log = self.paths.event_log(plan_id);
-        if !event_log.exists() {
+        let event_log = self.paths.event_log_managed(plan_id);
+        if !self.managed_exists(&event_log)? {
             return Ok(());
         }
-        let bytes = fs::read(&event_log)?;
+        let bytes = self.read_managed(&event_log)?;
         if bytes.is_empty() || bytes.ends_with(b"\n") {
             return Ok(());
         }
@@ -891,7 +975,10 @@ impl PlanStore {
             .iter()
             .rposition(|byte| *byte == b'\n')
             .map_or(0, |index| index + 1);
-        let file = OpenOptions::new().write(true).open(event_log)?;
+        let file = self
+            .filesystem()?
+            .open_write_file(&event_log)
+            .map_err(managed_store_error)?;
         file.set_len(u64::try_from(valid_length).map_err(|_| {
             StoreError::new(StoreErrorKind::CorruptState, "Event log length overflowed")
         })?)?;
@@ -900,17 +987,23 @@ impl PlanStore {
     }
 
     fn read_current_plan(&self, plan_id: &PlanId) -> Result<Plan, StoreError> {
-        let path = self.paths.current_plan(plan_id);
-        let bytes = fs::read(&path).map_err(|error| {
+        let path = self.paths.current_plan_managed(plan_id);
+        let display_path = self.filesystem()?.display_path(&path);
+        if !self.managed_exists(&path)? {
+            return Err(StoreError::new(
+                StoreErrorKind::PlanNotFound,
+                format!(
+                    "Plan {plan_id} does not exist at {}",
+                    display_path.display()
+                ),
+            ));
+        }
+        let bytes = self.read_managed(&path).map_err(|error| {
             StoreError::new(
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    StoreErrorKind::PlanNotFound
-                } else {
-                    StoreErrorKind::Io
-                },
+                error.kind(),
                 format!(
                     "Failed to read plan {plan_id} at {}: {error}",
-                    path.display()
+                    display_path.display()
                 ),
             )
         })?;
@@ -925,11 +1018,11 @@ impl PlanStore {
     }
 
     fn read_events(&self, plan_id: &PlanId) -> Result<Vec<Event>, StoreError> {
-        let path = self.paths.event_log(plan_id);
-        if !path.exists() {
+        let path = self.paths.event_log_managed(plan_id);
+        if !self.managed_exists(&path)? {
             return Ok(Vec::new());
         }
-        let bytes = fs::read(path)?;
+        let bytes = self.read_managed(&path)?;
         if !bytes.is_empty() && !bytes.ends_with(b"\n") {
             return Err(StoreError::new(
                 StoreErrorKind::CorruptState,
@@ -947,7 +1040,7 @@ impl PlanStore {
 
     fn audit_locked(&self, plan_id: &PlanId) -> Result<StoreAudit, StoreError> {
         let plan = self.read_current_plan(plan_id)?;
-        let current_bytes = fs::read(self.paths.current_plan(plan_id))?;
+        let current_bytes = self.read_managed(&self.paths.current_plan_managed(plan_id))?;
         let state_hash = sha256_digest(&current_bytes);
         let events = self.read_events(plan_id)?;
         let last_event = events.last().ok_or_else(|| {
@@ -963,12 +1056,12 @@ impl PlanStore {
             ));
         }
         for event in &events {
-            verify_file_digest(
-                &self.paths.snapshot(plan_id, event.revision_after),
+            self.verify_file_digest(
+                &self.paths.snapshot_managed(plan_id, event.revision_after),
                 &event.snapshot_digest,
             )?;
         }
-        let snapshot_count = count_snapshot_files(&self.paths.snapshots_directory(plan_id))?;
+        let snapshot_count = self.count_snapshot_files(&self.paths.snapshots_managed(plan_id))?;
         if snapshot_count != events.len() {
             return Err(StoreError::new(
                 StoreErrorKind::CorruptState,
@@ -984,17 +1077,32 @@ impl PlanStore {
     }
 
     fn prepare_plan_directories(&self, plan_id: &PlanId) -> Result<(), StoreError> {
-        fs::create_dir_all(self.paths.snapshots_directory(plan_id))?;
-        sync_directory(&self.paths.snapshots_directory(plan_id))?;
-        sync_directory(&self.paths.plan_directory(plan_id))?;
-        sync_directory(&self.paths.plans_directory())?;
-        sync_directory(&self.paths.mino_directory())?;
-        sync_directory(self.paths.project_root())?;
+        let snapshots = self.paths.snapshots_managed(plan_id);
+        self.filesystem()?
+            .ensure_directory(&snapshots)
+            .map_err(managed_store_error)?;
+        for directory in [
+            snapshots,
+            self.paths.plan_managed(plan_id),
+            self.paths.plans_managed(),
+            self.paths.mino_managed(),
+        ] {
+            self.filesystem()?
+                .sync_directory(Some(&directory))
+                .map_err(managed_store_error)?;
+        }
+        self.filesystem()?
+            .sync_directory(None)
+            .map_err(managed_store_error)?;
         Ok(())
     }
 
     fn require_plan_directory(&self, plan_id: &PlanId) -> Result<(), StoreError> {
-        if self.paths.plan_directory(plan_id).is_dir() {
+        if self
+            .filesystem()?
+            .is_directory(&self.paths.plan_managed(plan_id))
+            .map_err(managed_store_error)?
+        {
             Ok(())
         } else {
             Err(StoreError::new(
@@ -1003,6 +1111,127 @@ impl PlanStore {
             ))
         }
     }
+
+    fn filesystem(&self) -> Result<&ProjectFs, StoreError> {
+        self.filesystem.as_ref().map_err(|error| {
+            StoreError::new(
+                match error.kind() {
+                    crate::managed_fs::ManagedFsErrorKind::InvalidPath
+                    | crate::managed_fs::ManagedFsErrorKind::UnsafeComponent => {
+                        StoreErrorKind::CorruptState
+                    }
+                    crate::managed_fs::ManagedFsErrorKind::Io => StoreErrorKind::Io,
+                },
+                error.to_string(),
+            )
+        })
+    }
+
+    fn read_managed(&self, path: &ManagedPath) -> Result<Vec<u8>, StoreError> {
+        self.filesystem()?.read(path).map_err(managed_store_error)
+    }
+
+    fn managed_exists(&self, path: &ManagedPath) -> Result<bool, StoreError> {
+        self.filesystem()?.exists(path).map_err(managed_store_error)
+    }
+
+    fn write_new_file(&self, path: &ManagedPath, bytes: &[u8]) -> Result<(), StoreError> {
+        let mut file = self
+            .filesystem()?
+            .create_new_file(path)
+            .map_err(managed_store_error)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    fn publish_immutable(
+        &self,
+        path: &ManagedPath,
+        bytes: &[u8],
+        digest: &str,
+    ) -> Result<(), StoreError> {
+        if self.managed_exists(path)? {
+            self.verify_file_digest(path, digest)?;
+            if self.read_managed(path)? != bytes {
+                return Err(StoreError::new(
+                    StoreErrorKind::CorruptState,
+                    format!(
+                        "Immutable artifact {} has conflicting bytes",
+                        self.filesystem()?.display_path(path).display()
+                    ),
+                ));
+            }
+            return Ok(());
+        }
+        self.write_new_file(path, bytes)?;
+        self.filesystem()?
+            .sync_parent(path)
+            .map_err(managed_store_error)
+    }
+
+    fn verify_file_digest(&self, path: &ManagedPath, expected: &str) -> Result<(), StoreError> {
+        let display_path = self.filesystem()?.display_path(path);
+        let actual = sha256_digest(&self.read_managed(path).map_err(|error| {
+            StoreError::new(
+                StoreErrorKind::CorruptState,
+                format!(
+                    "Failed to read required artifact {}: {error}",
+                    display_path.display()
+                ),
+            )
+        })?);
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(StoreError::new(
+                StoreErrorKind::CorruptState,
+                format!(
+                    "Digest mismatch for {}: expected {expected}, got {actual}",
+                    display_path.display()
+                ),
+            ))
+        }
+    }
+
+    fn remove_file_if_exists(&self, path: &ManagedPath) -> Result<(), StoreError> {
+        self.filesystem()?
+            .remove_file_if_exists(path)
+            .map_err(managed_store_error)
+    }
+
+    fn count_snapshot_files(&self, directory: &ManagedPath) -> Result<usize, StoreError> {
+        let mut count = 0_usize;
+        for entry in self
+            .filesystem()?
+            .read_directory(directory)
+            .map_err(managed_store_error)?
+        {
+            if entry.kind == ManagedEntryKind::File
+                && Path::new(&entry.name)
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            {
+                count = count.checked_add(1).ok_or_else(|| {
+                    StoreError::new(StoreErrorKind::CorruptState, "Snapshot count overflowed")
+                })?;
+            }
+        }
+        Ok(count)
+    }
+}
+
+fn managed_store_error(error: ManagedFsError) -> StoreError {
+    StoreError::new(
+        match error.kind() {
+            crate::managed_fs::ManagedFsErrorKind::InvalidPath
+            | crate::managed_fs::ManagedFsErrorKind::UnsafeComponent => {
+                StoreErrorKind::CorruptState
+            }
+            crate::managed_fs::ManagedFsErrorKind::Io => StoreErrorKind::Io,
+        },
+        error.into_message(),
+    )
 }
 
 fn validate_request(actor: &str, command: &[String]) -> Result<(), StoreError> {
@@ -1093,101 +1322,5 @@ fn validate_event_sequence(plan_id: &PlanId, events: &[Event]) -> Result<(), Sto
             ));
         }
     }
-    Ok(())
-}
-
-fn publish_immutable(path: &Path, bytes: &[u8], digest: &str) -> Result<(), StoreError> {
-    if path.exists() {
-        verify_file_digest(path, digest)?;
-        if fs::read(path)? != bytes {
-            return Err(StoreError::new(
-                StoreErrorKind::CorruptState,
-                format!(
-                    "Immutable artifact {} has conflicting bytes",
-                    path.display()
-                ),
-            ));
-        }
-        return Ok(());
-    }
-    write_new_file(path, bytes)?;
-    sync_parent_directory(path)
-}
-
-fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-    let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-fn verify_file_digest(path: &Path, expected: &str) -> Result<(), StoreError> {
-    let actual = sha256_digest(&fs::read(path).map_err(|error| {
-        StoreError::new(
-            StoreErrorKind::CorruptState,
-            format!(
-                "Failed to read required artifact {}: {error}",
-                path.display()
-            ),
-        )
-    })?);
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(StoreError::new(
-            StoreErrorKind::CorruptState,
-            format!(
-                "Digest mismatch for {}: expected {expected}, got {actual}",
-                path.display()
-            ),
-        ))
-    }
-}
-
-fn remove_file_if_exists(path: &Path) -> Result<(), StoreError> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn count_snapshot_files(directory: &Path) -> Result<usize, StoreError> {
-    let mut count = 0_usize;
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file()
-            && entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension == "json")
-        {
-            count = count.checked_add(1).ok_or_else(|| {
-                StoreError::new(StoreErrorKind::CorruptState, "Snapshot count overflowed")
-            })?;
-        }
-    }
-    Ok(count)
-}
-
-fn sync_parent_directory(path: &Path) -> Result<(), StoreError> {
-    let parent = path.parent().ok_or_else(|| {
-        StoreError::new(
-            StoreErrorKind::Io,
-            format!("Path {} has no parent directory", path.display()),
-        )
-    })?;
-    sync_directory(parent)
-}
-
-#[cfg(unix)]
-fn sync_directory(directory: &Path) -> Result<(), StoreError> {
-    File::open(directory)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn sync_directory(directory: &Path) -> Result<(), StoreError> {
-    let _ = fs::metadata(directory)?;
     Ok(())
 }

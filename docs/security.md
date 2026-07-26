@@ -37,6 +37,8 @@ Mino 中的 approval reference 是可审计的用户声明，不是签名、身�
 
 Mino 会 canonicalize 项目根，并要求受管路径留在根目录内。需要项目所有权的字段拒绝 absolute path、parent traversal 和 symlink escape。
 
+受管文件操作以 canonical 项目根打开 capability directory，随后只接受规范化的项目相对路径。创建目录前会逐级以 no-follow metadata 检查已有组件；symlink/junction、非目录祖先以及目标位置的异常文件类型都会被拒绝。目录创建后会重新验证，文件的读取、创建、替换、删除与目录同步也都相对于已打开的根句柄执行，因此 `.mino/**` 与 `docs/plan/**` 不能通过受管路径解析到项目外部。`project doctor` 只读报告 `managed_path_unsafe`，不会跟随或修复此类组件。
+
 ### 受管状态
 
 - `.mino/plans/**` 保存规范计划、事务、快照、事件、运行和证据，禁止手工修改。

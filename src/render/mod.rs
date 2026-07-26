@@ -9,3 +9,4 @@ pub use markdown::{RENDERER_VERSION, RenderedPlan, render_plan};
 pub use projection::{
     ProjectionCheck, ProjectionStatus, ProjectionWriteOutcome, check_projection, write_projection,
 };
+pub(crate) use projection::{check_managed_projection, write_managed_projection};

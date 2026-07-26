@@ -1,6 +1,7 @@
 //! Core library for the Mino local plan protocol engine.
 
 mod commands;
+mod managed_fs;
 
 /// Application services that coordinate domain state, storage, and projections.
 pub mod application;

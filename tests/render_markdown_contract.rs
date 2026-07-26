@@ -5,6 +5,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::fs::symlink_dir;
+
+#[cfg(any(unix, windows))]
+use mino::application::plan::{CreatePlanRequest, PlanService};
 use mino::domain::{
     AcceptanceCriterion, CheckId, CommitGate, CriterionId, Plan, PlanId, RequestId, Task, TaskId,
     Timestamp, VerificationCheck,
@@ -14,6 +21,8 @@ use mino::render::{
     write_projection,
 };
 use mino::store::{PlanStore, canonical_json_bytes, sha256_digest};
+#[cfg(any(unix, windows))]
+use mino::{ErrorCategory, project};
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -94,6 +103,54 @@ fn command(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|part| (*part).to_owned()).collect()
 }
 
+#[cfg(any(unix, windows))]
+fn assert_plan_create_rejects_projection_symlink(relative: &str) {
+    let project_root = TestProject::new(&format!("symlink-{}", relative.replace('/', "-")));
+    project::initialize(project_root.path()).expect("project should initialize");
+    let external = TestProject::new("symlink-projection-external");
+    let sentinel = external.path().join("sentinel.txt");
+    fs::write(&sentinel, b"outside\n").expect("outside sentinel should be written");
+    let link = project_root.path().join(relative);
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent).expect("projection parent should be created");
+    }
+    #[cfg(unix)]
+    let symlink_result = symlink(external.path(), &link);
+    #[cfg(windows)]
+    let symlink_result = symlink_dir(external.path(), &link);
+    if symlink_result
+        .as_ref()
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+    {
+        return;
+    }
+    symlink_result.expect("projection symlink should be created");
+    let service = PlanService::discover(project_root.path()).expect("plan service should open");
+
+    let error = service
+        .create(CreatePlanRequest {
+            name: format!("Reject {relative} symlink"),
+            trigger: "durable".to_owned(),
+            original_request: "Keep managed projections inside the project.".to_owned(),
+            request_id: request_id(),
+            actor: "codex".to_owned(),
+            command: command(&["mino", "plan", "create"]),
+            created_at: timestamp(0),
+        })
+        .expect_err("projection symlink must be rejected");
+    assert_eq!(error.category(), ErrorCategory::DriftDetected);
+    assert_eq!(
+        fs::read(&sentinel).expect("outside sentinel should remain readable"),
+        b"outside\n"
+    );
+    assert_eq!(
+        fs::read_dir(external.path())
+            .expect("outside directory should remain readable")
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn golden_projection_is_complete_byte_stable_and_lf_only() {
     let plan: Plan = serde_json::from_str(include_str!("fixtures/render/full_plan.json"))
@@ -114,6 +171,14 @@ fn golden_projection_is_complete_byte_stable_and_lf_only() {
     assert!(first.markdown().contains("Renderer \\| Contract"));
     assert!(first.markdown().contains("<br>Never overwrite"));
     assert!(first.markdown().contains("````json"));
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn managed_projection_rejects_symlinked_docs_ancestors() {
+    for relative in ["docs", "docs/plan"] {
+        assert_plan_create_rejects_projection_symlink(relative);
+    }
 }
 
 #[test]

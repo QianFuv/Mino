@@ -1,7 +1,6 @@
 //! Revision-checked plan authoring over the recoverable store and managed projection.
 
-use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Serialize;
@@ -13,10 +12,13 @@ use crate::domain::{
     Timestamp, VerificationCheck,
 };
 use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter};
+use crate::managed_fs::{
+    ManagedEntryKind, ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs,
+};
 use crate::project;
 use crate::render::{
-    ProjectionStatus, RenderError, RenderErrorKind, RenderedPlan, check_projection, render_plan,
-    write_projection,
+    ProjectionStatus, RenderError, RenderErrorKind, RenderedPlan, check_managed_projection,
+    render_plan, write_managed_projection,
 };
 use crate::standards::{EmbeddedCatalog, SystemToolProbe, apply_recommendation, recommend_initial};
 use crate::store::{MutationRequest, PlanStore, StoreError, StoreErrorKind, sha256_digest};
@@ -265,6 +267,7 @@ pub struct PlanNextReport {
 #[derive(Clone, Debug)]
 pub struct PlanService {
     root: PathBuf,
+    filesystem: ProjectFs,
     store: PlanStore,
 }
 
@@ -276,8 +279,10 @@ impl PlanService {
     /// Returns an environment-unavailable error when no initialized project root exists.
     pub fn discover(start: &Path) -> Result<Self, MinoError> {
         let root = project::discover(start)?;
+        let filesystem = ProjectFs::open(root.path()).map_err(map_project_fs_error)?;
         Ok(Self {
             root: root.path().to_path_buf(),
+            filesystem,
             store: PlanStore::new(root.path()),
         })
     }
@@ -356,8 +361,8 @@ impl PlanService {
             .load_plan(&plan_id)
             .map_err(|error| map_store_error(&error))?;
         let rendered = render_plan(&plan).map_err(|error| map_render_error(&error))?;
-        let managed_projection = projection_path(&self.root, &plan)?;
-        write_projection(&managed_projection, &rendered, None)
+        let managed_projection = projection_managed_path(&plan)?;
+        write_managed_projection(&self.filesystem, &managed_projection, &rendered, None)
             .map_err(|error| map_render_error(&error))?;
         Ok(operation_report(
             &plan,
@@ -440,28 +445,8 @@ impl PlanService {
                 .map_err(|error| map_domain_error(&error))?;
         }
         let assigned_id = assigned_id(&prior)?;
-        let prior_rendered = render_plan(&prior).map_err(|error| map_render_error(&error))?;
-        let projection_path = projection_path(&self.root, &prior)?;
-        let prior_projection = check_projection(&projection_path, &prior_rendered)
-            .map_err(|error| map_render_error(&error))?;
-        let prior_for_write = match prior_projection.status() {
-            ProjectionStatus::Current => Some(prior_rendered),
-            ProjectionStatus::Missing if is_replay_candidate => None,
-            ProjectionStatus::Drifted if is_replay_candidate => {
-                let current_rendered =
-                    render_plan(&current).map_err(|error| map_render_error(&error))?;
-                let current_projection = check_projection(&projection_path, &current_rendered)
-                    .map_err(|error| map_render_error(&error))?;
-                if current_projection.status() == ProjectionStatus::Current {
-                    Some(prior_rendered)
-                } else {
-                    return Err(projection_drift_error(&projection_path));
-                }
-            }
-            ProjectionStatus::Missing | ProjectionStatus::Drifted => {
-                return Err(projection_drift_error(&projection_path));
-            }
-        };
+        let (managed_projection, prior_for_write) =
+            self.projection_before_commit(&prior, &current, is_replay_candidate)?;
         let store_request = MutationRequest::new(
             request.expected_revision,
             request.request_id,
@@ -483,14 +468,56 @@ impl PlanService {
             .load_plan(&request.plan_id)
             .map_err(|error| map_store_error(&error))?;
         let rendered = render_plan(&plan).map_err(|error| map_render_error(&error))?;
-        write_projection(&projection_path, &rendered, prior_for_write.as_ref())
-            .map_err(|error| map_render_error(&error))?;
+        write_managed_projection(
+            &self.filesystem,
+            &managed_projection,
+            &rendered,
+            prior_for_write.as_ref(),
+        )
+        .map_err(|error| map_render_error(&error))?;
         Ok(operation_report(
             &plan,
             &rendered,
             receipt.is_replay(),
             assigned_id,
         ))
+    }
+
+    fn projection_before_commit(
+        &self,
+        prior: &Plan,
+        current: &Plan,
+        is_replay_candidate: bool,
+    ) -> Result<(ManagedPath, Option<RenderedPlan>), MinoError> {
+        let prior_rendered = render_plan(prior).map_err(|error| map_render_error(&error))?;
+        let managed_projection = projection_managed_path(prior)?;
+        let projection_path = self.filesystem.display_path(&managed_projection);
+        let prior_projection =
+            check_managed_projection(&self.filesystem, &managed_projection, &prior_rendered)
+                .map_err(|error| map_render_error(&error))?;
+        let prior_for_write = match prior_projection.status() {
+            ProjectionStatus::Current => Some(prior_rendered),
+            ProjectionStatus::Missing if is_replay_candidate => None,
+            ProjectionStatus::Drifted if is_replay_candidate => {
+                let current_rendered =
+                    render_plan(current).map_err(|error| map_render_error(&error))?;
+                let current_projection = check_managed_projection(
+                    &self.filesystem,
+                    &managed_projection,
+                    &current_rendered,
+                )
+                .map_err(|error| map_render_error(&error))?;
+                if current_projection.status() == ProjectionStatus::Current {
+                    Some(prior_rendered)
+                } else {
+                    return Err(projection_drift_error(&projection_path));
+                }
+            }
+            ProjectionStatus::Missing | ProjectionStatus::Drifted => {
+                return Err(projection_drift_error(&projection_path));
+            }
+        };
+        Ok((managed_projection, prior_for_write))
     }
 
     /// Verifies an older semantic phase after later revisions have committed.
@@ -515,13 +542,14 @@ impl PlanService {
             .load_plan(&request.plan_id)
             .map_err(|error| map_store_error(&error))?;
         let rendered = render_plan(&plan).map_err(|error| map_render_error(&error))?;
-        let path = projection_path(&self.root, &plan)?;
-        let projection =
-            check_projection(&path, &rendered).map_err(|error| map_render_error(&error))?;
+        let managed_path = projection_managed_path(&plan)?;
+        let path = self.filesystem.display_path(&managed_path);
+        let projection = check_managed_projection(&self.filesystem, &managed_path, &rendered)
+            .map_err(|error| map_render_error(&error))?;
         match projection.status() {
             ProjectionStatus::Current => {}
             ProjectionStatus::Missing => {
-                write_projection(&path, &rendered, None)
+                write_managed_projection(&self.filesystem, &managed_path, &rendered, None)
                     .map_err(|error| map_render_error(&error))?;
             }
             ProjectionStatus::Drifted => return Err(projection_drift_error(&path)),
@@ -610,34 +638,20 @@ impl PlanService {
     }
 
     fn legacy_active_plan(&self) -> Result<Option<Plan>, MinoError> {
-        let plans_directory = self.store.paths().plans_directory();
-        let entries = fs::read_dir(&plans_directory).map_err(|error| {
-            MinoError::new(
-                ErrorCategory::EnvironmentUnavailable,
-                format!("Failed to inspect {}: {error}", plans_directory.display()),
-            )
-        })?;
+        let plans_directory = self.store.paths().plans_managed();
+        let entries = self
+            .filesystem
+            .read_directory(&plans_directory)
+            .map_err(map_project_fs_error)?;
         let mut plan_ids = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|error| {
-                MinoError::new(
-                    ErrorCategory::EnvironmentUnavailable,
-                    format!("Failed to inspect {}: {error}", plans_directory.display()),
-                )
-            })?;
-            let file_type = entry.file_type().map_err(|error| {
-                MinoError::new(
-                    ErrorCategory::EnvironmentUnavailable,
-                    format!("Failed to inspect {}: {error}", entry.path().display()),
-                )
-            })?;
-            let name = entry.file_name().into_string().map_err(|_| {
+            let name = entry.name.into_string().map_err(|_| {
                 MinoError::new(
                     ErrorCategory::DriftDetected,
                     "Plan-state directory contains a non-UTF-8 entry",
                 )
             })?;
-            if !file_type.is_dir() {
+            if entry.kind != ManagedEntryKind::Directory {
                 return Err(MinoError::new(
                     ErrorCategory::DriftDetected,
                     format!("Unexpected file in private plan state: {name}"),
@@ -687,8 +701,10 @@ impl PlanService {
             .load_plan(plan_id)
             .map_err(|error| map_store_error(&error))?;
         let rendered = render_plan(&plan).map_err(|error| map_render_error(&error))?;
-        let path = projection_path(&self.root, &plan)?;
-        let check = check_projection(&path, &rendered).map_err(|error| map_render_error(&error))?;
+        let managed_path = projection_managed_path(&plan)?;
+        let path = self.filesystem.display_path(&managed_path);
+        let check = check_managed_projection(&self.filesystem, &managed_path, &rendered)
+            .map_err(|error| map_render_error(&error))?;
         if check.status() != ProjectionStatus::Current {
             return Err(projection_drift_error(&path));
         }
@@ -707,6 +723,10 @@ impl PlanService {
         self.store
             .load_snapshot(plan_id, revision)
             .map_err(|error| map_store_error(&error))
+    }
+
+    pub(crate) fn filesystem(&self) -> &ProjectFs {
+        &self.filesystem
     }
 
     fn build_initial_plan(
@@ -952,7 +972,7 @@ fn git_text(root: &Path, arguments: &[&str]) -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-pub(crate) fn projection_path(root: &Path, plan: &Plan) -> Result<PathBuf, MinoError> {
+pub(crate) fn projection_managed_path(plan: &Plan) -> Result<ManagedPath, MinoError> {
     let relative = plan.metadata().markdown_path().ok_or_else(|| {
         MinoError::new(
             ErrorCategory::DriftDetected,
@@ -960,18 +980,23 @@ pub(crate) fn projection_path(root: &Path, plan: &Plan) -> Result<PathBuf, MinoE
         )
     })?;
     let path = Path::new(relative);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
-        || path.extension().is_none_or(|extension| extension != "md")
-    {
+    if path.extension().is_none_or(|extension| extension != "md") {
         return Err(MinoError::new(
             ErrorCategory::DriftDetected,
             format!("Plan {} has unsafe Markdown path {relative}", plan.id()),
         ));
     }
-    Ok(root.join(path))
+    ManagedPath::new(path).map_err(map_project_fs_error)
+}
+
+fn map_project_fs_error(error: ManagedFsError) -> MinoError {
+    let category = match error.kind() {
+        ManagedFsErrorKind::InvalidPath | ManagedFsErrorKind::UnsafeComponent => {
+            ErrorCategory::DriftDetected
+        }
+        ManagedFsErrorKind::Io => ErrorCategory::EnvironmentUnavailable,
+    };
+    MinoError::new(category, error.into_message())
 }
 
 pub(crate) fn draft_next_actions(plan: &Plan, missing: &[String]) -> Vec<NextAction> {

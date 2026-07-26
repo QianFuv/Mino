@@ -8,6 +8,11 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::fs::symlink_dir;
+
 use mino::domain::{
     AcceptanceCriterion, CheckId, CommitGate, CriterionId, Plan, PlanId, RequestId, Task, TaskId,
     Timestamp, VerificationCheck,
@@ -127,6 +132,47 @@ fn create_plan(store: &PlanStore) -> mino::store::CommitReceipt {
             command(&["mino", "plan", "create"]),
         )
         .expect("plan should be created")
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn plan_store_rejects_a_symlinked_plans_directory() {
+    let project = TestProject::new("symlink-plans");
+    let external = TestProject::new("symlink-plans-external");
+    fs::create_dir(project.path().join(".mino")).expect("Mino directory should be created");
+    let sentinel = external.path().join("sentinel.txt");
+    fs::write(&sentinel, b"outside\n").expect("outside sentinel should be written");
+    #[cfg(unix)]
+    let symlink_result = symlink(external.path(), project.path().join(".mino/plans"));
+    #[cfg(windows)]
+    let symlink_result = symlink_dir(external.path(), project.path().join(".mino/plans"));
+    if symlink_result
+        .as_ref()
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+    {
+        return;
+    }
+    symlink_result.expect("plans symlink should be created");
+
+    let error = PlanStore::new(project.path())
+        .create_plan(
+            &Plan::new(plan_id(), "Reject escaped storage.", timestamp(0)),
+            request_id(1),
+            "codex",
+            command(&["mino", "plan", "create"]),
+        )
+        .expect_err("symlinked plans directory must be rejected");
+    assert_eq!(error.kind(), StoreErrorKind::CorruptState);
+    assert_eq!(
+        fs::read(&sentinel).expect("outside sentinel should remain readable"),
+        b"outside\n"
+    );
+    assert_eq!(
+        fs::read_dir(external.path())
+            .expect("outside directory should remain readable")
+            .count(),
+        1
+    );
 }
 
 fn commit_task(

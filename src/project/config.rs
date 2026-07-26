@@ -1,6 +1,5 @@
 //! Project configuration, protocol locks, standards locks, and layout paths.
 
-use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{CURRENT_PROTOCOL_REVISION, CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION};
+use crate::managed_fs::{ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs};
 use crate::render::RENDERER_VERSION;
 use crate::{ErrorCategory, MinoError};
 
@@ -91,6 +91,38 @@ impl ProjectLayout {
     #[must_use]
     pub fn agents_file(&self) -> PathBuf {
         self.root.join("AGENTS.md")
+    }
+
+    pub(crate) fn mino_managed() -> ManagedPath {
+        managed_path(".mino")
+    }
+
+    pub(crate) fn config_managed() -> ManagedPath {
+        managed_path(".mino/config.toml")
+    }
+
+    pub(crate) fn protocol_lock_managed() -> ManagedPath {
+        managed_path(".mino/protocol.lock")
+    }
+
+    pub(crate) fn standards_lock_managed() -> ManagedPath {
+        managed_path(".mino/standards.lock")
+    }
+
+    pub(crate) fn active_bindings_managed() -> ManagedPath {
+        managed_path(".mino/active.json")
+    }
+
+    pub(crate) fn plans_directory_managed() -> ManagedPath {
+        managed_path(".mino/plans")
+    }
+
+    pub(crate) fn standards_cache_managed() -> ManagedPath {
+        managed_path(".mino/cache/standards")
+    }
+
+    pub(crate) fn projection_directory_managed() -> ManagedPath {
+        managed_path("docs/plan")
     }
 }
 
@@ -224,67 +256,109 @@ pub(crate) fn serialize_toml<T: Serialize>(value: &T) -> Result<Vec<u8>, MinoErr
     Ok(rendered.into_bytes())
 }
 
-pub(crate) fn parse_toml<T>(path: &Path) -> Result<T, MinoError>
+pub(crate) fn parse_managed_toml<T>(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+) -> Result<T, MinoError>
 where
     T: for<'de> Deserialize<'de>,
 {
-    let contents = fs::read_to_string(path).map_err(|error| io_error("read", path, &error))?;
-    toml::from_str(&contents).map_err(|error| {
+    let bytes = filesystem.read(path).map_err(map_managed_error)?;
+    let contents = std::str::from_utf8(&bytes).map_err(|error| {
         MinoError::new(
             ErrorCategory::IncompleteOrValidation,
-            format!("Failed to parse {}: {error}", path.display()),
+            format!(
+                "Failed to decode {} as UTF-8: {error}",
+                filesystem.display_path(path).display()
+            ),
+        )
+    })?;
+    toml::from_str(contents).map_err(|error| {
+        MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            format!(
+                "Failed to parse {}: {error}",
+                filesystem.display_path(path).display()
+            ),
         )
     })
 }
 
-pub(crate) fn create_file(path: &Path, bytes: &[u8]) -> Result<(), MinoError> {
-    let parent = path.parent().ok_or_else(|| {
-        MinoError::new(
-            ErrorCategory::EnvironmentUnavailable,
-            format!("Mino-owned path {} has no parent directory", path.display()),
-        )
-    })?;
+pub(crate) fn create_file(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    bytes: &[u8],
+) -> Result<(), MinoError> {
+    let parent = path.parent();
     let file_name = path
+        .as_path()
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
             MinoError::new(
                 ErrorCategory::EnvironmentUnavailable,
-                format!("Mino-owned path {} has no UTF-8 file name", path.display()),
+                format!(
+                    "Mino-owned path {} has no UTF-8 file name",
+                    filesystem.display_path(path).display()
+                ),
             )
         })?;
+    if let Some(parent) = &parent {
+        filesystem
+            .ensure_directory(parent)
+            .map_err(map_managed_error)?;
+    }
     let sequence = NEXT_INITIALIZATION_FILE.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
+    let temporary_name = format!(
         ".{file_name}.mino-init-{}-{sequence}.tmp",
         std::process::id()
-    ));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|error| io_error("create", &temporary, &error))?;
+    );
+    let temporary = match &parent {
+        Some(parent) => parent.join(temporary_name).map_err(map_managed_error)?,
+        None => ManagedPath::new(temporary_name).map_err(map_managed_error)?,
+    };
+    let mut file = filesystem
+        .create_new_file(&temporary)
+        .map_err(map_managed_error)?;
     if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         drop(file);
-        let _ = fs::remove_file(&temporary);
-        return Err(io_error("write", &temporary, &error));
+        let _ = filesystem.remove_file_if_exists(&temporary);
+        return Err(io_error(
+            "write",
+            &filesystem.display_path(&temporary),
+            &error,
+        ));
     }
     drop(file);
-    if path.exists() {
-        let _ = fs::remove_file(&temporary);
+    if filesystem.exists(path).map_err(map_managed_error)? {
+        let _ = filesystem.remove_file_if_exists(&temporary);
         return Err(MinoError::new(
             ErrorCategory::EnvironmentUnavailable,
             format!(
                 "Mino-owned file {} appeared during initialization",
-                path.display()
+                filesystem.display_path(path).display()
             ),
         ));
     }
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(io_error("publish", path, &error));
+    if let Err(error) = filesystem.rename(&temporary, path) {
+        let _ = filesystem.remove_file_if_exists(&temporary);
+        return Err(map_managed_error(error));
     }
-    sync_directory(parent)?;
-    Ok(())
+    filesystem.sync_parent(path).map_err(map_managed_error)
+}
+
+pub(crate) fn map_managed_error(error: ManagedFsError) -> MinoError {
+    let category = match error.kind() {
+        ManagedFsErrorKind::InvalidPath | ManagedFsErrorKind::UnsafeComponent => {
+            ErrorCategory::DriftDetected
+        }
+        ManagedFsErrorKind::Io => ErrorCategory::EnvironmentUnavailable,
+    };
+    MinoError::new(category, error.into_message())
+}
+
+fn managed_path(path: &str) -> ManagedPath {
+    ManagedPath::new(path).expect("static project layout path should be valid")
 }
 
 pub(crate) fn io_error(action: &str, path: &Path, error: &std::io::Error) -> MinoError {
@@ -292,20 +366,4 @@ pub(crate) fn io_error(action: &str, path: &Path, error: &std::io::Error) -> Min
         ErrorCategory::EnvironmentUnavailable,
         format!("Failed to {action} {}: {error}", path.display()),
     )
-}
-
-#[cfg(unix)]
-fn sync_directory(directory: &Path) -> Result<(), MinoError> {
-    use std::fs::File;
-
-    File::open(directory)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| io_error("synchronize", directory, &error))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(directory: &Path) -> Result<(), MinoError> {
-    fs::metadata(directory)
-        .map(|_| ())
-        .map_err(|error| io_error("inspect", directory, &error))
 }

@@ -1,20 +1,20 @@
 //! Read-only project, lock, transaction, projection, and integration diagnosis.
 
-use std::fs;
-use std::path::{Component, Path, PathBuf};
-
-use serde::Serialize;
-use serde_json::Value;
+use std::path::{Path, PathBuf};
 
 use crate::domain::Plan;
 use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter};
 use crate::integration::{IntegrationFindingSeverity, inspect_project};
-use crate::render::{ProjectionStatus, check_projection, render_plan};
+use crate::managed_fs::{
+    ManagedDirEntry, ManagedEntryKind, ManagedFsErrorKind, ManagedPath, ProjectFs,
+};
+use crate::render::{ProjectionStatus, check_managed_projection, render_plan};
 use crate::{ErrorCategory, MinoError};
+use serde::Serialize;
 
 use super::config::{
     PROTOCOL_LOCK_VERSION, ProjectConfig, ProjectLayout, ProtocolLock, STANDARDS_LOCK_VERSION,
-    StandardsLock, parse_toml,
+    StandardsLock, parse_managed_toml,
 };
 
 /// Severity assigned to a deterministic doctor finding.
@@ -91,11 +91,33 @@ impl DoctorReport {
 /// enumerated. Individual malformed owned files are returned as findings.
 pub fn diagnose(layout: &ProjectLayout) -> Result<DoctorReport, MinoError> {
     let mut findings = Vec::new();
-    inspect_config(layout, &mut findings);
-    inspect_protocol_lock(layout, &mut findings);
-    inspect_standards_lock(layout, &mut findings);
-    inspect_transactions_and_projections(layout, &mut findings)?;
-    inspect_active_binding(layout, &mut findings);
+    let filesystem = ProjectFs::open(layout.root()).map_err(|error| {
+        MinoError::new(ErrorCategory::EnvironmentUnavailable, error.to_string())
+    })?;
+    let has_managed_root = inspect_required_directory(
+        &filesystem,
+        &ProjectLayout::mino_managed(),
+        "mino_directory_missing",
+        "The Mino state directory is missing",
+        &mut findings,
+    );
+    let has_safe_projection_directory = inspect_optional_directory(
+        &filesystem,
+        &ProjectLayout::projection_directory_managed(),
+        &mut findings,
+    );
+    if has_managed_root {
+        inspect_config(layout, &filesystem, &mut findings);
+        inspect_protocol_lock(layout, &filesystem, &mut findings);
+        inspect_standards_lock(layout, &filesystem, &mut findings);
+        inspect_transactions_and_projections(
+            layout,
+            &filesystem,
+            has_safe_projection_directory,
+            &mut findings,
+        );
+        inspect_active_binding(layout, &filesystem, &mut findings);
+    }
     inspect_integrations(layout, &mut findings)?;
     findings.sort_by(|left, right| {
         left.code
@@ -108,9 +130,147 @@ pub fn diagnose(layout: &ProjectLayout) -> Result<DoctorReport, MinoError> {
     })
 }
 
-fn inspect_active_binding(layout: &ProjectLayout, findings: &mut Vec<DoctorFinding>) {
+fn inspect_required_directory(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    missing_code: &str,
+    missing_message: &str,
+    findings: &mut Vec<DoctorFinding>,
+) -> bool {
+    match filesystem.entry_kind(path) {
+        Ok(Some(ManagedEntryKind::Directory)) => true,
+        Ok(None) => {
+            findings.push(DoctorFinding::new(
+                missing_code,
+                FindingSeverity::Error,
+                missing_message,
+                Some(filesystem.display_path(path)),
+            ));
+            false
+        }
+        Ok(Some(kind)) => {
+            push_unsafe_managed_path(filesystem, path, &format!("found {kind:?}"), findings);
+            false
+        }
+        Err(error) => {
+            push_managed_error(filesystem, path, &error.to_string(), error.kind(), findings);
+            false
+        }
+    }
+}
+
+fn inspect_optional_directory(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    findings: &mut Vec<DoctorFinding>,
+) -> bool {
+    match filesystem.entry_kind(path) {
+        Ok(Some(ManagedEntryKind::Directory) | None) => true,
+        Ok(Some(kind)) => {
+            push_unsafe_managed_path(filesystem, path, &format!("found {kind:?}"), findings);
+            false
+        }
+        Err(error) => {
+            push_managed_error(filesystem, path, &error.to_string(), error.kind(), findings);
+            false
+        }
+    }
+}
+
+fn inspect_required_file(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    missing_code: &str,
+    missing_message: &str,
+    findings: &mut Vec<DoctorFinding>,
+) -> bool {
+    match filesystem.entry_kind(path) {
+        Ok(Some(ManagedEntryKind::File)) => true,
+        Ok(None) => {
+            findings.push(DoctorFinding::new(
+                missing_code,
+                FindingSeverity::Error,
+                missing_message,
+                Some(filesystem.display_path(path)),
+            ));
+            false
+        }
+        Ok(Some(kind)) => {
+            push_unsafe_managed_path(filesystem, path, &format!("found {kind:?}"), findings);
+            false
+        }
+        Err(error) => {
+            push_managed_error(filesystem, path, &error.to_string(), error.kind(), findings);
+            false
+        }
+    }
+}
+
+fn inspect_optional_file(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    findings: &mut Vec<DoctorFinding>,
+) -> bool {
+    match filesystem.entry_kind(path) {
+        Ok(Some(ManagedEntryKind::File)) => true,
+        Ok(None) => false,
+        Ok(Some(kind)) => {
+            push_unsafe_managed_path(filesystem, path, &format!("found {kind:?}"), findings);
+            false
+        }
+        Err(error) => {
+            push_managed_error(filesystem, path, &error.to_string(), error.kind(), findings);
+            false
+        }
+    }
+}
+
+fn push_unsafe_managed_path(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    detail: &str,
+    findings: &mut Vec<DoctorFinding>,
+) {
+    findings.push(DoctorFinding::new(
+        "managed_path_unsafe",
+        FindingSeverity::Error,
+        format!(
+            "Managed path {} is unsafe: {detail}",
+            filesystem.display_path(path).display()
+        ),
+        Some(filesystem.display_path(path)),
+    ));
+}
+
+fn push_managed_error(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    message: &str,
+    kind: ManagedFsErrorKind,
+    findings: &mut Vec<DoctorFinding>,
+) {
+    let code = match kind {
+        ManagedFsErrorKind::InvalidPath | ManagedFsErrorKind::UnsafeComponent => {
+            "managed_path_unsafe"
+        }
+        ManagedFsErrorKind::Io => "managed_path_unreadable",
+    };
+    findings.push(DoctorFinding::new(
+        code,
+        FindingSeverity::Error,
+        message,
+        Some(filesystem.display_path(path)),
+    ));
+}
+
+fn inspect_active_binding(
+    layout: &ProjectLayout,
+    filesystem: &ProjectFs,
+    findings: &mut Vec<DoctorFinding>,
+) {
     let path = layout.active_bindings();
-    if !path.exists() {
+    let managed_path = ProjectLayout::active_bindings_managed();
+    if !inspect_optional_file(filesystem, &managed_path, findings) {
         return;
     }
     let facts = match GitAdapter::new(layout.root()).inspect() {
@@ -140,11 +300,10 @@ fn inspect_active_binding(layout: &ProjectLayout, findings: &mut Vec<DoctorFindi
     let code = match resolution.status {
         ActiveBindingStatus::Current => {
             if resolution.binding.as_ref().is_some_and(|binding| {
-                layout
-                    .plans_directory()
-                    .join(binding.plan_id.as_str())
-                    .join("plan.json")
-                    .is_file()
+                ManagedPath::new(format!(".mino/plans/{}/plan.json", binding.plan_id))
+                    .ok()
+                    .and_then(|path| filesystem.is_file(&path).ok())
+                    == Some(true)
             }) {
                 return;
             }
@@ -167,18 +326,23 @@ fn inspect_active_binding(layout: &ProjectLayout, findings: &mut Vec<DoctorFindi
     ));
 }
 
-fn inspect_config(layout: &ProjectLayout, findings: &mut Vec<DoctorFinding>) {
+fn inspect_config(
+    layout: &ProjectLayout,
+    filesystem: &ProjectFs,
+    findings: &mut Vec<DoctorFinding>,
+) {
     let path = layout.config();
-    if !path.exists() {
-        findings.push(DoctorFinding::new(
-            "config_missing",
-            FindingSeverity::Error,
-            "The project configuration is missing",
-            Some(path),
-        ));
+    let managed_path = ProjectLayout::config_managed();
+    if !inspect_required_file(
+        filesystem,
+        &managed_path,
+        "config_missing",
+        "The project configuration is missing",
+        findings,
+    ) {
         return;
     }
-    match parse_toml::<ProjectConfig>(&path) {
+    match parse_managed_toml::<ProjectConfig>(filesystem, &managed_path) {
         Ok(config) if config.is_supported() => {}
         Ok(_) => findings.push(DoctorFinding::new(
             "config_drift",
@@ -195,17 +359,23 @@ fn inspect_config(layout: &ProjectLayout, findings: &mut Vec<DoctorFinding>) {
     }
 }
 
-fn inspect_protocol_lock(layout: &ProjectLayout, findings: &mut Vec<DoctorFinding>) {
+fn inspect_protocol_lock(
+    layout: &ProjectLayout,
+    filesystem: &ProjectFs,
+    findings: &mut Vec<DoctorFinding>,
+) {
     let path = layout.protocol_lock();
     inspect_owned_toml(
-        &path,
+        filesystem,
+        &ProjectLayout::protocol_lock_managed(),
         &ProtocolLock::default(),
         "protocol_lock_missing",
         "protocol_lock_corrupt",
         "protocol_lock_mismatch",
         findings,
     );
-    if let Ok(lock) = parse_toml::<ProtocolLock>(&path)
+    if let Ok(lock) =
+        parse_managed_toml::<ProtocolLock>(filesystem, &ProjectLayout::protocol_lock_managed())
         && lock.lock_version != PROTOCOL_LOCK_VERSION
     {
         findings.push(DoctorFinding::new(
@@ -217,18 +387,23 @@ fn inspect_protocol_lock(layout: &ProjectLayout, findings: &mut Vec<DoctorFindin
     }
 }
 
-fn inspect_standards_lock(layout: &ProjectLayout, findings: &mut Vec<DoctorFinding>) {
+fn inspect_standards_lock(
+    layout: &ProjectLayout,
+    filesystem: &ProjectFs,
+    findings: &mut Vec<DoctorFinding>,
+) {
     let path = layout.standards_lock();
-    if !path.exists() {
-        findings.push(DoctorFinding::new(
-            "standards_lock_missing",
-            FindingSeverity::Error,
-            "The standards lock is missing",
-            Some(path),
-        ));
+    let managed_path = ProjectLayout::standards_lock_managed();
+    if !inspect_required_file(
+        filesystem,
+        &managed_path,
+        "standards_lock_missing",
+        "The standards lock is missing",
+        findings,
+    ) {
         return;
     }
-    let lock = match parse_toml::<StandardsLock>(&path) {
+    let lock = match parse_managed_toml::<StandardsLock>(filesystem, &managed_path) {
         Ok(lock) => lock,
         Err(error) => {
             findings.push(DoctorFinding::new(
@@ -266,7 +441,8 @@ fn inspect_standards_lock(layout: &ProjectLayout, findings: &mut Vec<DoctorFindi
 }
 
 fn inspect_owned_toml<T>(
-    path: &Path,
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
     expected: &T,
     missing_code: &str,
     corrupt_code: &str,
@@ -275,85 +451,164 @@ fn inspect_owned_toml<T>(
 ) where
     T: for<'de> serde::Deserialize<'de> + PartialEq,
 {
-    if !path.exists() {
-        findings.push(DoctorFinding::new(
-            missing_code,
-            FindingSeverity::Error,
-            format!("Required Mino file {} is missing", path.display()),
-            Some(path.to_path_buf()),
-        ));
+    let display_path = filesystem.display_path(path);
+    if !inspect_required_file(
+        filesystem,
+        path,
+        missing_code,
+        &format!("Required Mino file {} is missing", display_path.display()),
+        findings,
+    ) {
         return;
     }
-    match parse_toml::<T>(path) {
+    match parse_managed_toml::<T>(filesystem, path) {
         Ok(actual) if &actual == expected => {}
         Ok(_) => findings.push(DoctorFinding::new(
             drift_code,
             FindingSeverity::Error,
             format!(
                 "Mino-owned file {} differs from the supported value",
-                path.display()
+                display_path.display()
             ),
-            Some(path.to_path_buf()),
+            Some(display_path.clone()),
         )),
         Err(error) => findings.push(DoctorFinding::new(
             corrupt_code,
             FindingSeverity::Error,
             error.to_string(),
-            Some(path.to_path_buf()),
+            Some(display_path),
         )),
     }
 }
 
 fn inspect_transactions_and_projections(
     layout: &ProjectLayout,
+    filesystem: &ProjectFs,
+    has_safe_projection_directory: bool,
     findings: &mut Vec<DoctorFinding>,
-) -> Result<(), MinoError> {
+) {
     let plans_directory = layout.plans_directory();
-    if !plans_directory.exists() {
-        findings.push(DoctorFinding::new(
-            "plans_directory_missing",
-            FindingSeverity::Error,
-            "The Mino plans directory is missing",
-            Some(plans_directory),
-        ));
-        return Ok(());
+    let managed_plans_directory = ProjectLayout::plans_directory_managed();
+    if !inspect_required_directory(
+        filesystem,
+        &managed_plans_directory,
+        "plans_directory_missing",
+        "The Mino plans directory is missing",
+        findings,
+    ) {
+        return;
     }
-    let entries = fs::read_dir(&plans_directory).map_err(|error| {
-        MinoError::new(
-            ErrorCategory::EnvironmentUnavailable,
-            format!("Failed to inspect {}: {error}", plans_directory.display()),
-        )
-    })?;
+    let entries = match filesystem.read_directory(&managed_plans_directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            push_managed_error(
+                filesystem,
+                &managed_plans_directory,
+                &error.to_string(),
+                error.kind(),
+                findings,
+            );
+            return;
+        }
+    };
     for entry in entries {
-        let entry = entry.map_err(|error| {
-            MinoError::new(
-                ErrorCategory::EnvironmentUnavailable,
-                format!("Failed to inspect a plan directory entry: {error}"),
-            )
-        })?;
-        if !entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
-            continue;
-        }
-        let plan_state_directory = entry.path();
-        let transaction_directory = plan_state_directory.join("transaction");
-        if transaction_directory.exists() {
-            findings.push(DoctorFinding::new(
-                "incomplete_transaction",
-                FindingSeverity::Error,
-                "A prepared storage transaction requires recovery",
-                Some(transaction_directory),
-            ));
-        }
-        let plan_path = plan_state_directory.join("plan.json");
-        if plan_path.exists() {
-            inspect_projection(layout, &plan_path, findings);
-        }
+        inspect_plan_entry(
+            filesystem,
+            &managed_plans_directory,
+            &plans_directory,
+            &entry,
+            has_safe_projection_directory,
+            findings,
+        );
     }
-    Ok(())
 }
 
-fn inspect_projection(layout: &ProjectLayout, plan_path: &Path, findings: &mut Vec<DoctorFinding>) {
-    let plan = match fs::read(plan_path)
+fn inspect_plan_entry(
+    filesystem: &ProjectFs,
+    plans_directory: &ManagedPath,
+    display_plans_directory: &Path,
+    entry: &ManagedDirEntry,
+    has_safe_projection_directory: bool,
+    findings: &mut Vec<DoctorFinding>,
+) {
+    let plan_state_directory = match plans_directory.join(&entry.name) {
+        Ok(path) => path,
+        Err(error) => {
+            findings.push(DoctorFinding::new(
+                "managed_path_unsafe",
+                FindingSeverity::Error,
+                error.to_string(),
+                Some(display_plans_directory.join(&entry.name)),
+            ));
+            return;
+        }
+    };
+    if entry.kind != ManagedEntryKind::Directory {
+        push_unsafe_managed_path(
+            filesystem,
+            &plan_state_directory,
+            &format!("found {:?}, expected Directory", entry.kind),
+            findings,
+        );
+        return;
+    }
+    let transaction_directory = plan_state_directory
+        .join("transaction")
+        .expect("static transaction directory should form a managed path");
+    match filesystem.entry_kind(&transaction_directory) {
+        Ok(Some(ManagedEntryKind::Directory)) => findings.push(DoctorFinding::new(
+            "incomplete_transaction",
+            FindingSeverity::Error,
+            "A prepared storage transaction requires recovery",
+            Some(filesystem.display_path(&transaction_directory)),
+        )),
+        Ok(None) => {}
+        Ok(Some(kind)) => push_unsafe_managed_path(
+            filesystem,
+            &transaction_directory,
+            &format!("found {kind:?}, expected Directory"),
+            findings,
+        ),
+        Err(error) => push_managed_error(
+            filesystem,
+            &transaction_directory,
+            &error.to_string(),
+            error.kind(),
+            findings,
+        ),
+    }
+    let plan_path = plan_state_directory
+        .join("plan.json")
+        .expect("static plan file name should form a managed path");
+    match filesystem.entry_kind(&plan_path) {
+        Ok(Some(ManagedEntryKind::File)) if has_safe_projection_directory => {
+            inspect_projection(filesystem, &plan_path, findings);
+        }
+        Ok(Some(ManagedEntryKind::File) | None) => {}
+        Ok(Some(kind)) => push_unsafe_managed_path(
+            filesystem,
+            &plan_path,
+            &format!("found {kind:?}, expected File"),
+            findings,
+        ),
+        Err(error) => push_managed_error(
+            filesystem,
+            &plan_path,
+            &error.to_string(),
+            error.kind(),
+            findings,
+        ),
+    }
+}
+
+fn inspect_projection(
+    filesystem: &ProjectFs,
+    plan_path: &ManagedPath,
+    findings: &mut Vec<DoctorFinding>,
+) {
+    let display_plan_path = filesystem.display_path(plan_path);
+    let plan = match filesystem
+        .read(plan_path)
         .map_err(|error| error.to_string())
         .and_then(|bytes| serde_json::from_slice::<Plan>(&bytes).map_err(|error| error.to_string()))
     {
@@ -362,24 +617,47 @@ fn inspect_projection(layout: &ProjectLayout, plan_path: &Path, findings: &mut V
             findings.push(DoctorFinding::new(
                 "plan_state_corrupt",
                 FindingSeverity::Error,
-                format!("Failed to read {}: {error}", plan_path.display()),
-                Some(plan_path.to_path_buf()),
+                format!("Failed to read {}: {error}", display_plan_path.display()),
+                Some(display_plan_path),
             ));
             return;
         }
     };
-    let projection = match projection_path(layout, &plan) {
+    let projection = match projection_path(&plan) {
         Ok(projection) => projection,
         Err(message) => {
             findings.push(DoctorFinding::new(
                 "render_path_invalid",
                 FindingSeverity::Error,
                 message,
-                Some(plan_path.to_path_buf()),
+                Some(display_plan_path),
             ));
             return;
         }
     };
+    let display_projection = filesystem.display_path(&projection);
+    match filesystem.entry_kind(&projection) {
+        Ok(Some(ManagedEntryKind::File) | None) => {}
+        Ok(Some(kind)) => {
+            push_unsafe_managed_path(
+                filesystem,
+                &projection,
+                &format!("found {kind:?}, expected File"),
+                findings,
+            );
+            return;
+        }
+        Err(error) => {
+            push_managed_error(
+                filesystem,
+                &projection,
+                &error.to_string(),
+                error.kind(),
+                findings,
+            );
+            return;
+        }
+    }
     let rendered = match render_plan(&plan) {
         Ok(rendered) => rendered,
         Err(error) => {
@@ -387,55 +665,50 @@ fn inspect_projection(layout: &ProjectLayout, plan_path: &Path, findings: &mut V
                 "render_failed",
                 FindingSeverity::Error,
                 error.to_string(),
-                Some(projection),
+                Some(display_projection),
             ));
             return;
         }
     };
-    match check_projection(&projection, &rendered) {
+    match check_managed_projection(filesystem, &projection, &rendered) {
         Ok(check) if check.status() == ProjectionStatus::Current => {}
         Ok(check) if check.status() == ProjectionStatus::Missing => {
             findings.push(DoctorFinding::new(
                 "render_missing",
                 FindingSeverity::Warning,
                 "The managed Markdown projection is missing",
-                Some(projection),
+                Some(display_projection),
             ));
         }
         Ok(_) => findings.push(DoctorFinding::new(
             "render_drift",
             FindingSeverity::Error,
             "The managed Markdown projection differs from source state",
-            Some(projection),
+            Some(display_projection),
         )),
         Err(error) => findings.push(DoctorFinding::new(
             "render_unreadable",
             FindingSeverity::Error,
             error.to_string(),
-            Some(projection),
+            Some(display_projection),
         )),
     }
 }
 
-fn projection_path(layout: &ProjectLayout, plan: &Plan) -> Result<PathBuf, String> {
-    let value = serde_json::to_value(plan).unwrap_or(Value::Null);
-    let Some(path) = value["metadata"]["markdown_path"].as_str() else {
-        return Ok(layout
-            .root()
-            .join("docs/plan")
-            .join(format!("{}.md", plan.id())));
-    };
-    let relative = Path::new(path);
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+fn projection_path(plan: &Plan) -> Result<ManagedPath, String> {
+    let path = plan
+        .metadata()
+        .markdown_path()
+        .map_or_else(|| format!("docs/plan/{}.md", plan.id()), str::to_owned);
+    if Path::new(&path)
+        .extension()
+        .is_none_or(|extension| extension != "md")
     {
         return Err(format!(
-            "Managed Markdown path {path} must remain inside the project root"
+            "Managed Markdown path {path} must name a Markdown file"
         ));
     }
-    Ok(layout.root().join(relative))
+    ManagedPath::new(&path).map_err(|error| error.to_string())
 }
 
 fn inspect_integrations(
