@@ -1,0 +1,43 @@
+{
+  "kind": "mino.plugin-launcher/v1",
+  "cli_version": "0.1.0",
+  "protocol": {
+    "identity": "2026-05-11.review-rework-git-flow-v1",
+    "version": "2026-05-11",
+    "revision": "review-rework-git-flow-v1",
+    "schema_version": 1,
+    "renderer_version": 2
+  },
+  "agent": {
+    "capabilities_kind": "mino.agent-capabilities/v1",
+    "context_kind": "mino.agent-context/v1",
+    "next_kind": "mino.agent-next/v1",
+    "capabilities_digest": "sha256:976f9e64c47d63419e9cc97543d0646783307b055084008e51f15b7cc76c33f1"
+  },
+  "standards": [
+    "common@1.0.0",
+    "python@1.0.0",
+    "rust@1.0.0",
+    "typescript-javascript@1.0.0"
+  ],
+  "binary": {
+    "directory": "./bin",
+    "unix_name": "mino",
+    "windows_name": "mino.exe",
+    "targets": [
+      "aarch64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu"
+    ]
+  },
+  "commands": {
+    "capabilities": ["agent", "capabilities", "--format", "json", "--no-input"],
+    "doctor": ["project", "doctor", "--format", "json", "--no-input"],
+    "context": ["agent", "context", "--format", "json", "--no-input"]
+  },
+  "missing_or_incompatible_exit_code": 7,
+  "offline": true,
+  "mutates_path": false
+}

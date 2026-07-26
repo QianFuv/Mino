@@ -8,6 +8,8 @@ pub mod application;
 pub mod cli;
 /// Deterministic semantic comparison for authored plan alternatives.
 pub mod diff;
+/// Canonical plugin source and native distribution contracts.
+pub mod distribution;
 /// Versioned plan protocol entities and legal state transitions.
 pub mod domain;
 /// Error categories and process exit-code mappings.

@@ -1,0 +1,23 @@
+{
+  "name": "mino",
+  "version": "0.1.0",
+  "description": "Local plan protocol, evidence, review, standards, and Git Flow for coding agents.",
+  "author": {
+    "name": "Mino maintainers"
+  },
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["coding-agent", "evidence", "git-flow", "planning", "standards"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Mino",
+    "shortDescription": "Run durable coding plans with evidence and Git Flow.",
+    "longDescription": "Mino gives coding agents a deterministic local plan state machine, explicit approval boundaries, immutable evidence, standards catalogs, review/rework, and guarded Git Flow.",
+    "developerName": "Mino maintainers",
+    "category": "Developer Tools",
+    "capabilities": ["Planning", "Execution", "Evidence", "Git Flow", "Standards"],
+    "defaultPrompt": [
+      "Use $mino to create or resume a durable coding plan.",
+      "Use $mino to inspect the active plan and follow its next action."
+    ]
+  }
+}
