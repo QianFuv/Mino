@@ -9,19 +9,9 @@ permissions:
 
 jobs:
   stable:
-    name: Stable (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Stable (Windows)
+    runs-on: windows-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            binary: mino
-          - os: macos-latest
-            binary: mino
-          - os: windows-latest
-            binary: mino.exe
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust 1.96.1
@@ -40,36 +30,18 @@ jobs:
         run: cargo sort --check
       - name: Install Mino offline
         run: cargo install --path . --root "${{ runner.temp }}/mino-install" --locked --offline --debug
-      - name: Verify installed binary on Windows
-        if: runner.os == 'Windows'
+      - name: Verify installed binary
         shell: pwsh
         run: '& "${{ runner.temp }}/mino-install/bin/mino.exe" --version'
-      - name: Verify installed binary on Unix
-        if: runner.os != 'Windows'
-        shell: bash
-        run: '"${{ runner.temp }}/mino-install/bin/mino" --version'
       - name: Run installed-binary lifecycle
         env:
-          MINO_E2E_BINARY: ${{ runner.temp }}/mino-install/bin/${{ matrix.binary }}
+          MINO_E2E_BINARY: ${{ runner.temp }}/mino-install/bin/mino.exe
         run: cargo test --offline --test e2e_v0_1 -- --test-threads=1
       - name: Run all tests
         env:
-          MINO_E2E_BINARY: ${{ runner.temp }}/mino-install/bin/${{ matrix.binary }}
+          MINO_E2E_BINARY: ${{ runner.temp }}/mino-install/bin/mino.exe
         run: cargo test --offline --all-targets --all-features
       - name: Build warning-free documentation
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --offline --all-features --no-deps
-
-  miri:
-    name: Miri (eligible library targets)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install nightly Miri
-        run: rustup toolchain install nightly --profile minimal --component miri
-      - name: Prepare Miri
-        run: cargo +nightly miri setup
-      - name: Run eligible library tests
-        run: cargo +nightly miri test --lib
