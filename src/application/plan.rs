@@ -627,11 +627,10 @@ impl PlanService {
                     Ok(Some(plan))
                 };
             }
-            ActiveBindingStatus::ForeignWorktree | ActiveBindingStatus::NotRepository => {
-                return Ok(None);
-            }
-            ActiveBindingStatus::StaleBranch | ActiveBindingStatus::StaleHead => return Ok(None),
-            ActiveBindingStatus::Missing => {}
+            ActiveBindingStatus::ForeignWorktree
+            | ActiveBindingStatus::StaleBranch
+            | ActiveBindingStatus::StaleHead => return Ok(None),
+            ActiveBindingStatus::Missing | ActiveBindingStatus::NotRepository => {}
         }
         self.legacy_active_plan()
     }

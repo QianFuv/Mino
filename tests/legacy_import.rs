@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mino::domain::{CheckStatus, CriterionStatus, PlanId, PlanStatus, TaskStatus};
+use mino::domain::{CheckStatus, CriterionStatus, PlanId, PlanStatus, TaskStatus, Timestamp};
+use mino::git::{ActiveBindingStore, GitAdapter};
 use mino::project::{ProjectLayout, initialize, parse_legacy_plan};
 use mino::store::{PlanStore, sha256_digest};
 use mino::{ErrorCategory, MinoError};
@@ -113,6 +114,28 @@ fn run_mino(arguments: &[String]) -> Output {
         .stdin(Stdio::null())
         .output()
         .expect("Mino binary should run")
+}
+
+fn retain_binding_after_git_removal(project: &TestProject, plan_id: &str, revision: u64) {
+    let initialized = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(project.path())
+        .output()
+        .expect("Git should initialize the binding fixture");
+    assert!(initialized.status.success());
+    let facts = GitAdapter::new(project.path())
+        .inspect()
+        .expect("Git facts should inspect");
+    ActiveBindingStore::new(project.path())
+        .bind(
+            &facts,
+            PlanId::parse(plan_id).expect("bound plan ID should parse"),
+            revision,
+            Timestamp::parse("2026-07-27T05:21:00Z").expect("binding timestamp should parse"),
+        )
+        .expect("active binding should be written");
+    fs::remove_dir_all(project.path().join(".git"))
+        .expect("Git repository should be removed from the fixture");
 }
 
 fn parse_json(output: &Output) -> Value {
@@ -406,6 +429,7 @@ fn active_plan_and_name_collision_cannot_create_an_import_side_plan() {
     let first_plan_id = first["plan_id"]
         .as_str()
         .expect("first plan ID should be text");
+    retain_binding_after_git_removal(&project, first_plan_id, 2);
     let second = run_mino(&import_arguments(
         &project,
         &source,

@@ -90,6 +90,8 @@ Material apply 会清除计划批准与 Git consent，重置任务、检查和 c
 
 fork 只读取经过审计的不可变 source snapshot。新计划保留原始需求、范围、决策、标准、任务、检查和提交意图，但清除 lifecycle、审批、amendment、review、evidence、result、execution extension、Git readiness、final outcome 与 archive state。`plan diff` 只比较 authored values；Mino 不提供 plan merge。
 
+普通 `plan create` 和 `project import legacy` 在 Git 与非 Git 项目中都要求至多一个非 Done、未归档计划。显式 `plan fork` 可以为比较创建并存候选；存在多个候选时，`agent context`/`agent next` 返回策略冲突，不隐式选中计划。使用审批绑定的 `plan archive` 停用未选方案后，唯一剩余候选重新成为活动计划。
+
 ### 标准检测、目录与冲突
 
 | 命令 | 写入范围 | 核心契约 |
@@ -174,7 +176,7 @@ schedule spec 把当前 `--plan`、`--expect-revision` 和 `--check` 绑定到�
 | `mino git hook install` | 仅 hook 文件，审批边界 | 要求当前 proposal hash 和 approval reference；只安装或修复 absent/Mino-owned 默认 hooks。 |
 | `mino git hook run` | 无 | 读取 pre-commit 或 post-commit 的 staged/HEAD 与绑定事实，输出诊断和 next actions。 |
 
-绑定状态只能是 `missing`、`current`、`foreign_worktree`、`stale_branch`、`stale_head` 或 `not_repository`。一旦存在 active binding 文件，foreign 或 stale 状态不会回退到其他工作树或分支的计划。bind 只替换当前工作树 entry，不修改 HEAD、branch、ref、index 或 commit。
+绑定状态只能是 `missing`、`current`、`foreign_worktree`、`stale_branch`、`stale_head` 或 `not_repository`。一旦存在 active binding 文件，foreign 或 stale 状态不会回退到其他工作树或分支的计划；`not_repository` 改用项目级候选扫描。bind 只替换当前工作树 entry，不修改 HEAD、branch、ref、index 或 commit。
 
 branch create 是独立审批边界，计划批准和 Git Flow consent 不能替代它。Mino 先写 `.mino/git/branches/<plan-id>/intent.json`，再以禁用 hooks 的精确 `git switch -c` 操作 base HEAD，确认 post-state 后才写 binding 和 `completion.json`。精确重试能够区分未变化的失败、已创建待协调的分支和已完成操作。
 

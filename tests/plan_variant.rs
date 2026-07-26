@@ -18,6 +18,7 @@ use mino::domain::{
     GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId,
     ReviewClassification, StandardSelection, TaskId, TaskStatus, Timestamp, VerificationCheck,
 };
+use mino::git::{ActiveBindingStore, GitAdapter};
 use mino::project::initialize;
 use mino::render::{render_plan, write_projection};
 use mino::standards::EmbeddedCatalog;
@@ -95,6 +96,23 @@ fn run_mino(project: &TestProject, arguments: &[&str]) -> Output {
         .stdin(Stdio::null())
         .output()
         .expect("Mino binary should run")
+}
+
+fn retain_binding_after_git_removal(project: &TestProject, plan_id: &PlanId, revision: u64) {
+    let initialized = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(project.path())
+        .output()
+        .expect("Git should initialize the binding fixture");
+    assert!(initialized.status.success());
+    let facts = GitAdapter::new(project.path())
+        .inspect()
+        .expect("Git facts should inspect");
+    ActiveBindingStore::new(project.path())
+        .bind(&facts, plan_id.clone(), revision, timestamp(59))
+        .expect("active binding should be written");
+    fs::remove_dir_all(project.path().join(".git"))
+        .expect("Git repository should be removed from the fixture");
 }
 
 fn parse_success(output: &Output) -> Value {
@@ -630,6 +648,7 @@ fn cli_exposes_the_complete_fork_diff_archive_and_active_selection_sequence() {
     let project = TestProject::new("cli-sequence");
     let source = stored_draft(&project, "2026-07-26-cli-source", "CLI source", 350);
     let source_id = source.id().to_string();
+    retain_binding_after_git_removal(&project, source.id(), source.revision());
     let forked = parse_success(&run_mino(
         &project,
         &[
@@ -669,6 +688,14 @@ fn cli_exposes_the_complete_fork_diff_archive_and_active_selection_sequence() {
             .iter()
             .any(|change| change["category"] == "changed" && change["path"] == "metadata.name")
     }));
+
+    let ambiguous = parse_failure(&run_mino(&project, &["agent", "context"]), 5);
+    assert_eq!(ambiguous["error"]["code"], "policy_violation");
+    assert!(
+        ambiguous["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("multiple active plans"))
+    );
 
     let archived = parse_success(&run_mino(
         &project,
@@ -723,6 +750,19 @@ fn cli_exposes_the_complete_fork_diff_archive_and_active_selection_sequence() {
         5,
     );
     assert_eq!(refused["error"]["code"], "policy_violation");
+}
+
+#[test]
+fn non_git_fallback_returns_none_when_retained_binding_has_no_plan_candidate() {
+    let project = TestProject::new("non-git-empty");
+    retain_binding_after_git_removal(&project, &plan_id("2026-07-26-missing-binding-target"), 1);
+    let service = PlanService::discover(project.path()).expect("plan service should discover");
+    assert!(
+        service
+            .active_plan()
+            .expect("empty non-Git fallback should resolve")
+            .is_none()
+    );
 }
 
 #[test]

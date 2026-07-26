@@ -138,6 +138,7 @@ Git adapter 不经过 shell，禁用 terminal prompt，限制输出，并严格�
 - `mino git inspect` 不写 Git 或 Mino 状态。
 - `mino git bind` 只在 bounded lock 下原子替换 `.mino/active.json`，不修改 HEAD、branch、ref、index 或 commit。
 - 活动计划必须匹配 canonical common directory 与 worktree。branch binding 要求相同 branch，detached binding 要求相同 HEAD；stale 或 foreign binding 不暴露活动计划。
+- 非 Git 项目按项目级扫描选择活动计划；普通 create/import 不能增加第二个候选。显式 fork 可以暂时产生多个候选，但 Agent context 会报告歧义，直到审批绑定的 archive 只留下一个候选。
 
 ### 本地分支
 

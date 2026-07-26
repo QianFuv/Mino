@@ -7,6 +7,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mino::domain::{DraftPlanInput, Plan, PlanId, RequestId, Timestamp};
+use mino::git::{ActiveBindingStore, GitAdapter};
 use mino::input::{wizard, yaml};
 use mino::project::{ProjectLayout, initialize};
 use mino::store::{PlanStore, StoreErrorKind};
@@ -69,6 +70,28 @@ fn run_mino(arguments: &[String]) -> Output {
         .stdin(Stdio::null())
         .output()
         .expect("Mino binary should run")
+}
+
+fn retain_binding_after_git_removal(project: &TestProject, plan_id: &str, revision: u64) {
+    let initialized = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(project.path())
+        .output()
+        .expect("Git should initialize the binding fixture");
+    assert!(initialized.status.success());
+    let facts = GitAdapter::new(project.path())
+        .inspect()
+        .expect("Git facts should inspect");
+    ActiveBindingStore::new(project.path())
+        .bind(
+            &facts,
+            PlanId::parse(plan_id).expect("bound plan ID should parse"),
+            revision,
+            Timestamp::parse("2026-07-27T05:20:00Z").expect("binding timestamp should parse"),
+        )
+        .expect("active binding should be written");
+    fs::remove_dir_all(project.path().join(".git"))
+        .expect("Git repository should be removed from the fixture");
 }
 
 fn run_mino_with_input(arguments: &[String], input: &str) -> Output {
@@ -254,6 +277,44 @@ fn create_is_incomplete_collision_safe_and_request_idempotent() {
     );
     assert_eq!(
         store.events(&typed_id).expect("events should load").len(),
+        1
+    );
+}
+
+#[test]
+fn retained_git_binding_cannot_bypass_non_git_active_plan_creation_policy() {
+    let project = TestProject::new("non-git-active");
+    let first_request = project.path().join("first-request.md");
+    fs::write(&first_request, "Create the first active plan.\n")
+        .expect("first request should be written");
+    let first = parse_success(&run_mino(&create_arguments(
+        &project,
+        "First active plan",
+        &first_request,
+        3,
+    )));
+    let first_plan_id = plan_id_from(&first);
+    retain_binding_after_git_removal(&project, &first_plan_id, 1);
+    let second_request = project.path().join("second-request.md");
+    fs::write(&second_request, "Create a second active plan.\n")
+        .expect("second request should be written");
+
+    let second = run_mino(&create_arguments(
+        &project,
+        "Second active plan",
+        &second_request,
+        4,
+    ));
+    assert_eq!(second.status.code(), Some(5));
+    let failure: Value = serde_json::from_slice(&second.stdout).expect("failure should be JSON");
+    assert_eq!(failure["error"]["code"], "policy_violation");
+    assert_eq!(failure["missing"], serde_json::json!(["active_plan"]));
+    assert_eq!(
+        fs::read_dir(project.layout().plans_directory())
+            .expect("plans directory should be readable")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .count(),
         1
     );
 }

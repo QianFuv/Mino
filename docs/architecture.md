@@ -165,6 +165,8 @@ stateDiagram-v2
 
 `plan diff` 只比较规范化后的 authored values，不修改或合并输入。`plan archive` 追加停用记录但不删除计划。计划 fork 与 Git branch 是两套独立概念，Mino 不提供 plan merge。
 
+普通计划创建和 legacy import 都遵守“每个项目至多一个活动计划”。Git worktree 优先使用当前 binding；没有 binding 或项目明确不是 Git repository 时，按计划 ID 排序扫描所有非 Done、未归档计划。零个候选返回空，一个候选被选中，多个候选报告策略歧义。`plan fork` 是允许临时共存的显式比较入口，但在归档未选方案之前，Agent context 不会替用户选择其中一个。
+
 ## Revision、事务与投影一致性
 
 每项语义修改携带期望 revision、request UUID、actor、规范命令和变更字段。存储层在每个计划的有界锁内执行以下流程：
@@ -196,7 +198,7 @@ Markdown 投影包含 plan ID、revision、状态哈希和 renderer version。�
 
 `mino git inspect` 通过唯一的生产 Git command adapter 执行窄范围命令，解析 NUL 分隔的 porcelain v2，并显式报告普通、unborn、detached、bare、linked worktree 和非仓库状态。项目发现、计划 readiness、File Map 检查、分支、提交与 hooks 共用该入口；其他生产模块不直接构造 Git 子进程。adapter 清空环境后恢复跨平台基础 allowlist，并按普通操作或短 probe profile 施加 stdin、timeout、合并输出与进程树边界。
 
-`mino git bind` 以 canonical common directory 和 worktree root 为键保存活动计划。分支绑定允许该分支向前移动；detached 绑定要求完全相同的 HEAD。切换分支或 HEAD 后会变为 `stale_branch` 或 `stale_head`，其他工作树的绑定为 `foreign_worktree`。一旦 `active.json` 存在，就不再跨工作树回退选择计划。
+`mino git bind` 以 canonical common directory 和 worktree root 为键保存活动计划。分支绑定允许该分支向前移动；detached binding 要求完全相同的 HEAD。切换分支或 HEAD 后会变为 `stale_branch` 或 `stale_head`，其他工作树的绑定为 `foreign_worktree`。存在 binding 时，Git 中的 foreign 或 stale 状态不会跨工作树回退；项目明确不再是 Git repository 时则恢复项目级候选扫描。
 
 分支和提交都使用不可变 intent → 外部操作 → completion 三段日志：
 

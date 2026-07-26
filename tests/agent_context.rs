@@ -12,6 +12,7 @@ use mino::domain::{
     FileChange, GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId, StandardSelection,
     TaskId, Timestamp, VerificationCheck,
 };
+use mino::git::{ActiveBindingStore, GitAdapter};
 use mino::project::initialize;
 use mino::standards::EmbeddedCatalog;
 use mino::validation::validate_plan;
@@ -349,6 +350,28 @@ fn create_arguments(project: &TestProject, name: &str, number: u64) -> Vec<Strin
     arguments
 }
 
+fn retain_binding_after_git_removal(project: &TestProject, plan_id: &str, revision: u64) {
+    let initialized = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(project.path())
+        .output()
+        .expect("Git should initialize the binding fixture");
+    assert!(initialized.status.success());
+    let facts = GitAdapter::new(project.path())
+        .inspect()
+        .expect("Git facts should inspect");
+    ActiveBindingStore::new(project.path())
+        .bind(
+            &facts,
+            PlanId::parse(plan_id).expect("bound plan ID should parse"),
+            revision,
+            Timestamp::parse("2026-07-27T05:22:00Z").expect("binding timestamp should parse"),
+        )
+        .expect("active binding should be written");
+    fs::remove_dir_all(project.path().join(".git"))
+        .expect("Git repository should be removed from the fixture");
+}
+
 #[test]
 fn agent_cli_is_direct_strict_and_uses_the_only_active_plan() {
     let project = TestProject::new("cli");
@@ -370,6 +393,7 @@ fn agent_cli_is_direct_strict_and_uses_the_only_active_plan() {
     let plan_id = created["plan_id"]
         .as_str()
         .expect("create should return a plan ID");
+    retain_binding_after_git_removal(&project, plan_id, 1);
     let context = parse_success(&run_mino(&agent_arguments(&project, "context")));
     assert_eq!(context["active_plan"]["id"], plan_id);
     assert_eq!(context["active_plan"]["revision"], 1);
