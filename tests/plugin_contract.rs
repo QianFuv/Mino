@@ -167,11 +167,11 @@ fn canonical_source_matches_cli_protocol_capabilities_standards_and_skill() {
     );
     assert_eq!(
         report.skill_digest,
-        "sha256:64a438f64361b04a3688b0cc06fcc00516bfc43c6d4a8f469a408bf777a65587"
+        "sha256:e541cb313fd1a50bca9a5c7b96c1426f22fc0e39d16d18c958d75ddb2be5dd35"
     );
     assert_eq!(
         report.source_digest,
-        "sha256:485aba947ccc2a42e0580affd7865778079f0982f937c3075dc0dade135cf272"
+        "sha256:d15966fdce297f9a5b0491561449a95e38b92c85e0617073ceac28c4844e7923"
     );
 }
 

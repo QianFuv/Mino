@@ -1,3 +1,4 @@
+* text=auto eol=lf
 assets/hooks/* text eol=lf
 assets/protocol/** text eol=lf
 tests/fixtures/** text eol=lf
