@@ -25,7 +25,7 @@ flowchart TD
 | Repository `AGENTS.md` | Stable trigger, repository hard rules, external tool/Git authorization | Dynamic plan state or full execution algorithm |
 | Repository Mino Skill | Intent routing, CLI orchestration, approval stops | State transitions, direct managed-file edits, fallback templates |
 | CLI/application services | Commands, concurrency checks, policy gates, evidence binding | Requirement interpretation or hidden approvals |
-| Domain | Valid plan/task/check/criterion states and legal transitions | Filesystem, process, network, or Git side effects |
+| Domain | Valid plan/task/check/criterion states, fork lineage, archive overlay, and legal transitions | Filesystem, process, network, or Git side effects |
 | Git adapter and policy services | Read-only Git facts, worktree-local identity, one approval-gated branch create, and exact plan-scoped task commits | Remote, destructive, broad, or implicit Git mutation |
 | `.mino/` | Machine-readable source of truth and immutable history | User-authored documentation |
 | `docs/plan/*.md` | Human review projection | Source state or an editing surface |
@@ -152,9 +152,34 @@ later plan without changing another linked worktree's selection.
 
 Agent context and active-plan lookup use only a `current` same-worktree
 binding. `foreign_worktree`, stale, and non-repository states expose no active
-plan. For compatibility, absence of `active.json` retains the v0.1 single
-non-Done-plan lookup; once the binding file exists, there is no cross-worktree
-fallback.
+plan. A bound plan must remain non-Done and non-archived. For compatibility,
+absence of `active.json` retains the v0.1 single non-Done, non-archived plan
+lookup; once the binding file exists, there is no cross-worktree fallback.
+
+## Plan variants, comparison, and archive overlay
+
+`mino plan fork` first audits the complete source event/snapshot chain and then
+loads the exact requested retained revision. The canonical source snapshot hash
+is stored with its plan ID, revision, reason, and timestamp as lineage in a new
+revision-one Draft. Authored request, metadata other than current identity/time,
+scope, decisions, standards, task definitions, planned checks, and commit intent
+are copied. Lifecycle, blockers, current Git readiness, approval/amendment/review
+records, evidence and terminal results, execution extensions, final outcome,
+and archive state are reset. Source artifacts are never rewritten.
+
+`mino plan diff` serializes both validated inputs into a normalized authored
+view and walks it in stable key/ID order. The result classifies Added, Removed,
+Changed, and Moved paths and carries both protocol headers; it never mutates or
+merges plans. Fork lineage and archive state are intentionally excluded from
+authored comparison.
+
+Archive is an optional typed overlay on the aggregate, not another lifecycle
+state. `mino plan archive` appends a reason, actor, explicit selection reference,
+and timestamp while leaving Draft/Ready/In Progress/Blocked/Review/Done
+unchanged. Archived plans remain fully readable and auditable but are excluded
+from active selection and reject fresh mutations. Plan fork is unrelated to a
+Git branch: `mino git branch create` still governs local ref creation, and no
+plan merge operation exists.
 
 ## Approval-gated branch creation
 
@@ -204,6 +229,7 @@ commit. A completed journal replays without Git or plan mutation.
 ```mermaid
 stateDiagram-v2
     [*] --> Draft: plan create
+    [*] --> Draft: plan fork from retained revision
     Draft --> Ready: plan finalize
     Ready --> InProgress: exec start after plan approval
     Ready --> Blocked: exec block
@@ -227,6 +253,8 @@ to Done only after its planned checks, compatible criterion evidence, checkpoint
 requirements, unresolved-deviation checks, and changed-file File Map gate pass.
 `exec finish` requires every task Done, every required task commit gate
 Committed, and all required global checks passed, then moves the plan to Review.
+Archive is deliberately absent from the lifecycle diagram because it is a
+non-destructive deactivation overlay rather than a status transition.
 
 Review feedback is append-only and classified. Acceptance Defect reopens a Done
 task only for fresh acceptance and verification evidence; any changed file is

@@ -167,7 +167,7 @@
     "parent_plan_id": "2026-07-24-parent-render",
     "forked_from_revision": 3,
     "fork_reason": "Isolate rendering behavior",
-    "source_state_hash": "sha256:parent",
+    "source_state_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "forked_at": "2026-07-25T12:00:00Z"
   },
   "final_outcome": {

@@ -155,6 +155,11 @@ impl AcceptanceCriterion {
     fn reset_for_rework(&mut self) {
         self.status = CriterionStatus::Pending;
     }
+
+    fn reset_for_fork(&mut self) {
+        self.status = CriterionStatus::Pending;
+        self.evidence_refs.clear();
+    }
 }
 
 /// A deterministic command and expected result used for verification.
@@ -290,6 +295,11 @@ impl VerificationCheck {
 
     pub(crate) fn reset_for_rework(&mut self) {
         self.status = CheckStatus::Pending;
+    }
+
+    pub(crate) fn reset_for_fork(&mut self) {
+        self.status = CheckStatus::Pending;
+        self.evidence_refs.clear();
     }
 
     pub(crate) fn replace_definition(
@@ -1089,6 +1099,22 @@ impl Task {
         }
         self.status = TaskStatus::Ready;
         self.resume_status = None;
+        self.blocker = None;
+    }
+
+    pub(crate) fn reset_for_fork(&mut self) {
+        for criterion in &mut self.acceptance_criteria {
+            criterion.reset_for_fork();
+        }
+        for check in &mut self.verification_checks {
+            check.reset_for_fork();
+        }
+        if let Some(commit_gate) = &mut self.commit_gate {
+            commit_gate.reset_for_material_amendment();
+        }
+        self.status = TaskStatus::Draft;
+        self.resume_status = None;
+        self.evidence_refs.clear();
         self.blocker = None;
     }
 

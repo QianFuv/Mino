@@ -11,8 +11,9 @@ the v0.2 local Git, review, and protected-amendment increments: worktree-aware p
 explicitly approved branch creation, exact plan-scoped task commits, classified
 review feedback, rework, final acceptance, typed Minor/Material plan changes,
 conservative legacy-plan import, and explicit source-bound standards-conflict
-decisions. Plan variants, scheduled observation, team catalogs, and plugin
-distribution remain deferred.
+decisions, historical plan forks, semantic plan diffs, and approval-bound
+non-destructive archive state. Scheduled observation, team catalogs, and
+plugin distribution remain deferred.
 
 ## What v0.1 provides
 
@@ -59,6 +60,15 @@ approval-gated `resolve`. Conflicting values are shown with exact source,
 digest, source class, and precedence: current user requirement, repository
 rule, project configuration, language package, then Common. Mino never merges
 them silently; a source change invalidates the prior decision.
+
+The v0.2 plan-variant increment adds `plan fork`, `diff`, and `archive`. A fork
+audits and copies one exact retained revision into an independent revision-one
+Draft, preserves authored content, records source lineage and hash, and clears
+approval, review, execution, evidence, commit-result, and extension trust.
+Semantic diff is read-only and compares normalized authored fields. Archive
+requires an explicit selection reference and deactivates a plan without
+deleting it or rewriting its lifecycle status. Plan forks are not Git branches,
+and Mino intentionally provides no plan merge command.
 
 ## Requirements and installation
 
@@ -118,7 +128,8 @@ and read context again. Stop whenever `approval_required` is true. Never edit
 ## Safety model
 
 - Plan mutations require the current `--expect-revision` and an idempotency
-  `--request-id`.
+  `--request-id`; new-plan fork creation instead binds to an exact
+  `--from-revision` and also requires an idempotency request ID.
 - Planned commands are launched directly as argv, never through a shell, with
   finite time/output limits and a minimal environment allowlist.
 - Core execution commands perform no Git mutation. The v0.2 `git` commands can
@@ -132,6 +143,8 @@ and read context again. Stop whenever `approval_required` is true. Never edit
 - Legacy workflow analysis produces inert proposals. Legacy plan import may
   create one separate Draft, but neither command deletes, renames, or edits a
   legacy source.
+- Plan diff never mutates either input. Plan fork verifies source history before
+  publishing a target, and archive preserves every prior snapshot and event.
 
 ## Documentation
 

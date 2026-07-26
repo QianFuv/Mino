@@ -1,6 +1,6 @@
 ---
 name: mino
-description: Create, validate, execute, resume, update, amend, review, rework, and audit durable implementation plans through the Mino CLI. Use when a user explicitly requests a formal plan, work requires durable planning, an existing Mino plan must be resumed or updated, verification evidence must be recorded, review or rework must be handled, or plan-scoped Git Flow must be followed.
+description: Create, fork, compare, validate, execute, resume, update, amend, archive, review, rework, and audit durable implementation plans through the Mino CLI. Use when a user explicitly requests a formal plan, work requires durable planning, plan alternatives must be compared, an existing Mino plan must be resumed or updated, verification evidence must be recorded, review or rework must be handled, or plan-scoped Git Flow must be followed.
 ---
 
 <!-- mino-managed-skill:v1 -->
@@ -48,13 +48,27 @@ return to the required workflow and follow the CLI's canonical next actions.
   the exact same command and inputs.
 - Never infer approval from plan completeness, conversation tone, or a prior
   task. Read [approval-boundaries.md](references/approval-boundaries.md) before
-  approval, standards-conflict resolution, exception, review/rework, or
+  approval, plan archive, standards-conflict resolution, exception, review/rework, or
   plan-scoped Git operations.
 - Do not run an unsupported or hidden Git mutation. Invoke branch creation only
   after its separate explicit approval, and invoke task commit only through an
   exact returned `git.commit` argv under current Approved Git Flow consent.
   Never substitute manual staging, commit, cleanup, or destructive Git commands.
 - Never use bundled protocol Markdown as a fallback workflow.
+
+## Plan alternatives
+
+Use `plan fork` only with an exact retained source revision and an explicit
+reason. Treat the result as an independent Draft whose prior approvals,
+execution, evidence, review, commit results, extensions, and Git authorization
+are untrusted and reset. Use read-only `plan diff` to present normalized authored
+differences. Mino has no plan merge operation, and a plan fork never authorizes
+or creates a Git branch.
+
+When the user selects one alternative and explicitly authorizes deactivation of
+another, read [approval-boundaries.md](references/approval-boundaries.md) and
+invoke `plan archive` with their reason and auditable reference. Never infer
+archive approval merely because a fork exists, and never delete plan state.
 
 ## References
 

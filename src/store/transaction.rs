@@ -420,6 +420,12 @@ impl PlanStore {
             return Ok(receipt);
         }
         let current_plan = self.read_current_plan(plan_id)?;
+        if current_plan.is_archived() {
+            return Err(StoreError::new(
+                StoreErrorKind::InvalidMutation,
+                format!("Plan {plan_id} is archived and cannot be mutated"),
+            ));
+        }
         if current_plan.revision() != request.expected_revision {
             return Err(StoreError::new(
                 StoreErrorKind::StaleRevision,

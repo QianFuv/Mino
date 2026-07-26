@@ -411,6 +411,12 @@ impl PlanService {
             )
         })?;
         let is_replay_candidate = current.revision() == target_revision;
+        if current.is_archived() && !is_replay_candidate {
+            return Err(MinoError::new(
+                ErrorCategory::PolicyViolation,
+                format!("Plan {} is archived and cannot be mutated", current.id()),
+            ));
+        }
         let prior = if current.revision() == request.expected_revision {
             current.clone()
         } else if is_replay_candidate {
@@ -588,7 +594,7 @@ impl PlanService {
                         ),
                     ));
                 }
-                return if plan.status() == PlanStatus::Done {
+                return if plan.status() == PlanStatus::Done || plan.is_archived() {
                     Ok(None)
                 } else {
                     Ok(Some(plan))
@@ -649,7 +655,7 @@ impl PlanService {
         let mut active = Vec::new();
         for plan_id in plan_ids {
             let plan = self.load_verified(&plan_id)?;
-            if plan.status() != PlanStatus::Done {
+            if plan.status() != PlanStatus::Done && !plan.is_archived() {
                 active.push(plan);
             }
         }
@@ -811,7 +817,7 @@ pub fn draft_missing(plan: &Plan) -> Vec<String> {
     missing
 }
 
-fn operation_report(
+pub(crate) fn operation_report(
     plan: &Plan,
     rendered: &RenderedPlan,
     replayed: bool,
@@ -851,7 +857,7 @@ fn validate_create_request(request: &CreatePlanRequest) -> Result<(), MinoError>
     Ok(())
 }
 
-fn plan_id_for(name: &str, created_at: &Timestamp) -> Result<PlanId, MinoError> {
+pub(crate) fn plan_id_for(name: &str, created_at: &Timestamp) -> Result<PlanId, MinoError> {
     let slug = ascii_slug(name)?;
     let date = created_at.as_str().get(..10).ok_or_else(|| {
         MinoError::new(
@@ -889,7 +895,7 @@ fn ascii_slug(name: &str) -> Result<String, MinoError> {
     }
 }
 
-fn detect_git_readiness(root: &Path) -> (GitReadiness, Option<String>) {
+pub(crate) fn detect_git_readiness(root: &Path) -> (GitReadiness, Option<String>) {
     if !git_success(root, &["rev-parse", "--is-inside-work-tree"]) {
         return (
             GitReadiness::detected(
@@ -946,7 +952,7 @@ fn git_text(root: &Path, arguments: &[&str]) -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn projection_path(root: &Path, plan: &Plan) -> Result<PathBuf, MinoError> {
+pub(crate) fn projection_path(root: &Path, plan: &Plan) -> Result<PathBuf, MinoError> {
     let relative = plan.metadata().markdown_path().ok_or_else(|| {
         MinoError::new(
             ErrorCategory::DriftDetected,
@@ -1109,7 +1115,7 @@ fn map_domain_error(error: &crate::domain::DomainError) -> MinoError {
     MinoError::new(category, error.to_string())
 }
 
-fn map_store_error(error: &StoreError) -> MinoError {
+pub(crate) fn map_store_error(error: &StoreError) -> MinoError {
     let category = match error.kind() {
         StoreErrorKind::StaleRevision | StoreErrorKind::RequestConflict => {
             ErrorCategory::RevisionConflict
@@ -1127,7 +1133,7 @@ fn map_store_error(error: &StoreError) -> MinoError {
     MinoError::new(category, error.to_string())
 }
 
-fn map_render_error(error: &RenderError) -> MinoError {
+pub(crate) fn map_render_error(error: &RenderError) -> MinoError {
     let category = match error.kind() {
         RenderErrorKind::Drift => ErrorCategory::DriftDetected,
         RenderErrorKind::Io | RenderErrorKind::Serialization => {

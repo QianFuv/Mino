@@ -238,7 +238,7 @@ fn populate_execution_fixture(serialized: &mut Value) {
         "parent_plan_id": "2026-07-24-parent-plan",
         "forked_from_revision": 4,
         "fork_reason": "Isolate the protocol foundation",
-        "source_state_hash": "sha256:parent-state",
+        "source_state_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "forked_at": "2026-07-25T11:00:00Z"
     });
     serialized["final_outcome"] = json!({

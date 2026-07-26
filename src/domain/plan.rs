@@ -13,9 +13,9 @@ use super::{
     DomainErrorKind, DraftContextInput, DraftCriterionInput, DraftDecisionInput,
     DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,
     DraftTaskInput, DraftVerificationInput, EvidenceId, ExecutionState, FileMapEntry,
-    GitFlowConsent, PlanDraftSeed, PlanId, PlanStatus, ProtocolVersion, ReviewClassification,
-    ReviewItem, ReviewStatus, SchemaVersion, StandardConflict, StandardsConflictState, Task,
-    TaskId, TaskStatus, Timestamp, VerificationCheck,
+    GitFlowConsent, Lineage, PlanArchive, PlanDraftSeed, PlanId, PlanStatus, ProtocolVersion,
+    ReviewClassification, ReviewItem, ReviewStatus, SchemaVersion, StandardConflict,
+    StandardsConflictState, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
 };
 
 /// Human and repository metadata associated with a plan.
@@ -477,17 +477,6 @@ impl Approval {
     }
 }
 
-/// Provenance for a plan created from another plan revision.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Lineage {
-    parent_plan_id: PlanId,
-    forked_from_revision: u64,
-    fork_reason: String,
-    source_state_hash: String,
-    forked_at: Timestamp,
-}
-
 /// User-visible result, residual risk, and non-blocking follow-up work.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -531,6 +520,8 @@ pub struct Plan {
     review_items: Vec<ReviewItem>,
     follow_ups: Vec<String>,
     lineage: Option<Lineage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    archive: Option<PlanArchive>,
     final_outcome: FinalOutcome,
     extensions: BTreeMap<String, serde_json::Value>,
 }
@@ -567,6 +558,8 @@ struct UncheckedPlan {
     review_items: Vec<ReviewItem>,
     follow_ups: Vec<String>,
     lineage: Option<Lineage>,
+    #[serde(default)]
+    archive: Option<PlanArchive>,
     final_outcome: FinalOutcome,
     extensions: BTreeMap<String, serde_json::Value>,
 }
@@ -602,6 +595,7 @@ impl TryFrom<UncheckedPlan> for Plan {
             review_items: unchecked.review_items,
             follow_ups: unchecked.follow_ups,
             lineage: unchecked.lineage,
+            archive: unchecked.archive,
             final_outcome: unchecked.final_outcome,
             extensions: unchecked.extensions,
         };
@@ -670,6 +664,7 @@ impl Plan {
             review_items: Vec::new(),
             follow_ups: Vec::new(),
             lineage: None,
+            archive: None,
             final_outcome: FinalOutcome::default(),
             extensions: BTreeMap::new(),
         }
@@ -689,6 +684,70 @@ impl Plan {
             .sort_by(|left, right| left.package_id.cmp(&right.package_id));
         plan.global_verification = seed.verification_plan;
         plan
+    }
+
+    /// Creates an independent revision-one Draft from one immutable source snapshot.
+    ///
+    /// Execution state, approvals, evidence bindings, amendments, review records,
+    /// archive state, and extensions are reset while authored fields remain exact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error for an identical plan ID, incomplete fork
+    /// metadata, malformed lineage, or source content that cannot be reset safely.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fork_from_snapshot(
+        source: &Self,
+        id: PlanId,
+        name: String,
+        reason: String,
+        source_state_hash: String,
+        git_readiness: GitReadiness,
+        branch: Option<String>,
+        markdown_path: String,
+        forked_at: Timestamp,
+    ) -> Result<Self, DomainError> {
+        if source.id == id || name.trim().is_empty() || markdown_path.trim().is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Fork requires a new plan ID, name, and Markdown path",
+            ));
+        }
+        let lineage = Lineage::new(
+            source.id.clone(),
+            source.revision,
+            reason,
+            source_state_hash,
+            forked_at.clone(),
+        )?;
+        let mut fork = source.clone();
+        fork.id = id;
+        fork.revision = 1;
+        fork.status = PlanStatus::Draft;
+        fork.resume_status = None;
+        fork.blocker = None;
+        fork.metadata.name = name;
+        fork.metadata.created_at = forked_at.clone();
+        fork.metadata.updated_at = forked_at;
+        fork.metadata.branch = branch;
+        fork.metadata.markdown_path = Some(markdown_path);
+        fork.git_readiness = git_readiness;
+        for task in &mut fork.tasks {
+            task.reset_for_fork();
+        }
+        for check in &mut fork.global_verification {
+            check.reset_for_fork();
+        }
+        fork.approvals.clear();
+        fork.amendments.clear();
+        fork.review_items.clear();
+        fork.follow_ups.clear();
+        fork.lineage = Some(lineage);
+        fork.archive = None;
+        fork.final_outcome = FinalOutcome::default();
+        fork.extensions.clear();
+        fork.validate_invariants()?;
+        Ok(fork)
     }
 
     /// Returns the stable plan identifier.
@@ -857,6 +916,52 @@ impl Plan {
     #[must_use]
     pub fn follow_ups(&self) -> &[String] {
         &self.follow_ups
+    }
+
+    /// Returns immutable fork provenance when this plan is an alternative.
+    #[must_use]
+    pub const fn lineage(&self) -> Option<&Lineage> {
+        self.lineage.as_ref()
+    }
+
+    /// Returns non-destructive archive metadata when the plan is deactivated.
+    #[must_use]
+    pub const fn archive_record(&self) -> Option<&PlanArchive> {
+        self.archive.as_ref()
+    }
+
+    /// Returns whether this plan is semantically archived.
+    #[must_use]
+    pub const fn is_archived(&self) -> bool {
+        self.archive.is_some()
+    }
+
+    /// Deactivates the plan without changing its lifecycle status or deleting history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is already archived or the actor, reason,
+    /// or approval reference is incomplete.
+    pub fn archive(
+        &mut self,
+        reason: String,
+        actor: String,
+        approval_reference: String,
+        archived_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if self.archive.is_some() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Plan {} is already archived", self.id),
+            ));
+        }
+        let archive = PlanArchive::new(reason, actor, approval_reference, archived_at.clone())?;
+        let mut candidate = self.clone();
+        candidate.archive = Some(archive);
+        candidate.record_revision(candidate.next_revision()?, archived_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
     }
 
     /// Returns whether a material review request owns the plan's blocked state.
@@ -2695,6 +2800,18 @@ impl Plan {
     ///
     /// Returns the first deterministic invariant violation.
     pub fn validate_invariants(&self) -> Result<(), DomainError> {
+        if let Some(lineage) = &self.lineage {
+            lineage.validate()?;
+            if lineage.parent_plan_id() == &self.id {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Plan lineage cannot identify the plan as its own parent",
+                ));
+            }
+        }
+        if let Some(archive) = &self.archive {
+            archive.validate()?;
+        }
         self.validate_required_fields()?;
         self.validate_task_graph()?;
         self.validate_lifecycle()?;

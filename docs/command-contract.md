@@ -1,8 +1,8 @@
 # Mino command and JSON contract
 
 This document is the authoritative implemented CLI inventory. The v0.1 plan
-protocol remains stable while explicitly labeled v0.2 Git and review surfaces
-are added.
+protocol remains stable while explicitly labeled v0.2 Git, review, standards,
+and plan-variant surfaces are added.
 `mino --help` remains the source for individual argument spelling and value
 choices.
 
@@ -21,10 +21,12 @@ is one UTF-8 JSON value followed by a newline. Successful machine output uses
 stdout; JSON failures also use stdout so callers can parse them; diagnostics
 that cannot form a Mino result use stderr. Never merge the streams.
 
-Except for initial `plan create`, mutations against an existing plan or its
-evidence require a current `--expect-revision` and a UUID `--request-id`;
-authored mutations also identify `--actor`. Use a fresh UUID for each distinct
-mutation. Reuse it only for an exact retry. After a successful mutation,
+Creating a plan with `plan create` or `plan fork` does not use
+`--expect-revision`; fork instead binds creation to an exact retained
+`--from-revision`. Both require a UUID `--request-id`. Mutations against an
+existing plan or its evidence require a current `--expect-revision` and a UUID
+`--request-id`; authored mutations also identify `--actor`. Use a fresh UUID
+for each distinct mutation. Reuse it only for an exact retry. After a successful mutation,
   discard the old revision and read context again. `git bind`, `git branch
   create`, and `git commit` do not accept caller-selected plan mutation
   arguments. Binding and branch creation do not change a plan revision; branch
@@ -111,6 +113,9 @@ the staged or already-created commit without duplicating it. Mino never invokes
 | `mino plan amend propose` | Yes | Record one strict typed patch, immutable base revision/hash, classifier-derived impact, and monotonic `C<n>` ID. A caller may raise but never lower the minimum classification. |
 | `mino plan amend approve` | Yes, approval boundary | Require `--change C<n> --approval-ref <ref>` and record explicit approval only for the current pending Material proposal. |
 | `mino plan amend apply` | Yes | Apply the current eligible proposal atomically. Minor invalidates only affected checks/evidence; Material resets execution gates, supersedes affected review state, clears plan approval/Git consent, and returns Ready. |
+| `mino plan fork` | New Draft only | Require `--plan`, exact positive `--from-revision`, new `--name`, `--reason`, request ID, and actor; audit source history, copy authored values, record lineage/hash, and reset all execution/trust bindings. |
+| `mino plan diff` | No | Compare `--left` and `--right` at current or optional exact retained revisions; return stable Added/Removed/Changed/Moved authored paths under `mino.plan-diff/v1`. |
+| `mino plan archive` | Yes, approval boundary | Require current revision/request ID, `--reason`, and auditable `--approval-ref`; record semantic deactivation without deleting bytes or changing lifecycle status. |
 | `mino plan metadata set` | Yes | Replace supplied Draft metadata fields. |
 | `mino plan summary set` | Yes | Replace the Draft summary from an argument or stdin. |
 | `mino plan context add` | Yes | Append one current-state reference/fact/implication. |
@@ -135,6 +140,28 @@ approval and Git consent, resets task/global gates, removes execution-only
 checkpoints, marks affected evidence stale, and requires validation plus a new
 review/approval cycle. Approval records are auditable declarations, not
 cryptographic signatures.
+
+`plan fork` reads only an audited immutable source snapshot before publishing a
+separate revision-one Draft. It retains authored request, scope, decisions,
+standards, tasks, checks, and commit intent, but resets lifecycle, approvals,
+amendments, review/follow-up state, all evidence/status/result bindings,
+execution extensions, final outcome, current Git readiness, and archive state.
+Its lineage records the source plan, exact revision, reason, canonical snapshot
+hash, and fork timestamp. A name collision fails before mutation unless the
+request is an exact replay.
+
+`plan diff` normalizes only authored values and never writes either plan. It
+excludes plan identity, lifecycle, Git readiness, approvals, amendments,
+review, evidence, execution, lineage, archive, final outcome, and extensions.
+Direction is explicit: Added on left-to-right becomes Removed in the reverse,
+and before/after values swap. There is no plan merge command. A plan fork is a
+plan-history operation and is independent of `git branch create`.
+
+`plan archive` is a user-selection boundary, not a lifecycle state or delete.
+It appends reason, actor, approval reference, and timestamp in a new revision,
+preserves all snapshots/events/projections, and excludes that plan from active
+selection. An archived plan rejects fresh semantic mutations; exact retries
+remain idempotent.
 
 ### Review and rework
 
@@ -271,6 +298,7 @@ overwriting the common keys.
 | `mino.validation/v1` | Plan validation details |
 | `mino.plan-review/v1` | Revision-bound `plan review` payload |
 | `mino.check-run/v1` | Persisted check lease/result `schema_version` |
+| `mino.plan-diff/v1` | Read-only semantic `plan diff` payload under `diff_kind` |
 
 The plan aggregate also carries numeric `schema_version: 1`; the protocol lock
 binds protocol and renderer versions separately.

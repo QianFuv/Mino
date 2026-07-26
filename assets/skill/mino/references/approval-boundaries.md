@@ -10,7 +10,7 @@ Stop and request user action when any of these is true:
 - A command exits with the approval-required category or exit code 4.
 - The next operation would approve a plan, accept an exception, mutate Git
   outside a current plan-scoped commit gate or explicitly approved branch
-  proposal, resolve a standards conflict, replace an unowned Skill, or repair
+  proposal, archive a plan, resolve a standards conflict, replace an unowned Skill, or repair
   malformed managed markers.
 - The requested change materially exceeds the approved plan File Map, task
   outcome, acceptance criteria, or commit scope.
@@ -18,6 +18,15 @@ Stop and request user action when any of these is true:
 Do not convert user intent, an earlier approval, or a clean validation result
 into a new approval declaration. Never invoke approval commands on the user's
 behalf.
+
+## Plan archive
+
+`plan.archive` is an approval boundary for the exact current plan revision.
+Before invoking it, show the plan being deactivated, the retained alternative
+when applicable, and the proposed reason. Obtain explicit user selection plus
+an auditable reference. A prior plan approval, a successful fork, or a diff does
+not authorize archive. Archive must preserve the lifecycle status, canonical
+state, snapshots, events, and projection; never delete or rename those bytes.
 
 ## Standards conflicts
 

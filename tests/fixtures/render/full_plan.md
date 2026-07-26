@@ -2,7 +2,7 @@
 managed_by: mino
 plan_id: 2026-07-25-render-contract
 revision: 8
-state_hash: sha256:43f65dc3a0396aa3a40ab7df1d290c5d196b2d3d2b1284d6a71edfa3b3672458
+state_hash: sha256:1d6b2a14b453e802868fc225fc06aec50760a8fd80d3bc647407b6789b08a5d0
 renderer_version: 2
 manual_editing: prohibited
 ---
@@ -202,7 +202,7 @@ _None._
 | Parent Plan | 2026-07-24-parent-render |
 | Forked From Revision | 3 |
 | Fork Reason | Isolate rendering behavior |
-| Source State Hash | sha256:parent |
+| Source State Hash | sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb |
 | Forked At | 2026-07-25T12:00:00Z |
 
 ## Final Outcome

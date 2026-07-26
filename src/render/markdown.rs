@@ -86,6 +86,7 @@ fn render_document(plan: &Value, state_hash: &str) -> String {
     render_review_items(&mut output, plan);
     render_follow_ups(&mut output, plan);
     render_lineage(&mut output, plan);
+    render_archive(&mut output, plan);
     render_final_outcome(&mut output, plan);
     render_extensions(&mut output, plan);
     output
@@ -625,6 +626,27 @@ fn render_lineage(output: &mut String, plan: &Value) {
             row("Fork Reason", &scalar(&lineage["fork_reason"])),
             row("Source State Hash", &scalar(&lineage["source_state_hash"])),
             row("Forked At", &scalar(&lineage["forked_at"])),
+        ],
+    );
+}
+
+fn render_archive(output: &mut String, plan: &Value) {
+    let archive = &plan["archive"];
+    if archive.is_null() {
+        return;
+    }
+    output.push_str("\n## Archive\n\n");
+    write_table(
+        output,
+        &["Field", "Value"],
+        vec![
+            row("Reason", &scalar(&archive["reason"])),
+            row("Actor", &scalar(&archive["actor"])),
+            row(
+                "Approval Reference",
+                &scalar(&archive["approval_reference"]),
+            ),
+            row("Archived At", &scalar(&archive["archived_at"])),
         ],
     );
 }

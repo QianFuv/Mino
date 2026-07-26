@@ -2,6 +2,7 @@
 
 mod amend;
 mod review;
+mod variant;
 
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
@@ -42,6 +43,12 @@ pub(crate) enum PlanAction {
     Apply(ApplyArguments),
     /// Propose, approve, and apply typed protected changes after Draft.
     Amend(amend::AmendArguments),
+    /// Create an independent Draft from one exact retained revision.
+    Fork(variant::ForkArguments),
+    /// Compare authored values across current or retained revisions.
+    Diff(variant::DiffArguments),
+    /// Record approval-bound deactivation without deleting plan history.
+    Archive(variant::ArchiveArguments),
     /// Replace human plan metadata while Draft.
     Metadata(MetadataArguments),
     /// Replace the authored plan summary while Draft.
@@ -472,6 +479,9 @@ pub(crate) fn execute(
         PlanAction::Approve(arguments) => review::execute_approve(&service, arguments),
         PlanAction::Apply(arguments) => execute_apply(&service, arguments),
         PlanAction::Amend(arguments) => amend::execute(start, arguments),
+        PlanAction::Fork(arguments) => variant::execute_fork(start, &service, arguments),
+        PlanAction::Diff(arguments) => variant::execute_diff(start, &arguments),
+        PlanAction::Archive(arguments) => variant::execute_archive(start, arguments),
         PlanAction::Metadata(arguments) => match arguments.action {
             MetadataAction::Set(arguments) => execute_metadata(&service, arguments),
         },

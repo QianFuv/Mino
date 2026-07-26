@@ -43,6 +43,9 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
             "approve",
             "apply",
             "amend",
+            "fork",
+            "diff",
+            "archive",
             "metadata",
             "summary",
             "context",
@@ -141,11 +144,14 @@ const LEAF_COMMANDS: &[&str] = &[
     "plan amend approve",
     "plan amend propose",
     "plan approve",
+    "plan archive",
     "plan context add",
     "plan create",
     "plan decision add",
+    "plan diff",
     "plan file add",
     "plan finalize",
+    "plan fork",
     "plan metadata set",
     "plan next",
     "plan review",
@@ -308,6 +314,7 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             "git.branch.create",
             "plan.amend.approve",
             "plan.approve",
+            "plan.archive",
             "review.accept",
             "standards.conflict.resolve"
         ]
@@ -327,6 +334,7 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
         "mino.validation/v1",
         "mino.plan-review/v1",
         "mino.check-run/v1",
+        "mino.plan-diff/v1",
     ] {
         assert!(commands.contains(schema), "missing schema {schema}");
     }

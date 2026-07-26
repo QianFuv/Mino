@@ -20,6 +20,11 @@ Material amendment approval is also an auditable declaration rather than a
 cryptographic authorization token. `plan amend approve` must identify the exact
 pending `C<n>` proposal and carry a non-empty external approval reference.
 
+Plan archive is a separate auditable user-selection declaration. `plan archive`
+requires a non-empty reason and approval reference; plan approval, clean checks,
+or creation of an alternative cannot infer that the original should be
+deactivated.
+
 Standards-conflict resolution is a separate auditable declaration.
 `standards conflict resolve` must select a displayed current candidate and
 carry both a rationale and external decision reference. A precedence default,
@@ -61,6 +66,13 @@ change after approval cannot bypass refresh and a renewed explicit decision.
   are ignored. Unsafe or Mino-owned paths, shell-control syntax, and known shell
   or destructive check executables are omitted with warnings. Import never
   finalizes, approves, executes, or commits the Draft.
+- Plan fork audits source events and snapshots before it creates target storage.
+  Missing, corrupt, or digest-inconsistent history fails without publishing a
+  target or changing source bytes. Forked execution, evidence, approval, review,
+  commit-result, and extension state is never trusted.
+- Plan archive never deletes or relocates canonical state. Its typed record is
+  revisioned with the plan, while every prior snapshot and event remains
+  immutable and readable.
 
 The managed `.gitignore` block excludes `/.mino/` and `/docs/plan/`, but ignore
 rules are not access control or encryption. `.mino` may contain request text,
@@ -160,6 +172,11 @@ second commit for the same journal.
 Mino does not push, merge, rebase, reset, amend, force-push, tag, delete
 branches, or create/delete worktrees.
 
+`plan fork` does not invoke Git, create a ref, switch a worktree, or inherit Git
+authorization. It creates only a separate Mino Draft. Mino does not provide a
+plan merge command; alternatives are compared with read-only `plan diff`, then
+the user's unselected plan may be archived through its explicit boundary.
+
 Active-plan selection requires the canonical common-directory and worktree to
 match. Branch bindings require the same branch; detached bindings require the
 same exact HEAD. Stale and foreign bindings expose no active plan, preventing a
@@ -184,6 +201,8 @@ Agent consumers must use JSON/no-input mode and inspect `approval_required`,
   current Review revision and supplied an auditable reference.
 - `plan.amend.approve`, unless the user explicitly approved the exact pending
   Material `C<n>` proposal and supplied an auditable reference.
+- `plan.archive`, unless the user explicitly selected the alternative, supplied
+  the archive reason, and supplied an auditable approval reference.
 - `standards.conflict.resolve`, unless the user explicitly selected one exact
   current candidate and supplied its rationale and auditable decision
   reference.
@@ -207,7 +226,8 @@ branch creation is exposed only as `git branch create`, exact task commits only
 as `git commit`, and `git bind` is the declared Git-adjacent Mino-state write.
 There is no arbitrary status setter. Review-to-Done is exposed only as
 `review accept`; task rework is exposed only as a classified recorded review
-item followed by `review rework` and `review resolve`.
+item followed by `review rework` and `review resolve`. Plan deactivation is
+exposed only as approval-bound `plan archive`; it never deletes plan history.
 
 ## Recovery guidance
 

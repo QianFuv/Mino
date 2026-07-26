@@ -6,6 +6,8 @@ mod commands;
 pub mod application;
 /// Command-line parsing, dispatch, and output routing.
 pub mod cli;
+/// Deterministic semantic comparison for authored plan alternatives.
+pub mod diff;
 /// Versioned plan protocol entities and legal state transitions.
 pub mod domain;
 /// Error categories and process exit-code mappings.

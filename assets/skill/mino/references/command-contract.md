@@ -110,6 +110,41 @@ Use `evidence add` only for supplemental files or observations that are not a
 planned check. Never mark a criterion or task complete without the evidence
 references required by the current plan.
 
+## Plan alternatives
+
+Create an independent Draft from one exact retained revision with:
+
+```text
+mino plan fork --plan <source-id> --from-revision <revision> --name <stable-name> --reason <reason> --request-id <uuid> --actor <actor> --format json --no-input
+```
+
+The source chain must audit cleanly. The fork retains authored values and
+lineage but resets lifecycle, approvals, review, execution, evidence, commit
+results, extensions, archive state, and current Git readiness. Exact retries
+reuse the UUID and identical argv; a name collision is not a retry.
+
+Compare alternatives without mutation using:
+
+```text
+mino plan diff --left <plan-a> --right <plan-b> --format json --no-input
+```
+
+Add `--left-revision` or `--right-revision` to select retained snapshots. Read
+the directional Added/Removed/Changed/Moved entries from `mino.plan-diff/v1`.
+There is no plan merge command. A plan fork is not a Git branch and does not
+authorize `git branch create`.
+
+After the user explicitly selects an alternative, deactivate an unselected plan
+without deletion using:
+
+```text
+mino plan archive --plan <id> --expect-revision <revision> --reason <reason> --approval-ref <ref> --request-id <uuid> --actor <actor> --format json --no-input
+```
+
+Archive is an approval boundary. It preserves lifecycle status, snapshots, and
+events while excluding the plan from active selection and blocking fresh
+mutations.
+
 ## Review and rework
 
 In Review, use `review record` only for exact user feedback and select the
