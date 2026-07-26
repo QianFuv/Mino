@@ -408,12 +408,12 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
     ] {
         assert!(architecture.contains(path), "missing owned path {path}");
     }
-    assert!(commands.contains("No command accepts an arbitrary status value"));
-    assert!(security.contains("There is no hidden Git mutation path"));
-    assert!(security.contains("creates no background service"));
-    assert!(security.contains("does not create or update an external scheduler task"));
-    assert!(security.contains("copy the protocol template as a fallback"));
-    assert!(security.contains("Do not edit it manually"));
+    assert!(commands.contains("doc-contract: no-arbitrary-status-setter"));
+    assert!(security.contains("doc-contract: no-hidden-git-mutation"));
+    assert!(security.contains("doc-contract: monitor-no-background-service"));
+    assert!(security.contains("doc-contract: schedule-no-external-mutation"));
+    assert!(security.contains("doc-contract: no-protocol-template-fallback"));
+    assert!(security.contains("doc-contract: managed-state-no-manual-edit"));
 }
 
 #[test]
@@ -448,22 +448,24 @@ fn protocol_manifest_and_document_links_are_current() {
     }
 
     let readme = read("README.md");
+    assert!(readme.contains("docs/README.md"));
+    let documentation_index = read("docs/README.md");
     for relative in [
-        "docs/architecture.md",
-        "docs/command-contract.md",
-        "docs/distribution.md",
-        "docs/migration.md",
-        "docs/security.md",
-        "docs/team-catalog.md",
-        "docs/v0-3.md",
+        "architecture.md",
+        "command-contract.md",
+        "distribution.md",
+        "migration.md",
+        "security.md",
+        "team-catalog.md",
     ] {
-        assert!(readme.contains(relative));
-        assert!(repository_path(relative).is_file());
+        assert!(documentation_index.contains(relative));
+        assert!(repository_path("docs").join(relative).is_file());
     }
+    assert!(!repository_path("docs/v0-3.md").exists());
 }
 
 #[test]
-fn v0_3_guides_cover_operations_trust_recovery_and_explicit_non_goals() {
+fn operator_guides_cover_operations_recovery_verification_and_product_boundaries() {
     let catalog = read("docs/team-catalog.md");
     for marker in [
         "mino standards catalog init",
@@ -472,8 +474,8 @@ fn v0_3_guides_cover_operations_trust_recovery_and_explicit_non_goals() {
         "mino standards sync --all",
         "catalog-manifest.json",
         "HTTPS",
-        "Trust and recovery",
-        "Deliberate non-goals",
+        "doc-contract: trust-and-recovery",
+        "doc-contract: deliberate-non-goals",
     ] {
         assert!(
             catalog.contains(marker),
@@ -490,9 +492,8 @@ fn v0_3_guides_cover_operations_trust_recovery_and_explicit_non_goals() {
         "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
         "aarch64-apple-darwin",
-        "Isolated smoke and installation boundary",
-        "Upgrade, rollback, and publication",
-        "Deliberate non-goals",
+        "doc-contract: upgrade-rollback-publication",
+        "doc-contract: deliberate-non-goals",
     ] {
         assert!(
             distribution.contains(marker),
@@ -500,22 +501,26 @@ fn v0_3_guides_cover_operations_trust_recovery_and_explicit_non_goals() {
         );
     }
 
-    let release = read("docs/v0-3.md");
+    let security = read("docs/security.md");
     for marker in [
-        "No LLM execution",
-        "No daemon",
-        "No cloud control plane",
-        "No built-in scheduler",
-        "No auto-update",
-        "arbitrary plugin runtime",
-        "No Git push, merge, rebase, reset, amend, force-push",
-        "No plan merge",
-        "Upgrade from earlier milestones",
-        "Release verification",
+        "doc-contract: no-llm-execution",
+        "doc-contract: no-daemon",
+        "doc-contract: no-cloud-control-plane",
+        "doc-contract: no-built-in-scheduler",
+        "doc-contract: no-auto-update",
+        "doc-contract: no-arbitrary-plugin-runtime",
+        "doc-contract: no-git-remote-or-destructive",
+        "doc-contract: no-plan-merge",
     ] {
         assert!(
-            release.contains(marker),
-            "release guide is missing {marker}"
+            security.contains(marker),
+            "security guide is missing {marker}"
         );
     }
+
+    let migration = read("docs/migration.md");
+    assert!(migration.contains("doc-contract: upgrade-and-rollback"));
+
+    let documentation_index = read("docs/README.md");
+    assert!(documentation_index.contains("doc-contract: verification-strategy"));
 }

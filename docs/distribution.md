@@ -1,35 +1,48 @@
-# Native Codex plugin distribution
+# 原生 Codex 插件分发
 
-Mino v0.3 defines a reproducible native artifact for the canonical Codex plugin
-source in `plugins/mino/`. Artifact construction is local and target-native.
-The repository does not publish, upload, install, update, or register the
-plugin automatically.
+Mino 的 canonical 插件源码位于 `plugins/mino/`。源码目录本身不是可安装的原生产物：打包流程会为目标平台加入且只加入一个 `bin/mino` 或 `bin/mino.exe`，并把完整来源、兼容身份和文件摘要写入可验证 ZIP。
 
-## Source and compatibility identity
+仓库负责构建与验证，不自动上传、发布、安装、更新或注册 marketplace entry。所有分发和安装都是独立的外部动作。
 
-The canonical source contains `.codex-plugin/plugin.json`, `launcher.json`, a
-README, and the exact Skill tree copied from `assets/skill/mino`. It contains no
-binary. `launcher.json` pins:
+## 从源码到产物
 
-- the Cargo/plugin semantic version;
-- protocol version, revision, schema, and renderer;
-- Agent capabilities, context, and next-action schemas plus the capabilities
-  digest;
-- embedded standards package versions;
-- five supported native targets and exact binary names;
-- the non-interactive capabilities, doctor, and context probes; and
-- offline execution, no PATH mutation, and environment-unavailable exit 7 for
-  a missing or incompatible binary.
+```mermaid
+flowchart LR
+    S["canonical plugin source"] --> V["contract validation"]
+    B["target-native Mino binary"] --> P["xtask package-plugin"]
+    V --> P
+    P --> A["manifest + ZIP + checksums"]
+    A --> M["isolated smoke"]
+    M --> O["verified target directory"]
+```
 
-The Rust distribution contract rejects version, protocol, capabilities,
-standards, Skill-byte, manifest, target, path, file-type, or unexpected-content
-drift before packaging. A plugin bundle never falls back to an environment
-binary and never downloads a replacement.
+流程只支持 host-native packaging：负责打包的操作系统与架构必须和声明 target 相符，不进行交叉打包后伪装验证。
 
-## Build one native artifact
+## Canonical source 与兼容身份
 
-Build Mino and invoke the maintainer xtask on the same operating system and
-architecture as the requested target:
+`plugins/mino/` 包含：
+
+- `.codex-plugin/plugin.json`；
+- `launcher.json`；
+- 面向维护者的 README；
+- 与 `assets/skill/mino` 逐字节一致的 Skill tree。
+
+canonical source 不包含 binary。Rust contract 在打包前核对：
+
+- Cargo 与 plugin semantic version；
+- protocol version、revision、schema 和 renderer；
+- Agent capabilities/context/next schema 与 capabilities digest；
+- 内嵌 standards package versions；
+- Skill bytes 与 source inventory；
+- 支持的 target、binary name 和 relative layout；
+- capabilities、doctor、context 三类 non-interactive probes；
+- offline、PATH 不变与 incompatible binary 的 exit 7 行为。
+
+任一 version、protocol、capability、standard、Skill、manifest、target、path、file type 或 unexpected content 漂移都会在生成 artifact 前失败。bundle 不会回退使用环境中的其他 `mino`，也不会下载替代 binary。
+
+## 构建一个目标产物
+
+先构建当前平台的 release binary，再调用 maintainer xtask：
 
 ```text
 cargo build --release --locked --bin mino
@@ -40,9 +53,9 @@ cargo run --release --locked --bin xtask -- package-plugin \
   --output dist
 ```
 
-On Windows, use `target/release/mino.exe` and
-`x86_64-pc-windows-msvc`. Packaging is host-native only. The declared targets
-are:
+Windows 使用 `target/release/mino.exe` 与 `x86_64-pc-windows-msvc`。
+
+声明支持五个原生 target：
 
 - `x86_64-pc-windows-msvc`
 - `x86_64-unknown-linux-gnu`
@@ -50,43 +63,47 @@ are:
 - `x86_64-apple-darwin`
 - `aarch64-apple-darwin`
 
-`.github/workflows/release-artifacts.yml` defines one native runner for each
-target. The workflow fetches locked dependencies, validates the source
-contract, builds the native CLI, and assembles/smokes the artifact. It has
-read-only repository permissions and no upload, release, publish, secret, or
-marketplace step.
+`.github/workflows/release-artifacts.yml` 为每个 target 分配原生 runner，执行 locked dependency fetch、source contract test、release build、artifact assembly 和 isolated smoke。workflow 只有 repository read permission，不含 upload、release、publish、secret 或 marketplace step。
 
-## Artifact layout and verification
+## 产物结构与可复现性
 
-Each target output directory contains exactly three files:
+每个 target 目录恰好包含三个文件：
 
 ```text
 dist/<target>/
-|-- SHA256SUMS
-|-- artifact-manifest.json
-`-- mino-plugin-<version>-<target>.zip
+├── SHA256SUMS
+├── artifact-manifest.json
+└── mino-plugin-<version>-<target>.zip
 ```
 
-The ZIP contains one `mino/` plugin tree: canonical source files, the complete
-MIT and Apache-2.0 license texts, and exactly one `bin/mino` or `bin/mino.exe`.
-Entries are sorted, stored without compression, timestamped at the ZIP epoch,
-and normalized to mode 0644 for data or 0755 for the binary. The manifest binds
-every entry path, byte count, mode, and SHA-256 digest plus archive, source,
-Skill, protocol, standards, target, and capabilities identities.
+ZIP 内是一棵完整 `mino/` plugin tree，包括 canonical source、MIT 与 Apache-2.0 license，以及一个目标平台 binary。为了获得可复现字节：
 
-Before use, verify `SHA256SUMS`, parse the canonical
-`mino.plugin-artifact-manifest/v1` manifest, and require the expected target and
-archive name. The xtask performs the same strict verification and refuses
-absolute, parent, duplicate, unsorted, symbolic-link, special, missing, extra,
-changed, compressed, timestamp-drifted, mode-drifted, or digest-drifted entries.
-An existing identical target directory is reused; a mismatched directory is not
-overwritten.
+- entry 按 path 排序；
+- 使用 store 模式，不做 compression；
+- timestamp 固定为 ZIP epoch；
+- data mode 统一为 `0644`，binary mode 为 `0755`；
+- manifest 记录每个 path、byte count、mode 与 SHA-256；
+- archive、source、Skill、protocol、standards、target 和 capabilities identity 一并绑定。
 
-## Isolated smoke and installation boundary
+manifest schema 为 `mino.plugin-artifact-manifest/v1`。
 
-Before publishing its local output, the xtask extracts the verified ZIP into a
-temporary installation and runs the archived binary through four bounded
-probes:
+相同输入生成相同 archive 与 manifest digest。现有 target directory 只有在全部内容相同时才会复用；任何 mismatch 都不会被覆盖。
+
+## 验证产物
+
+交付或安装前至少执行以下核对：
+
+1. 验证 `SHA256SUMS`；
+2. 解析 canonical `mino.plugin-artifact-manifest/v1`；
+3. 确认 target 和 archive name 与预期一致；
+4. 核对 archive inventory、entry mode、timestamp 和 digest；
+5. 运行隔离 smoke probes。
+
+xtask 会拒绝 absolute、parent、duplicate、unsorted、symlink、special、missing、extra、changed、compressed、timestamp-drifted、mode-drifted 或 digest-drifted entry。
+
+## 隔离冒烟与安装边界
+
+xtask 在发布本地 output 前，把已验证 ZIP 解压到临时 installation，并从 archive 内的绝对 binary path 运行四个有限 probe：
 
 ```text
 mino --version
@@ -95,45 +112,38 @@ mino project doctor
 mino agent context
 ```
 
-HOME, USERPROFILE, and temporary directories point into the smoke root. The
-host PATH is passed through unchanged only so read-only Git discovery can work;
-the bundle is invoked by its exact absolute path and PATH is never modified.
-Smoke performs no network access and creates no user installation or
-marketplace state.
+smoke 将 HOME、USERPROFILE 与临时目录指向隔离 root。host PATH 只原样传递，以便只读 Git discovery 工作；流程不会修改 PATH，也不会按 PATH 搜索另一个 Mino。smoke 不联网，不创建用户安装或 marketplace state。
 
-Installation is a separate user-authorized operation outside the build. After
-verifying a target artifact, extract the `mino/` directory as one plugin root
-using the installation mechanism supported by the active Codex environment.
-Keep `.codex-plugin/plugin.json`, `launcher.json`, `skills/`, licenses, README,
-and `bin/` together. The Skill resolves only the binary declared relative to
-its own plugin root. Run the launcher-declared capabilities probe before doctor
-or plan work.
+安装是打包之外、需要用户授权的操作。验证 target artifact 后，应使用当前 Codex 环境支持的安装机制，把完整 `mino/` 目录作为一个 plugin root 解压，保持以下内容在一起：
 
-If the binary is absent, wrong-platform, non-regular, incompatible, or reports
-different version/capability identities, stop with environment-unavailable
-exit 7 guidance. Do not modify PATH, search for another Mino, download one, or
-mix files from different artifacts.
+- `.codex-plugin/plugin.json`
+- `launcher.json`
+- `skills/`
+- licenses 与 README
+- `bin/`
 
-## Upgrade, rollback, and publication
+Skill 只解析 launcher 声明的相对 binary。先运行 capabilities probe，再运行 doctor 或计划工作。如果 binary 缺失、平台不符、不是普通文件或能力身份不兼容，应以 `environment_unavailable` / exit 7 停止；不要修改 PATH、下载替代品或混合不同 artifact 的文件。
 
-Cargo package version is authoritative. An upgrade must change the canonical
-source and native binary together, regenerate every target artifact, rerun all
-compatibility probes, and produce new checksums. Never replace only the Skill,
-launcher, or binary inside an existing bundle.
+## 升级、回滚与发布责任
 
-Keep the prior verified artifact for rollback. Roll back by selecting the
-complete prior target bundle, not by copying individual files. Project-local
-`.mino` migration remains governed by `mino protocol status` and
-`mino protocol migrate`; installing a plugin does not authorize a protocol
-migration or a plan mutation.
+<!-- doc-contract: upgrade-rollback-publication -->
 
-The repository artifact workflow validates only. Uploading files, publishing a
-release, creating a marketplace entry, or changing a user installation requires
-a separate explicit action and authorization.
+Cargo package version 是 plugin version 的权威来源。升级必须把 canonical source 与 native binary 作为一个整体变更：
 
-## Deliberate non-goals
+1. 更新 source 与版本；
+2. 为全部 target 重新构建；
+3. 重跑 contract 与 compatibility probes；
+4. 生成新的 manifests 与 checksums；
+5. 以完整 bundle 替换旧版本。
 
-The plugin is not an arbitrary plugin runtime, package manager, updater,
-downloader, daemon, cloud service, Web UI, or execution sandbox. It contributes
-one declarative Skill and one native Mino binary. It does not add MCP servers,
-Apps, hooks, telemetry, auto-update, or hidden Git/network behavior.
+不要单独替换既有 bundle 中的 Skill、launcher 或 binary。为回滚保留上一个经过验证的完整 artifact，并以整个 target bundle 为单位恢复。
+
+安装 plugin 不授权修改项目 `.mino` 状态。项目协议兼容仍由 `mino protocol status` 与 `mino protocol migrate` 管理。
+
+artifact workflow 只做验证。上传文件、创建 release、发布 marketplace entry 或更改用户 installation 都需要额外工具和明确授权。
+
+## 明确不做什么
+
+<!-- doc-contract: deliberate-non-goals -->
+
+该插件不是任意 plugin runtime、package manager、updater、downloader、daemon、cloud service、Web UI 或执行 sandbox。它只贡献一份声明式 Skill 和一个原生 Mino binary，不增加 MCP server、App、telemetry、auto-update 或隐藏 Git/network 行为。

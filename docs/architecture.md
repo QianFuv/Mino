@@ -1,374 +1,216 @@
-# Mino architecture
+# Mino 架构
 
-## Responsibility boundary
+本文解释 Mino 的系统边界、状态所有权和恢复模型。命令参数与 JSON 字段请查阅[CLI 与 JSON 契约](command-contract.md)，具体风险处置请查阅[安全与操作边界](security.md)。
 
-Mino separates probabilistic intent interpretation from deterministic protocol
-enforcement. A coding agent interprets the request and chooses among legal
-actions; Mino owns state, transitions, validation, execution evidence, and
-rendering.
+## 设计出发点
+
+Mino 把“意图解释”和“协议执行”分开：编码代理可以用概率性推理理解需求，但所有状态转换、审批条件、执行顺序和证据绑定都由确定性代码决定。
+
+这项分工带来四条架构原则：
+
+1. **规范状态只有一个来源**：`.mino/` 中的 JSON、快照和事件是事实，Markdown 是投影。
+2. **修改必须可并发校验和幂等重放**：每次语义修改绑定 revision 与 request ID。
+3. **副作用必须有窄边界**：进程、Git、网络和文件写入分别由专门适配器约束。
+4. **审批不可继承或猜测**：计划批准、分支创建、重大修订和最终验收等边界互不替代。
+
+## 系统分层
 
 ```mermaid
 flowchart TD
-    U["User request"] --> S["Repository Mino Skill"]
-    S --> A["agent context / next"]
-    A --> C["Semantic CLI command"]
-    C --> D["Domain state machine"]
-    D --> T["Recoverable transaction store"]
-    T --> J["Canonical plan.json + snapshots + events"]
-    J --> R["Deterministic Markdown renderer"]
-    C --> E["Bounded runner + immutable evidence"]
-    R --> P["docs/plan/*.md read-only projection"]
+    U["用户需求"] --> S["仓库 Skill：解释意图与路由"]
+    S --> A["Agent API：context / next"]
+    A --> C["CLI 与命令适配层"]
+    C --> APP["应用服务：编排策略和副作用"]
+    APP --> D["领域层：状态机与不变量"]
+    APP --> T["事务存储：revision / snapshot / event"]
+    APP --> E["受限执行器与不可变证据"]
+    APP --> G["Git 与标准适配器"]
+    T --> R["确定性 Markdown 渲染器"]
+    R --> P["docs/plan/*.md 审阅投影"]
 ```
 
-| Component | Owns | Does not own |
+| 层级 | 负责 | 不负责 |
 |---|---|---|
-| Repository `AGENTS.md` | Stable trigger, repository hard rules, external tool/Git authorization | Dynamic plan state or full execution algorithm |
-| Repository Mino Skill | Intent routing, CLI orchestration, approval stops | State transitions, direct managed-file edits, fallback templates |
-| CLI/application services | Commands, concurrency checks, policy gates, evidence binding | Requirement interpretation or hidden approvals |
-| Domain | Valid plan/task/check/criterion states, fork lineage, archive overlay, and legal transitions | Filesystem, process, network, or Git side effects |
-| Git adapter and policy services | Read-only Git facts, worktree-local identity, one approval-gated branch create, and exact plan-scoped task commits | Remote, destructive, broad, or implicit Git mutation |
-| `.mino/` | Machine-readable source of truth and immutable history | User-authored documentation |
-| `docs/plan/*.md` | Human review projection | Source state or an editing surface |
-| Standards engine | Embedded packages, recommendation, check resolution, explicit sync | General dependency installation |
+| 仓库 `AGENTS.md` | 稳定触发规则、仓库硬约束、外部工具与 Git 授权 | 动态计划状态、完整执行算法 |
+| Mino Skill | 意图路由、CLI 编排、识别审批停止点 | 改写规范状态、伪造模板或绕过 CLI |
+| CLI 与 `commands` | 参数解析、命令分发、稳定输出格式 | 推断需求、隐藏审批 |
+| `application` | 协调领域、存储、投影、执行和 Git 策略 | 定义新的领域状态 |
+| `domain` | 计划、任务、检查、证据和审阅的合法状态及转换 | 文件系统、网络、进程和 Git 副作用 |
+| `store` | 锁、规范序列化、事务恢复、快照和事件审计 | 业务意图判断 |
+| `runner` / `evidence` | 有界进程、脱敏、运行日志和不可变证据 | 任意 shell 执行、替用户判断检查意义 |
+| `git` | 只读事实、工作树身份、受控分支和精确任务提交 | 远程或破坏性 Git 操作 |
+| `standards` | 内嵌规则、检测、推荐、冲突和显式同步 | 通用依赖安装或远程代码执行 |
 
-## Project discovery and initialization
+## 项目发现与初始化
 
-Read commands discover the root in this order:
+读取型命令按以下顺序寻找项目根：
 
-1. `git rev-parse --show-toplevel` with terminal prompting disabled.
-2. The nearest ancestor containing `.mino/`.
-3. The nearest supported manifest (`Cargo.toml`, `package.json`,
-   `pyproject.toml`, `setup.py`, `go.mod`, `pom.xml`, `build.gradle`, or
-   `build.gradle.kts`).
+1. 运行禁用终端提示的 `git rev-parse --show-toplevel`。
+2. 向上查找最近的 `.mino/`。
+3. 向上查找最近的受支持清单：`Cargo.toml`、`package.json`、`pyproject.toml`、`setup.py`、`go.mod`、`pom.xml`、`build.gradle` 或 `build.gradle.kts`。
 
-`project init` permits a final fallback to the supplied directory. It verifies
-the embedded protocol, creates missing `.mino` state, installs or verifies the
-bundled repository Skill, and diagnoses integrations. It does not run network
-or Git mutations. `AGENTS.md` and `.gitignore` change only when their explicit
-apply flags are present and marker ownership is valid.
+只有 `project init` 可以在以上规则均失败时使用调用方指定的目录。初始化会验证内嵌协议、创建缺失的 `.mino` 状态、安装或核验仓库 Skill，并诊断集成状态。除非显式提供 apply 参数，它不会修改 `AGENTS.md` 或 `.gitignore`；初始化本身不执行网络或 Git 修改。
 
-`project import legacy` is a two-phase adapter over the same plan service. It
-first reads and parses the complete bounded source, previews the authored batch
-against current Draft invariants, and records exact mappings and warnings. It
-then creates a revision-one plan and applies the batch as revision two with a
-derived idempotency UUID. Exact retry replays the immutable revision-one
-snapshot and the authored mutation; an interrupted retry can complete the
-second phase. The resulting aggregate is always Draft, while the legacy source
-path, byte count, and SHA-256 are retained as provenance rather than trusted
-execution state.
+旧计划导入复用同一套计划服务，但采用两阶段写入：先读取完整且有界的源文件，预览可映射字段并产生警告；随后创建 revision 1 的 Draft，再以派生 request ID 写入 revision 2。中断后的精确重试可以补完第二阶段，历史状态、审批和证据不会被当作可信事实。
 
-## Source-of-truth layout
+## 规范数据布局
 
 ```text
 <root>/
-├── .agents/skills/mino/                 tracked repository Skill
+├── .agents/skills/mino/                 可跟踪的仓库 Skill
 ├── .mino/
-│   ├── config.toml                      project format and optional catalog URL
-│   ├── protocol.lock                    schema/protocol/renderer lock
-│   ├── standards.local.toml             optional source-backed conflict declarations
-│   ├── standards.lock                   selected standards and catalog generation
-│   ├── active.json                      worktree-keyed active-plan bindings
-│   ├── active.lock                      bounded active-binding writer lock
+│   ├── config.toml                      项目格式与可选目录 URL
+│   ├── protocol.lock                    协议、schema 与渲染器锁
+│   ├── standards.local.toml             可选的本地标准来源声明
+│   ├── standards.lock                   已选择标准与目录 generation
+│   ├── active.json                      按工作树保存的活动计划绑定
+│   ├── active.lock                      绑定写入锁
 │   ├── git/
-│   │   ├── branch.lock                  bounded branch-operation lock
-│   │   ├── commit.lock                  bounded task-commit operation lock
+│   │   ├── branch.lock                  分支操作锁
+│   │   ├── commit.lock                  任务提交操作锁
 │   │   ├── branches/<plan-id>/
-│   │       ├── intent.json              immutable approval-bound branch intent
-│   │       └── completion.json          immutable terminal branch result
+│   │   │   ├── intent.json              审批绑定的不可变分支意图
+│   │   │   └── completion.json          不可变终态结果
 │   │   └── commits/<plan-id>/<task-id>/
-│   │       ├── intent.json              immutable pre-index content snapshot
-│   │       ├── staged.json              immutable staged tree identity
-│   │       └── completion.json          immutable commit/evidence/plan result
-│   ├── cache/standards/                 verified immutable sync generations
+│   │       ├── intent.json              写索引前的内容快照
+│   │       ├── staged.json              已暂存 tree 身份
+│   │       └── completion.json          提交、证据与计划结果
+│   ├── cache/standards/                 已验证的不可变同步 generation
 │   └── plans/<plan-id>/
-│       ├── plan.json                    current canonical aggregate
-│       ├── events.jsonl                 append-only successful mutations
-│       ├── snapshots/<revision>.json    immutable canonical revisions
-│       ├── store.lock                   bounded advisory lock
-│       ├── transaction/                 recoverable prepared transaction, if present
-│       ├── runs/<request-id>/            immutable check lease and terminal result
+│       ├── plan.json                    当前规范聚合
+│       ├── events.jsonl                 追加式成功事件
+│       ├── snapshots/<revision>.json    不可变 revision 快照
+│       ├── store.lock                   有界计划锁
+│       ├── transaction/                 尚待恢复的预备事务
+│       ├── runs/<request-id>/            检查 lease 与结果
+│       ├── monitors/<request-id>/summary.json
 │       └── evidence/
-│           ├── index.jsonl              immutable evidence index
-│           ├── records/                 canonical evidence records
-│           └── blobs/                   content-addressed artifact bytes
-└── docs/plan/<plan-id>.md                managed human projection
+│           ├── index.jsonl              不可变证据索引
+│           ├── records/                 规范证据记录
+│           └── blobs/                   按内容寻址的附件
+└── docs/plan/<plan-id>.md                人工审阅投影
 ```
 
-The managed `.gitignore` block excludes `/.mino/` and `/docs/plan/`. The
-repository Skill is not ignored because it is intended to be reviewed and
-tracked like other stable repository instructions.
+文档契约中使用的完整监控路径为 `.mino/plans/<plan-id>/monitors/<request-id>/summary.json`。
 
-### Owned path contract
+### 路径所有权
 
-| Path | Owner and edit policy |
+| 路径 | 所有者与修改方式 |
 |---|---|
-| `.mino/config.toml` | Mino project configuration; change only through supported configuration workflows. |
-| `.mino/protocol.lock` | Mino protocol lock; never hand-rewrite to claim compatibility. |
-| `.mino/standards.local.toml` | Optional user-reviewed declarations that map rule values to safe project sources; Mino reads but does not generate it. |
-| `.mino/standards.lock` | Mino standards lock; explicit sync may atomically replace it. |
-| `.mino/active.json` | Versioned active-plan bindings; change only through `mino git bind`. |
-| `.mino/active.lock` | Advisory binding lock; Mino owns its lifecycle and contents. |
-| `.mino/git/branches/` | Immutable prepared/completed branch journals; manual editing is prohibited. |
-| `.mino/git/commits/` | Immutable prepared/staged/completed task-commit journals; manual editing is prohibited. |
-| `.mino/plans/` | Canonical plans, history, runs, and evidence; manual editing is prohibited. |
-| `docs/plan/` | Generated Markdown projections; manual editing is prohibited. |
-| `.agents/skills/mino/` | Stable bundled repository Skill; Mino updates only marker-owned bundle files. |
-| `AGENTS.md` | User-owned except for the exact Mino workflow marker region. |
-| `.gitignore` | User-owned except for the exact Mino runtime marker region. |
+| `.mino/config.toml` | Mino 项目配置；只通过受支持的配置流程修改。 |
+| `.mino/protocol.lock` | 协议锁；禁止手工改写以伪造兼容状态。 |
+| `.mino/standards.local.toml` | 用户审阅的可选输入；Mino 读取但不生成。 |
+| `.mino/standards.lock` | 标准选择锁；显式同步可以原子替换。 |
+| `.mino/active.json` | 工作树绑定；只通过 `mino git bind` 修改。 |
+| `.mino/git/branches/` | 分支意图与完成日志；禁止手工编辑。 |
+| `.mino/git/commits/` | 任务提交日志；禁止手工编辑。 |
+| `.mino/plans/` | 计划、历史、运行与证据的规范存储；禁止手工编辑。 |
+| `docs/plan/` | 自动生成的审阅投影；禁止手工编辑。 |
+| `.agents/skills/mino/` | 稳定仓库 Skill；仅 marker-owned 文件可由 Mino 更新。 |
+| `AGENTS.md` | 用户所有，只有精确的 Mino marker 区域受管。 |
+| `.gitignore` | 用户所有，只有精确的 Mino runtime marker 区域受管。 |
 
-## Standards conflict precedence
+受管 `.gitignore` 区块忽略 `/.mino/` 和 `/docs/plan/`。Skill 不被忽略，因为它需要像其他稳定仓库指令一样接受审阅和版本控制。
 
-The standards engine combines selected embedded package rules with optional
-source-backed declarations in `.mino/standards.local.toml`. Each declaration
-names a canonical project source or the plan's exact original request. Mino
-hashes those bytes and orders competing values by current user requirement,
-repository hard rule, formatter/linter/build/CI configuration, selected
-language package, then Common.
-
-Detection preserves every candidate; it does not concatenate or silently pick
-values. `standards conflict refresh` records the exact candidate fingerprint in
-the plan extension. `standards conflict resolve` records one candidate,
-rationale, external decision reference, actor, timestamp, and that fingerprint.
-Any source-byte or candidate-set change makes the prior decision stale and
-blocks validation until refresh and a new explicit decision.
-
-## Worktree-aware active-plan identity
-
-`mino git inspect` runs a narrow read-only Git adapter without a shell and
-parses NUL-delimited porcelain v2. It reports canonical worktree,
-common-directory, worktree-specific Git directory, resolved index path, branch
-or detached HEAD, upstream divergence, and sorted staged/unstaged/untracked
-facts. Normal, unborn, detached, bare, linked-worktree, and non-repository
-states remain explicit rather than being inferred from display text.
-
-`mino git bind --plan <id> --current` publishes `.mino/active.json` under a
-bounded lock and atomic replacement. A binding keys the canonical Git common
-directory and canonical worktree root, then records either the branch name or
-the exact detached HEAD. A branch binding remains current when that branch
-advances; a detached binding requires the same commit. Switching branch or
-leaving detached mode produces `stale_branch` or `stale_head`. An explicit bind
-atomically replaces only the current worktree entry, which permits selecting a
-later plan without changing another linked worktree's selection.
-
-Agent context and active-plan lookup use only a `current` same-worktree
-binding. `foreign_worktree`, stale, and non-repository states expose no active
-plan. A bound plan must remain non-Done and non-archived. For compatibility,
-absence of `active.json` retains the v0.1 single non-Done, non-archived plan
-lookup; once the binding file exists, there is no cross-worktree fallback.
-
-## Plan variants, comparison, and archive overlay
-
-`mino plan fork` first audits the complete source event/snapshot chain and then
-loads the exact requested retained revision. The canonical source snapshot hash
-is stored with its plan ID, revision, reason, and timestamp as lineage in a new
-revision-one Draft. Authored request, metadata other than current identity/time,
-scope, decisions, standards, task definitions, planned checks, and commit intent
-are copied. Lifecycle, blockers, current Git readiness, approval/amendment/review
-records, evidence and terminal results, execution extensions, final outcome,
-and archive state are reset. Source artifacts are never rewritten.
-
-`mino plan diff` serializes both validated inputs into a normalized authored
-view and walks it in stable key/ID order. The result classifies Added, Removed,
-Changed, and Moved paths and carries both protocol headers; it never mutates or
-merges plans. Fork lineage and archive state are intentionally excluded from
-authored comparison.
-
-Archive is an optional typed overlay on the aggregate, not another lifecycle
-state. `mino plan archive` appends a reason, actor, explicit selection reference,
-and timestamp while leaving Draft/Ready/In Progress/Blocked/Review/Done
-unchanged. Archived plans remain fully readable and auditable but are excluded
-from active selection and reject fresh mutations. Plan fork is unrelated to a
-Git branch: `mino git branch create` still governs local ref creation, and no
-plan merge operation exists.
-
-## Approval-gated branch creation
-
-`mino git branch propose --plan <id>` derives `mino/<plan-id>`, delegates final
-name validation to Git, and reports all blockers without creating even Mino
-journal state. Creation is separate and requires an explicit approval
-reference. A clean current worktree must still match the plan's captured source
-branch or detached mode and base commit, and the local target ref must be absent.
-
-After policy succeeds under a bounded operation lock, Mino atomically publishes
-an immutable intent containing the plan revision, canonical worktree identity,
-exact base HEAD, branch name, and approval reference. It then runs one
-hook-disabled `git switch -c` at the exact full base commit. Active binding and
-an immutable completion record are published only after read-only inspection
-confirms the expected branch, HEAD, and clean status. A retry can distinguish
-unchanged source state, an already-applied switch awaiting binding, and a
-completed operation, so it never creates the branch twice or silently cleans an
-unexpected Git state.
-
-## Recoverable task commits
-
-`mino git commit --plan <id> --task <id>` is eligible only for the first Done
-task whose required commit gate is not yet Committed. The plan must remain In
-Progress with current approval and Approved Git Flow consent; the current
-same-worktree binding, branch, HEAD parent, task evidence, File Map, Commit
-Scope, and exact planned message must all match. The policy rejects any initial
-index entry, unrelated or mixed change, rename, unmerged/submodule path,
-symlink/directory, clean filter, Mino-owned path, or content drift.
-
-After pure preflight, Mino captures bounded SHA-256 snapshots and atomically
-publishes `intent.json` before touching the index. It stages only resolved exact
-paths with `git add --`, confirms that no unstaged content remains, writes and
-records the index tree, and invokes `git commit` with the exact one-line message.
-Commit hooks remain enabled. The result is accepted only when one new commit has
-the prepared parent/tree/message/files; immutable Commit evidence and the task
-gate are recorded before terminal `completion.json` publication.
-
-The three immutable phases make external mutation recoverable. A failed hook or
-Git command leaves the prepared task paths staged and blocks the plan without a
-reset or unstage. After `exec resume`, retry verifies the same staged tree. If
-HEAD advanced before evidence, plan, or completion publication, retry inspects
-the existing commit and completes those records without creating another
-commit. A completed journal replays without Git or plan mutation.
-
-## Optional advisory repository hooks
-
-`mino git hook propose` and `status` inspect the canonical shared Git directory,
-the default `hooks/pre-commit` and `hooks/post-commit` paths, any configured
-`core.hooksPath`, ownership markers, and bounded file digests. The proposal hash
-binds repository identity, target paths, ownership classes, conflict bytes, and
-embedded template digests. Absent/current/Mino-owned-drifted paths form one
-idempotent install class; user-owned, symbolic-link, non-file, or custom-path
-states are non-installable and expose manual snippets.
-
-`mino git hook install` is a separate approval boundary. After matching the
-current proposal hash and external approval reference, it writes only the two
-default hook files, repairs only marker-owned bytes, and verifies the result.
-The installed LF shell templates are compatible with Git for Windows and Unix
-Git, tolerate a missing/refusing Mino, and always remain advisory.
-The tracked `.gitattributes` rule fixes only `assets/hooks/*` to `eol=lf`, so
-template digests and shebang bytes survive Windows checkouts.
-
-Hook invocation routes to `mino git hook run --hook pre-commit|post-commit`.
-Runtime uses the existing read-only Git adapter with optional locks disabled and
-the read-only active-binding resolver. It emits staged/HEAD observations,
-binding diagnostics, and optional next commands; it does not load/mutate plans,
-write events/evidence/bindings, stage files, create commits, or update hooks.
-
-## Plan and task lifecycle
+## 计划生命周期
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Draft: plan create
-    [*] --> Draft: plan fork from retained revision
+    [*] --> Draft: plan create / plan fork
     Draft --> Ready: plan finalize
-    Ready --> InProgress: exec start after plan approval
+    Ready --> InProgress: 批准后 exec start
     Ready --> Blocked: exec block
     InProgress --> Blocked: exec block
-    Blocked --> Ready: exec resume to recorded Ready state
-    Blocked --> InProgress: exec resume to recorded task state
-    InProgress --> Review: exec finish after all task/global gates
-    Review --> InProgress: review rework for acceptance defect or in-scope R task
-    Review --> Blocked: review record material-change
-    Ready --> Blocked: propose Material amendment
-    InProgress --> Blocked: propose Material amendment
-    Blocked --> Ready: apply approved Material amendment
-    Review --> Done: review accept after resolution and evidence validation
+    Blocked --> Ready: exec resume
+    Blocked --> InProgress: exec resume
+    InProgress --> Review: exec finish
+    Review --> InProgress: review rework
+    Review --> Blocked: 重大审阅意见
+    Ready --> Blocked: Material 修订
+    InProgress --> Blocked: Material 修订
+    Blocked --> Ready: 应用已批准 Material 修订
+    Review --> Done: review accept
     Done --> [*]
 ```
 
-Finalization changes every Draft task to Ready. Only the first dependency-ready
-task may start, every earlier required task commit must already be Committed,
-and at most one task may be In Progress or Blocked. A task moves
-to Done only after its planned checks, compatible criterion evidence, checkpoint
-requirements, unresolved-deviation checks, and changed-file File Map gate pass.
-`exec finish` requires every task Done, every required task commit gate
-Committed, and all required global checks passed, then moves the plan to Review.
-Archive is deliberately absent from the lifecycle diagram because it is a
-non-destructive deactivation overlay rather than a status transition.
+`plan finalize` 会把所有 Draft 任务转为 Ready。执行阶段只有第一个依赖满足的任务可以启动，并且任何更早的必需任务提交都必须已经记录。一个任务只有在以下门槛全部满足时才能进入 Done：
 
-Review feedback is append-only and classified. Acceptance Defect reopens a Done
-task only for fresh acceptance and verification evidence; any changed file is
-rejected and must become In-Scope Rework. In-Scope Rework reserves a monotonic
-`R<n>` identifier when feedback is recorded and materializes it only from a
-complete task definition with dependencies, steps, File Map, criteria, checks,
-and any required Git gate. Failed definitions do not release the reservation.
-Follow-Up records remain outside task order. Material Change records move the
-plan to a Review-owned Blocked state that generic `exec resume` cannot cross.
-`review resolve` revalidates live evidence after rework, and approval-gated
-`review accept` reaches Done only when every blocking item is resolved.
+- 计划检查已通过；
+- 每项验收条件绑定兼容且仍有效的证据；
+- 必需检查点已记录；
+- 没有未解决偏差；
+- 实际变更符合 File Map。
 
-Protected amendments are top-level immutable audit records with contiguous
-`C<n>` identifiers, typed operations, minimum/selected classification, exact
-base revision and canonical state hash, computed impact, approval declaration,
-and application timestamp. Only one proposal may be pending. Minor proposals
-leave Ready/In Progress in place but block execution, evidence, and Git until
-apply; Ready apply invalidates its plan approval. Material proposals own the
-Blocked state until explicit approval and apply. Material apply preserves the
-pre-change store snapshot, resets all task/check/commit gates to Ready/Pending,
-clears execution checkpoints and plan approval/Git consent, marks referenced
-evidence stale, supersedes affected review results, and requires full
-validation/reapproval before execution can restart.
+`exec finish` 还要求所有任务提交门槛和全局检查完成，然后把计划送入 Review。归档不属于生命周期状态；它是保留全部历史的停用 overlay。
 
-## Revision, event, and recovery model
+## 审阅、修订与方案分支
 
-Every semantic mutation supplies an expected revision and request UUID. Mino
-holds a per-plan lock, verifies idempotency, prepares canonical next-state and
-journal bytes, then publishes the snapshot, event, and current state. Loading a
-plan first recovers a complete prepared transaction or reports corruption. An
-exact retry returns the original result without another revision; reusing a
-request UUID for different inputs is a revision conflict.
+审阅记录是追加式的，并按行为分为四类：
 
-Markdown carries the plan ID, revision, state hash, renderer version, and a
-manual-edit prohibition. Read and mutation services render the current plan and
-compare exact projection bytes. Recognized prior bytes may be replaced during a
-legitimate mutation; missing projections may be reconstructed from canonical
-state; unrecognized edits produce exit 8 and are never silently overwritten.
+- **Acceptance Defect**：重新打开已完成任务，只允许补充新的验收与检查证据，不允许改文件。
+- **In-Scope Rework**：在记录反馈时预留递增 `R<n>`，提供完整任务定义后进入执行顺序。
+- **Material Change**：把计划置为由审阅流程拥有的 Blocked，普通 `exec resume` 无法绕过。
+- **Follow-Up**：记录为 Deferred，不进入当前任务顺序。
 
-## Execution and evidence flow
+受保护修订使用递增 `C<n>` 和类型化操作。`Minor` 仅允许任务局部、不会改变用户可见行为的调整；`Material` 会清除计划批准和 Git Flow consent、重置任务与检查门槛、使相关证据失效，并要求重新校验与批准。
 
-`exec check run` is a three-phase operation:
+`plan fork` 从经过完整审计的历史快照创建独立 revision 1 Draft。它复制需求、范围、决策、标准、任务、检查和提交意图，但清除生命周期、审批、证据、审阅结果、执行扩展、Git 就绪状态及归档状态。lineage 保存来源计划、revision、原因、快照哈希和时间。
 
-1. Commit a Running check lease to the plan.
-2. Execute the exact planned argv without a shell under finite bounds, write an
-   immutable run lease/result, redact output, and record immutable evidence.
-3. Attach the evidence ID and terminal check status in a new plan revision.
+`plan diff` 只比较规范化后的 authored values，不修改或合并输入。`plan archive` 追加停用记录但不删除计划。计划 fork 与 Git branch 是两套独立概念，Mino 不提供 plan merge。
 
-An interrupted lease is recovered as an immutable interrupted result instead
-of launching an ambiguous duplicate. Criterion and completion services accept
-only compatible, current, non-superseded evidence. Failed command evidence
-remains auditable but cannot prove a passing criterion.
+## Revision、事务与投影一致性
 
-`exec check monitor` is a finite foreground coordinator over that same
-three-phase operation. Its required maximum-attempt, interval, and elapsed
-deadline values allocate a deterministic timeout to every possible process:
-the deadline minus all possible inter-attempt waits is divided by the attempt
-count and capped at five minutes. The loop checks cancellation, deadline, and
-attempt exhaustion before a new attempt and again after each failed attempt;
-it never tails and creates no background service.
+每项语义修改携带期望 revision、request UUID、actor、规范命令和变更字段。存储层在每个计划的有界锁内执行以下流程：
 
-Attempt request IDs and expected revisions are deterministically derived from
-the base request. Therefore an interrupted invocation can replay already
-journaled attempts without launching duplicates and can run only the remaining
-finite attempts. Pass, attempts exhausted, deadline reached, and cancellation
-all produce a canonical request-hash-bound `mino.monitor/v1` record at
-`.mino/plans/<plan-id>/monitors/<request-id>/summary.json`. Guarded regular
-directories and no-clobber publication make the terminal record immutable;
-an exact retry reads it before plan or evidence mutation.
+1. 检查 revision 与 request ID 幂等性。
+2. 生成规范 next state、快照、事件和 write-ahead journal。
+3. 依次发布不可变快照、追加式事件和当前 `plan.json`。
+4. 返回包含 revision、事件序号和摘要的 receipt。
 
-`exec schedule spec` composes one scheduler-neutral handoff around an exact
-bounded monitor command. The read path directly verifies canonical current plan
-bytes against the same-revision immutable snapshot and managed Markdown, then
-validates check eligibility on an in-memory plan clone. No PlanStore mutation,
-recovery publication, scheduler client, network client, or result write is
-invoked.
+加载计划时会先完成可证明安全的预备事务，否则报告损坏。相同输入和 request ID 的重试返回原结果，不增加 revision；同一 request ID 携带不同输入则是 revision conflict。
 
-The versioned `mino.scheduled-task-spec/v1` payload binds canonical project
-root, plan/check/projection digests, exact revision and execution request ID,
-complete Mino argv, environment, one trigger and hard expiry, finite dispatch
-attempts/retry budget, success/stop/failure policies, and a safe relative result
-destination. Its self-digest excludes only the digest field. The payload always
-records that external creation is still unauthorized and that emission changed
-no scheduler, network, or Mino state; another system may act only after a
-separate explicit authorization.
+Markdown 投影包含 plan ID、revision、状态哈希和 renderer version。读取与修改服务都会重新渲染并比较字节：缺失投影可以从规范状态恢复，已知旧投影可在合法修改中升级，无法识别的手工编辑会产生 exit 8，并保持原字节不被覆盖。
 
-## Version ownership
+## 执行与证据
 
-The v0.1 plan schema is `1`, renderer is `2`, and planning protocol is
-`2026-05-11/review-rework-git-flow-v1`. Protocol template and execution-guide
-bytes are inert embedded resources verified against their manifest digests.
-They describe provenance; runtime behavior comes from the compiled domain and
-application services.
+`exec check run` 是三阶段操作：
+
+1. 在计划中提交 `Running` lease。
+2. 以精确 argv、有限环境、超时和输出上限启动进程，保存运行结果并创建不可变证据。
+3. 把证据 ID 和终态检查状态附加到新的计划 revision。
+
+中断的 lease 会被恢复为不可变的 interrupted 结果，而不是再次启动一个无法判定是否重复的进程。失败证据会保留用于审计，但不能证明验收通过；被 supersede 或被修订标记为 stale 的证据也不能满足当前门槛。
+
+`exec check monitor` 复用同一检查流程，在前台执行有限重试。最大次数、间隔和总 deadline 一起决定每次进程预算；取消文件、deadline、通过或尝试耗尽都会产生 request-hash-bound 的 `mino.monitor/v1` 终态摘要。精确重试先读取摘要，不再睡眠或启动进程。
+
+`exec schedule spec` 只读取并验证当前计划、同 revision 快照、投影和检查资格，然后生成 `mino.scheduled-task-spec/v1`。它描述执行环境、触发与过期时间、有限重试、结果策略和安全目标路径，但不调用调度器、不访问网络，也不写 Mino 状态。
+
+## 工作树与 Git 边界
+
+`mino git inspect` 直接执行窄范围 Git 命令，解析 NUL 分隔的 porcelain v2，并显式报告普通、unborn、detached、bare、linked worktree 和非仓库状态。
+
+`mino git bind` 以 canonical common directory 和 worktree root 为键保存活动计划。分支绑定允许该分支向前移动；detached 绑定要求完全相同的 HEAD。切换分支或 HEAD 后会变为 `stale_branch` 或 `stale_head`，其他工作树的绑定为 `foreign_worktree`。一旦 `active.json` 存在，就不再跨工作树回退选择计划。
+
+分支和提交都使用不可变 intent → 外部操作 → completion 三段日志：
+
+- `git branch create` 在单独批准后，只能从捕获的 base 创建并切换到确定名称 `mino/<plan-id>`；切换时禁用仓库 hooks。
+- `git commit` 只处理第一个符合条件且要求提交的 Done 任务，要求当前审批、Approved Git Flow、相同工作树绑定、精确父 HEAD、有效证据，以及 File Map 与 Commit Scope 的交集路径。
+- 提交前索引必须为空；Mino 只暂存解析后的精确路径，并保留正常 commit hooks。失败后不会 reset、unstage 或掩盖现场。
+
+建议型 hooks 采用独立的 propose/status/install/run 流程。安装必须匹配当前 proposal hash，只能写默认的 marker-owned pre/post commit 路径；用户 hooks、符号链接和自定义 `core.hooksPath` 均保留。运行时仅输出 Git 与绑定观察，不写计划、证据、索引或 hook 文件。
+
+## 标准冲突模型
+
+标准引擎组合内嵌包和 `.mino/standards.local.toml` 中经用户审阅的来源声明。候选优先级固定为：
+
+1. 当前用户要求；
+2. 仓库硬规则或本地声明；
+3. formatter、linter、build 或 CI 配置；
+4. 语言包；
+5. Common。
+
+检测会保留全部候选，不拼接也不静默选择。`standards conflict refresh` 把当前候选指纹记录进计划，`resolve` 则保存选择、理由、外部决策引用、actor 与时间。任一来源字节变化都会使旧决定失效，直到再次 refresh 并显式选择。
+
+## 版本所有权
+
+当前 plan schema 为 `1`，renderer 为 `2`，planning protocol 为 `2026-05-11/review-rework-git-flow-v1`。协议模板和执行指南作为经过 manifest 摘要验证的惰性资源内嵌；它们说明来源和交互方式，真正的运行时约束来自编译后的领域与应用服务。

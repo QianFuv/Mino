@@ -171,7 +171,7 @@ fn canonical_source_matches_cli_protocol_capabilities_standards_and_skill() {
     );
     assert_eq!(
         report.source_digest,
-        "sha256:b05c249ac4469094c7a915fecfd0f5a4e98ceb56b436211192b1e3f4fe73b1d7"
+        "sha256:485aba947ccc2a42e0580affd7865778079f0982f937c3075dc0dade135cf272"
     );
 }
 
@@ -251,7 +251,7 @@ fn canonical_source_is_offline_binary_free_and_documents_exact_resolution() {
     assert!(skill.contains("Never modify `PATH`, download a binary"));
     let readme = fs::read_to_string(canonical_plugin().join("README.md"))
         .expect("plugin README should be readable");
-    assert!(readme.contains("does not publish, install, update, or"));
+    assert!(readme.contains("plugin-contract: no-publish-install-update"));
 }
 
 #[test]

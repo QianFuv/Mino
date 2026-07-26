@@ -413,9 +413,9 @@ fn validate_readme(bytes: &[u8]) -> Result<(), MinoError> {
     let readme = std::str::from_utf8(bytes)
         .map_err(|error| contract_error(format!("Plugin README is not UTF-8: {error}")))?;
     for required in [
-        "exactly one `bin/mino` or `bin/mino.exe` binary",
-        "must not mutate `PATH`",
-        "does not publish, install, update, or",
+        "plugin-contract: one-native-binary",
+        "plugin-contract: path-unchanged",
+        "plugin-contract: no-publish-install-update",
     ] {
         if !readme.contains(required) {
             return Err(contract_error(format!(

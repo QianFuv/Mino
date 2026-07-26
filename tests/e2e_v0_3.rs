@@ -478,20 +478,20 @@ fn release_surface_excludes_unsupported_runtime_and_git_operations() {
     assert!(!plugin.plugin_root.join(".mcp.json").exists());
     assert!(!plugin.plugin_root.join(".app.json").exists());
 
-    let release = fs::read_to_string(repository.join("docs/v0-3.md"))
-        .expect("release guide should be readable");
+    let security = fs::read_to_string(repository.join("docs/security.md"))
+        .expect("security guide should be readable");
     for boundary in [
-        "No LLM execution",
-        "No daemon",
-        "No cloud control plane",
-        "No built-in scheduler",
-        "No auto-update",
-        "arbitrary plugin runtime",
-        "No Git push, merge, rebase, reset, amend, force-push",
+        "doc-contract: no-llm-execution",
+        "doc-contract: no-daemon",
+        "doc-contract: no-cloud-control-plane",
+        "doc-contract: no-built-in-scheduler",
+        "doc-contract: no-auto-update",
+        "doc-contract: no-arbitrary-plugin-runtime",
+        "doc-contract: no-git-remote-or-destructive",
     ] {
         assert!(
-            release.contains(boundary),
-            "release boundary is missing {boundary}"
+            security.contains(boundary),
+            "security boundary is missing {boundary}"
         );
     }
     let workflow = fs::read_to_string(repository.join(".github/workflows/release-artifacts.yml"))
