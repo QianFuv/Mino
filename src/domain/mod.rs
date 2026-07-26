@@ -1,5 +1,6 @@
 //! Versioned domain model for plans, tasks, evidence, and audit events.
 
+mod amendment;
 mod authoring;
 mod check_run;
 mod error;
@@ -14,6 +15,10 @@ mod task;
 mod timestamp;
 mod version;
 
+pub use amendment::{
+    Amendment, AmendmentClassification, AmendmentImpact, AmendmentOperation, AmendmentPatch,
+    AmendmentStatus, MinorFileKind, ProtectedChangeCategory,
+};
 pub use authoring::{
     DraftCommitGateInput, DraftContextInput, DraftCriterionInput, DraftDecisionInput,
     DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,

@@ -15,7 +15,8 @@
     "exec.checkpoint",
     "exec.criterion.pass",
     "exec.complete",
-    "exec.block"
+    "exec.block",
+    "plan.amend.propose"
   ],
   "blocked_actions": [
     {

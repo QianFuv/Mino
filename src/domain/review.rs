@@ -3,6 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::amendment::change_number;
 use super::{DomainError, DomainErrorKind, ReviewClassification, ReviewStatus, TaskId, Timestamp};
 
 /// One immutable review request plus its constrained processing status.
@@ -21,6 +22,8 @@ pub struct ReviewItem {
     recorded_at: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     approval_reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    superseded_by_change: Option<String>,
 }
 
 impl ReviewItem {
@@ -151,6 +154,7 @@ impl ReviewItem {
             status,
             recorded_at,
             approval_reference,
+            superseded_by_change: None,
         };
         item.validate()?;
         Ok(item)
@@ -216,6 +220,12 @@ impl ReviewItem {
         self.approval_reference.as_deref()
     }
 
+    /// Returns the Material amendment that invalidated this review result.
+    #[must_use]
+    pub fn superseded_by_change(&self) -> Option<&str> {
+        self.superseded_by_change.as_deref()
+    }
+
     pub(crate) fn begin_rework(&mut self) -> Result<(), DomainError> {
         if self.status != ReviewStatus::Open
             || !matches!(
@@ -248,21 +258,26 @@ impl ReviewItem {
         Ok(())
     }
 
-    pub(crate) fn validate(&self) -> Result<(), DomainError> {
-        if review_number(&self.id).is_none()
-            || self.reviewer.trim().is_empty()
-            || self.feedback.trim().is_empty()
-            || self.action.trim().is_empty()
-            || self
-                .approval_reference
-                .as_deref()
-                .is_some_and(|reference| reference.trim().is_empty())
-        {
+    pub(crate) fn supersede_for_amendment(&mut self, change_id: &str) -> Result<(), DomainError> {
+        if matches!(
+            self.classification,
+            ReviewClassification::FollowUp | ReviewClassification::Accepted
+        ) {
+            return Ok(());
+        }
+        if change_number(change_id).is_none() {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
-                "Review item fields are malformed",
+                "A superseding amendment requires a valid change identifier",
             ));
         }
+        self.status = ReviewStatus::Resolved;
+        self.superseded_by_change = Some(change_id.to_owned());
+        self.validate()
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), DomainError> {
+        self.validate_fields()?;
         let is_valid = match self.classification {
             ReviewClassification::AcceptanceDefect => {
                 self.linked_task.is_some()
@@ -279,6 +294,10 @@ impl ReviewItem {
                         self.status,
                         ReviewStatus::Open | ReviewStatus::InProgress | ReviewStatus::Resolved
                     )
+                    && self
+                        .superseded_by_change
+                        .as_ref()
+                        .is_none_or(|_| self.status == ReviewStatus::Resolved)
             }
             ReviewClassification::InScopeRework => {
                 self.linked_task
@@ -298,23 +317,32 @@ impl ReviewItem {
                         self.status,
                         ReviewStatus::Open | ReviewStatus::InProgress | ReviewStatus::Resolved
                     )
+                    && self
+                        .superseded_by_change
+                        .as_ref()
+                        .is_none_or(|_| self.status == ReviewStatus::Resolved)
             }
             ReviewClassification::MaterialChange => {
                 self.linked_task.is_none()
                     && self.origin_task.is_none()
                     && self.approval_reference.is_none()
                     && self.action == "Pause for a protected material amendment"
-                    && self.status == ReviewStatus::Blocked
+                    && ((self.status == ReviewStatus::Blocked
+                        && self.superseded_by_change.is_none())
+                        || (self.status == ReviewStatus::Resolved
+                            && self.superseded_by_change.is_some()))
             }
             ReviewClassification::FollowUp => {
                 self.linked_task.is_none()
                     && self.origin_task.is_none()
                     && self.approval_reference.is_none()
+                    && self.superseded_by_change.is_none()
                     && self.action == "Record outside the active implementation order"
                     && self.status == ReviewStatus::Deferred
             }
             ReviewClassification::Accepted => {
                 self.origin_task.is_none()
+                    && self.superseded_by_change.is_none()
                     && matches!(
                         self.action.as_str(),
                         "Record final review acceptance" | "Record acceptance"
@@ -332,6 +360,29 @@ impl ReviewItem {
                     self.id
                 ),
             ))
+        }
+    }
+
+    fn validate_fields(&self) -> Result<(), DomainError> {
+        if review_number(&self.id).is_none()
+            || self.reviewer.trim().is_empty()
+            || self.feedback.trim().is_empty()
+            || self.action.trim().is_empty()
+            || self
+                .approval_reference
+                .as_deref()
+                .is_some_and(|reference| reference.trim().is_empty())
+            || self
+                .superseded_by_change
+                .as_deref()
+                .is_some_and(|change_id| change_number(change_id).is_none())
+        {
+            Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Review item fields are malformed",
+            ))
+        } else {
+            Ok(())
         }
     }
 }

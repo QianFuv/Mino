@@ -101,6 +101,9 @@ the staged or already-created commit without duplicating it. Mino never invokes
 | `mino plan review` | No | Return the revision/hash-bound approval summary for a Ready plan. |
 | `mino plan approve` | Yes, approval boundary | Record an explicit plan approval and an Approved or Disabled Git Flow consent decision. |
 | `mino plan apply` | Yes | Strictly apply one bounded YAML Draft document; unknown fields are rejected. |
+| `mino plan amend propose` | Yes | Record one strict typed patch, immutable base revision/hash, classifier-derived impact, and monotonic `C<n>` ID. A caller may raise but never lower the minimum classification. |
+| `mino plan amend approve` | Yes, approval boundary | Require `--change C<n> --approval-ref <ref>` and record explicit approval only for the current pending Material proposal. |
+| `mino plan amend apply` | Yes | Apply the current eligible proposal atomically. Minor invalidates only affected checks/evidence; Material resets execution gates, supersedes affected review state, clears plan approval/Git consent, and returns Ready. |
 | `mino plan metadata set` | Yes | Replace supplied Draft metadata fields. |
 | `mino plan summary set` | Yes | Replace the Draft summary from an argument or stdin. |
 | `mino plan context add` | Yes | Append one current-state reference/fact/implication. |
@@ -114,9 +117,17 @@ the staged or already-created commit without duplicating it. Mino never invokes
 | `mino plan file add` | Yes | Append one task-owned File Map responsibility. |
 | `mino plan verification add` | Yes | Append one global planned command. |
 
-Direct authored changes are legal only in Draft. Ready plans require explicit
-approval before execution. The approval is an auditable declaration, not a
-cryptographic signature.
+Direct authored changes are legal only in Draft. Ready and In Progress changes
+must use the typed amendment protocol; arbitrary JSON/field paths and execution
+fields are rejected. Minor permits only test fixtures, barrel exports,
+snapshots, task-local support files, verification-command corrections, and
+implementation notes. User-visible behavior, public API, data/schema,
+dependencies, compatibility, scope, security, and core task order are Material.
+Ready changes clear the current plan approval. Material application clears plan
+approval and Git consent, resets task/global gates, removes execution-only
+checkpoints, marks affected evidence stale, and requires validation plus a new
+review/approval cycle. Approval records are auditable declarations, not
+cryptographic signatures.
 
 ### Review and rework
 
@@ -168,7 +179,9 @@ They fail with exit 5 unless JSON and no-input mode are both selected.
 | `mino evidence show` | No | Return one exact immutable record. |
 
 Artifact paths must remain within the project. A correction creates a new
-record with `supersedes`; records and blobs are never rewritten.
+record with `supersedes`; records and blobs are never rewritten. Evidence
+invalidated by an applied amendment remains immutable history but cannot
+satisfy completion. No evidence may be added while a proposal awaits apply.
 
 ### Execution
 
@@ -270,6 +283,8 @@ Plan states are `Draft`, `Ready`, `In Progress`, `Blocked`, `Review`, and
 Check states are `Pending`, `Running`, `Passed`, `Failed`, and `Blocked`.
 Criterion states are `Pending`, `Passed`, `Failed`, and `Accepted Exception`.
 Git Flow consent is `Pending`, `Approved`, or `Disabled`.
+Amendment classifications are `Minor` and `Material`; amendment states are
+`Proposed`, `Approval Required`, `Approved`, and `Applied`.
 
 Active binding states are `missing`, `current`, `foreign_worktree`,
 `stale_branch`, `stale_head`, and `not_repository`.

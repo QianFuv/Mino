@@ -7,10 +7,10 @@ approval boundaries. It is not a template generator and does not contain an
 LLM.
 
 The current package is `mino 0.1.0`. It contains the stable v0.1 lifecycle plus
-the v0.2 local Git and review increments: worktree-aware plan binding,
+the v0.2 local Git, review, and protected-amendment increments: worktree-aware plan binding,
 explicitly approved branch creation, exact plan-scoped task commits, classified
-review feedback, rework, and final acceptance. Protected plan amendments,
-legacy import, standards-conflict resolution, plan variants, scheduled
+review feedback, rework, final acceptance, and typed Minor/Material plan
+changes. Legacy import, standards-conflict resolution, plan variants, scheduled
 observation, team catalogs, and plugin distribution remain deferred.
 
 ## What v0.1 provides
@@ -40,6 +40,12 @@ approval-gated `accept`. Acceptance defects rerun existing task evidence,
 in-scope changes reserve monotonic `R<n>` tasks with full execution and Git
 gates, follow-ups remain outside task order, and material changes block pending
 a protected amendment.
+
+The v0.2 amendment increment adds `plan amend propose`, `approve`, and `apply`.
+Only typed semantic operations are accepted. Minor is a fixed task-local
+allowlist; Material changes block, require an explicit approval reference,
+invalidate prior plan approval and affected review/evidence state, reset
+execution gates, and return the plan to Ready for validation and reapproval.
 
 ## Requirements and installation
 

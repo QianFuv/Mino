@@ -7,12 +7,14 @@ use serde::{Deserialize, Serialize};
 
 use super::execution::EXECUTION_EXTENSION_KEY;
 use super::{
-    CheckId, CheckStatus, CheckpointKind, CommitStatus, CriterionId, DomainError, DomainErrorKind,
-    DraftContextInput, DraftCriterionInput, DraftDecisionInput, DraftEdgeCaseInput, DraftFileInput,
-    DraftMetadataInput, DraftPlanInput, DraftScopeInput, DraftTaskInput, DraftVerificationInput,
-    EvidenceId, ExecutionState, FileMapEntry, GitFlowConsent, PlanDraftSeed, PlanId, PlanStatus,
-    ProtocolVersion, ReviewClassification, ReviewItem, ReviewStatus, SchemaVersion, Task, TaskId,
-    TaskStatus, Timestamp, VerificationCheck,
+    Amendment, AmendmentClassification, AmendmentImpact, AmendmentOperation, AmendmentPatch,
+    AmendmentStatus, CheckId, CheckStatus, CheckpointKind, CommitStatus, CriterionId, DomainError,
+    DomainErrorKind, DraftContextInput, DraftCriterionInput, DraftDecisionInput,
+    DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,
+    DraftTaskInput, DraftVerificationInput, EvidenceId, ExecutionState, FileMapEntry,
+    GitFlowConsent, PlanDraftSeed, PlanId, PlanStatus, ProtocolVersion, ReviewClassification,
+    ReviewItem, ReviewStatus, SchemaVersion, Task, TaskId, TaskStatus, Timestamp,
+    VerificationCheck,
 };
 
 /// Human and repository metadata associated with a plan.
@@ -523,6 +525,8 @@ pub struct Plan {
     #[serde(rename = "verification_plan")]
     global_verification: Vec<VerificationCheck>,
     approvals: Vec<Approval>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    amendments: Vec<Amendment>,
     review_items: Vec<ReviewItem>,
     follow_ups: Vec<String>,
     lineage: Option<Lineage>,
@@ -557,6 +561,8 @@ struct UncheckedPlan {
     #[serde(rename = "verification_plan")]
     global_verification: Vec<VerificationCheck>,
     approvals: Vec<Approval>,
+    #[serde(default)]
+    amendments: Vec<Amendment>,
     review_items: Vec<ReviewItem>,
     follow_ups: Vec<String>,
     lineage: Option<Lineage>,
@@ -591,6 +597,7 @@ impl TryFrom<UncheckedPlan> for Plan {
             task_order: unchecked.task_order,
             global_verification: unchecked.global_verification,
             approvals: unchecked.approvals,
+            amendments: unchecked.amendments,
             review_items: unchecked.review_items,
             follow_ups: unchecked.follow_ups,
             lineage: unchecked.lineage,
@@ -658,6 +665,7 @@ impl Plan {
             task_order: Vec::new(),
             global_verification: Vec::new(),
             approvals: Vec::new(),
+            amendments: Vec::new(),
             review_items: Vec::new(),
             follow_ups: Vec::new(),
             lineage: None,
@@ -796,6 +804,42 @@ impl Plan {
         &self.approvals
     }
 
+    /// Returns protected amendments in monotonic proposal order.
+    #[must_use]
+    pub fn amendments(&self) -> &[Amendment] {
+        &self.amendments
+    }
+
+    /// Returns one protected amendment by its stable change identifier.
+    #[must_use]
+    pub fn amendment(&self, change_id: &str) -> Option<&Amendment> {
+        self.amendments
+            .iter()
+            .find(|amendment| amendment.id() == change_id)
+    }
+
+    /// Returns the only unapplied amendment when one exists.
+    #[must_use]
+    pub fn pending_amendment(&self) -> Option<&Amendment> {
+        self.amendments
+            .iter()
+            .find(|amendment| amendment.is_pending())
+    }
+
+    /// Returns whether an unapplied amendment owns the mutation boundary.
+    #[must_use]
+    pub fn has_pending_amendment(&self) -> bool {
+        self.pending_amendment().is_some()
+    }
+
+    /// Returns whether applied amendment impact invalidated an evidence record.
+    #[must_use]
+    pub fn is_evidence_stale(&self, evidence_id: &EvidenceId) -> bool {
+        self.amendments.iter().any(|amendment| {
+            !amendment.is_pending() && amendment.impact().stale_evidence().contains(evidence_id)
+        })
+    }
+
     /// Returns classified review records in monotonic identifier order.
     #[must_use]
     pub fn review_items(&self) -> &[ReviewItem] {
@@ -823,6 +867,19 @@ impl Plan {
                 item.classification() == ReviewClassification::MaterialChange
                     && item.status() == ReviewStatus::Blocked
             })
+    }
+
+    /// Returns whether a pending Material amendment owns the blocked state.
+    #[must_use]
+    pub fn is_blocked_for_material_amendment(&self) -> bool {
+        self.status == PlanStatus::Blocked
+            && self.pending_amendment().is_some_and(|amendment| {
+                amendment.classification() == AmendmentClassification::Material
+            })
+            && matches!(
+                self.resume_status,
+                Some(PlanStatus::Ready | PlanStatus::InProgress | PlanStatus::Review)
+            )
     }
 
     /// Returns whether the current revision has a recorded plan approval.
@@ -859,6 +916,184 @@ impl Plan {
                     })
                 },
             )
+    }
+
+    /// Returns the next monotonic protected-change identifier without reserving it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when the change counter overflows.
+    pub fn next_amendment_id(&self) -> Result<String, DomainError> {
+        let number = self.amendments.len().checked_add(1).ok_or_else(|| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Amendment count overflowed",
+            )
+        })?;
+        Ok(format!("C{number}"))
+    }
+
+    /// Proposes one typed protected change against the exact current revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported lifecycle state, a concurrent pending
+    /// proposal, malformed operations, a lowered classification, or invalid targets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn propose_amendment(
+        &mut self,
+        reason: String,
+        patch: AmendmentPatch,
+        requested_classification: Option<AmendmentClassification>,
+        base_state_hash: String,
+        proposer: String,
+        updated_at: Timestamp,
+    ) -> Result<String, DomainError> {
+        if self.has_pending_amendment() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Apply the current pending amendment before proposing another",
+            ));
+        }
+        if self.running_check_count() != 0 {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "An amendment cannot be proposed while a verification check is Running",
+            ));
+        }
+        let is_material_review = self.is_blocked_for_material_review();
+        if !matches!(self.status, PlanStatus::Ready | PlanStatus::InProgress) && !is_material_review
+        {
+            return Err(self.invalid_transition("propose a protected amendment"));
+        }
+        let operation_minimum = patch.minimum_classification()?;
+        let minimum_classification =
+            self.contextual_amendment_minimum(patch.operations(), operation_minimum)?;
+        let classification = requested_classification.unwrap_or(minimum_classification);
+        if classification < minimum_classification
+            || (is_material_review && classification != AmendmentClassification::Material)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::ApprovalRequired,
+                "The requested classification cannot lower the protected minimum",
+            ));
+        }
+        let operations = patch.into_operations();
+        let impact = self.amendment_impact(&operations, classification)?;
+        let change_id = self.next_amendment_id()?;
+        let amendment = Amendment::proposed(
+            change_id.clone(),
+            reason,
+            minimum_classification,
+            classification,
+            operations,
+            self.revision,
+            base_state_hash,
+            impact,
+            proposer,
+            updated_at.clone(),
+        )?;
+        let next_revision = self.next_revision()?;
+        let mut candidate = self.clone();
+        if classification == AmendmentClassification::Material && !is_material_review {
+            let resume_status = candidate.status;
+            if resume_status == PlanStatus::InProgress
+                && let Some(task) = candidate
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.status() == TaskStatus::InProgress)
+            {
+                task.block(format!(
+                    "Material amendment {change_id} requires explicit approval"
+                ))?;
+            }
+            candidate.status = PlanStatus::Blocked;
+            candidate.resume_status = Some(resume_status);
+            candidate.blocker = Some(format!(
+                "Material amendment {change_id} requires explicit approval"
+            ));
+        }
+        candidate.amendments.push(amendment);
+        candidate.record_revision(next_revision, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(change_id)
+    }
+
+    /// Records explicit approval for one pending Material amendment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the named proposal is the current unapproved
+    /// Material change and the actor plus approval reference are complete.
+    pub fn approve_amendment(
+        &mut self,
+        change_id: &str,
+        actor: String,
+        approval_reference: String,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let amendment_index = self.pending_amendment_index(change_id)?;
+        let next_revision = self.next_revision()?;
+        let mut candidate = self.clone();
+        candidate.amendments[amendment_index].approve(
+            actor,
+            approval_reference,
+            updated_at.clone(),
+        )?;
+        candidate.record_revision(next_revision, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Atomically applies one eligible typed amendment and its invalidations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the named proposal is pending, its approval gate
+    /// is satisfied, and every operation preserves plan invariants.
+    pub fn apply_amendment(
+        &mut self,
+        change_id: &str,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let amendment_index = self.pending_amendment_index(change_id)?;
+        let classification = self.amendments[amendment_index].classification();
+        let operations = self.amendments[amendment_index].operations().to_vec();
+        let next_revision = self.next_revision()?;
+        let mut candidate = self.clone();
+        for operation in operations {
+            candidate.apply_amendment_operation(operation)?;
+        }
+        match classification {
+            AmendmentClassification::Minor => {
+                if candidate.status == PlanStatus::Ready {
+                    candidate.invalidate_plan_approval();
+                }
+            }
+            AmendmentClassification::Material => {
+                for task in &mut candidate.tasks {
+                    task.reset_for_material_amendment();
+                }
+                for check in &mut candidate.global_verification {
+                    check.reset_for_rework();
+                }
+                candidate.invalidate_plan_approval();
+                candidate.extensions.remove(EXECUTION_EXTENSION_KEY);
+                for item in &mut candidate.review_items {
+                    item.supersede_for_amendment(change_id)?;
+                }
+                candidate.status = PlanStatus::Ready;
+                candidate.resume_status = None;
+                candidate.blocker = None;
+            }
+        }
+        candidate.amendments[amendment_index].mark_applied(updated_at.clone())?;
+        candidate.record_revision(next_revision, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
     }
 
     /// Returns a task by identifier.
@@ -1552,6 +1787,7 @@ impl Plan {
         task_id: &TaskId,
         updated_at: Timestamp,
     ) -> Result<(), DomainError> {
+        self.ensure_no_pending_amendment("start a task")?;
         if !matches!(self.status, PlanStatus::Ready | PlanStatus::InProgress) {
             return Err(self.invalid_transition("start a task"));
         }
@@ -1972,6 +2208,7 @@ impl Plan {
         reason: impl Into<String>,
         updated_at: Timestamp,
     ) -> Result<(), DomainError> {
+        self.ensure_no_pending_amendment("block")?;
         if !matches!(self.status, PlanStatus::Ready | PlanStatus::InProgress) {
             return Err(self.invalid_transition("block"));
         }
@@ -2355,6 +2592,7 @@ impl Plan {
         self.validate_lifecycle()?;
         self.validate_approval_state()?;
         self.validate_global_verification()?;
+        self.validate_amendment_state()?;
         self.validate_review_state()?;
         self.validate_execution_state()?;
         Ok(())
@@ -2575,7 +2813,8 @@ impl Plan {
                                 && task.commit_gate().is_some_and(|gate| {
                                     gate.is_required() && gate.status() == CommitStatus::Blocked
                                 })
-                        }))
+                        })
+                        && !self.is_blocked_for_material_amendment())
                         || blocked_count > 1
                         || self
                             .tasks
@@ -2911,6 +3150,18 @@ impl Plan {
         item: &ReviewItem,
         reserved_tasks: &mut BTreeSet<TaskId>,
     ) -> Result<(), DomainError> {
+        if item.superseded_by_change().is_some() {
+            if item.classification() == ReviewClassification::InScopeRework
+                && let Some(task_id) = item.linked_task()
+                && !reserved_tasks.insert(task_id.clone())
+            {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Review task identifier {task_id} is reserved more than once"),
+                ));
+            }
+            return Ok(());
+        }
         match item.classification() {
             ReviewClassification::AcceptanceDefect => {
                 let task_id = item.linked_task().ok_or_else(|| {
@@ -2988,6 +3239,372 @@ impl Plan {
             })
     }
 
+    fn amendment_impact(
+        &self,
+        operations: &[AmendmentOperation],
+        classification: AmendmentClassification,
+    ) -> Result<AmendmentImpact, DomainError> {
+        let mut affected_fields = BTreeSet::new();
+        let mut affected_tasks = BTreeSet::new();
+        let mut affected_checks = BTreeSet::new();
+        let mut stale_evidence = BTreeSet::new();
+        for operation in operations {
+            match operation {
+                AmendmentOperation::AddTaskFile { task_id, path, .. }
+                | AmendmentOperation::ExpandTaskFile { task_id, path, .. } => {
+                    let task = self.amendment_target_task(task_id, classification)?;
+                    if task.file_map().iter().any(|entry| entry.path() == path) {
+                        return Err(DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            format!("Task {task_id} already owns file path {path}"),
+                        ));
+                    }
+                    affected_tasks.insert(task_id.clone());
+                    affected_fields.insert("approach.file_map".to_owned());
+                    affected_fields.insert(format!("tasks.{task_id}.file_map"));
+                    affected_fields.insert(format!("tasks.{task_id}.commit_gate.scope"));
+                }
+                AmendmentOperation::ReplaceTaskVerification {
+                    task_id, check_id, ..
+                } => {
+                    let task = self.amendment_target_task(task_id, classification)?;
+                    let check = task
+                        .verification_checks()
+                        .iter()
+                        .find(|check| check.id() == check_id)
+                        .ok_or_else(|| {
+                            DomainError::new(
+                                DomainErrorKind::InvariantViolation,
+                                format!("Task {task_id} has no check {check_id}"),
+                            )
+                        })?;
+                    affected_tasks.insert(task_id.clone());
+                    affected_checks.insert(check_id.clone());
+                    stale_evidence.extend(check.evidence_refs().iter().cloned());
+                    affected_fields
+                        .insert(format!("tasks.{task_id}.verification_checks.{check_id}"));
+                }
+                AmendmentOperation::AddImplementationNote { task_id, .. } => {
+                    self.amendment_target_task(task_id, classification)?;
+                    affected_tasks.insert(task_id.clone());
+                    affected_fields.insert(format!("tasks.{task_id}.implementation_notes"));
+                }
+                AmendmentOperation::ReplaceSummary { .. } => {
+                    affected_fields.insert("summary".to_owned());
+                }
+                AmendmentOperation::ReplaceScope { .. } => {
+                    affected_fields.insert("scope".to_owned());
+                }
+                AmendmentOperation::ReplaceApproach { .. } => {
+                    affected_fields.insert("approach.summary".to_owned());
+                }
+                AmendmentOperation::ReplaceInterfaces { .. } => {
+                    affected_fields.insert("interfaces".to_owned());
+                }
+                AmendmentOperation::RecordProtectedDecision { .. } => {
+                    affected_fields.insert("decisions".to_owned());
+                }
+                AmendmentOperation::ReplaceTaskOrder { task_order } => {
+                    let supplied = task_order.iter().collect::<BTreeSet<_>>();
+                    let expected = self.tasks.iter().map(Task::id).collect::<BTreeSet<_>>();
+                    if supplied != expected || task_order.len() != self.tasks.len() {
+                        return Err(DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            "Replacement task order must contain every task exactly once",
+                        ));
+                    }
+                    affected_fields.insert("task_order".to_owned());
+                }
+            }
+        }
+        if classification == AmendmentClassification::Material {
+            self.collect_material_amendment_impact(
+                &mut affected_fields,
+                &mut affected_tasks,
+                &mut affected_checks,
+                &mut stale_evidence,
+            );
+        }
+        AmendmentImpact::new(
+            affected_fields.into_iter().collect(),
+            affected_tasks.into_iter().collect(),
+            affected_checks.into_iter().collect(),
+            stale_evidence.into_iter().collect(),
+        )
+    }
+
+    fn contextual_amendment_minimum(
+        &self,
+        operations: &[AmendmentOperation],
+        mut minimum: AmendmentClassification,
+    ) -> Result<AmendmentClassification, DomainError> {
+        for operation in operations {
+            if let AmendmentOperation::ReplaceTaskVerification {
+                task_id,
+                check_id,
+                required,
+                ..
+            } = operation
+            {
+                let check = self
+                    .task(task_id)
+                    .and_then(|task| {
+                        task.verification_checks()
+                            .iter()
+                            .find(|check| check.id() == check_id)
+                    })
+                    .ok_or_else(|| {
+                        DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            format!("Task {task_id} has no check {check_id}"),
+                        )
+                    })?;
+                if check.is_required() != *required {
+                    minimum = AmendmentClassification::Material;
+                }
+            }
+        }
+        Ok(minimum)
+    }
+
+    fn collect_material_amendment_impact(
+        &self,
+        affected_fields: &mut BTreeSet<String>,
+        affected_tasks: &mut BTreeSet<TaskId>,
+        affected_checks: &mut BTreeSet<CheckId>,
+        stale_evidence: &mut BTreeSet<EvidenceId>,
+    ) {
+        affected_fields.extend([
+            "approvals".to_owned(),
+            "extensions.execution".to_owned(),
+            "git_readiness.approved_at".to_owned(),
+            "git_readiness.git_flow_consent".to_owned(),
+            "review_items".to_owned(),
+            "tasks.status".to_owned(),
+            "verification_plan".to_owned(),
+        ]);
+        for task in &self.tasks {
+            affected_tasks.insert(task.id().clone());
+            stale_evidence.extend(task.evidence_refs().iter().cloned());
+            for criterion in task.acceptance_criteria() {
+                stale_evidence.extend(criterion.evidence_refs().iter().cloned());
+            }
+            for check in task.verification_checks() {
+                affected_checks.insert(check.id().clone());
+                stale_evidence.extend(check.evidence_refs().iter().cloned());
+            }
+            if let Some(gate) = task.commit_gate() {
+                stale_evidence.extend(gate.evidence_refs().iter().cloned());
+            }
+        }
+        for check in &self.global_verification {
+            affected_checks.insert(check.id().clone());
+            stale_evidence.extend(check.evidence_refs().iter().cloned());
+        }
+    }
+
+    fn amendment_target_task(
+        &self,
+        task_id: &TaskId,
+        classification: AmendmentClassification,
+    ) -> Result<&Task, DomainError> {
+        let task = self.task(task_id).ok_or_else(|| {
+            DomainError::new(
+                DomainErrorKind::TaskNotFound,
+                format!("Task {task_id} does not exist"),
+            )
+        })?;
+        if task.status() == TaskStatus::Draft
+            || (classification == AmendmentClassification::Minor
+                && !matches!(task.status(), TaskStatus::Ready | TaskStatus::InProgress))
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Task {task_id} is not eligible for this amendment classification"),
+            ));
+        }
+        Ok(task)
+    }
+
+    fn apply_amendment_operation(
+        &mut self,
+        operation: AmendmentOperation,
+    ) -> Result<(), DomainError> {
+        match operation {
+            AmendmentOperation::AddTaskFile {
+                task_id,
+                path,
+                change,
+                reason,
+                ..
+            }
+            | AmendmentOperation::ExpandTaskFile {
+                task_id,
+                path,
+                change,
+                reason,
+            } => {
+                let entry = FileMapEntry::new(path, change, reason, task_id.clone());
+                self.task_mut(&task_id)?.add_amended_file(entry.clone())?;
+                self.approach.file_map.push(entry);
+            }
+            AmendmentOperation::ReplaceTaskVerification {
+                task_id,
+                check_id,
+                command,
+                cwd,
+                expected_exit_code,
+                required,
+            } => self.task_mut(&task_id)?.replace_amended_verification(
+                &check_id,
+                command,
+                cwd,
+                expected_exit_code,
+                required,
+            )?,
+            AmendmentOperation::AddImplementationNote { task_id, note } => {
+                self.task_mut(&task_id)?.add_implementation_note(note)?;
+            }
+            AmendmentOperation::ReplaceSummary { summary } => self.summary = summary,
+            AmendmentOperation::ReplaceScope {
+                goal,
+                deliverables,
+                in_scope,
+                out_of_scope,
+            } => {
+                self.scope = PlanScope {
+                    goal,
+                    deliverables,
+                    in_scope,
+                    out_of_scope,
+                };
+            }
+            AmendmentOperation::ReplaceApproach { approach } => {
+                self.approach.summary = approach;
+            }
+            AmendmentOperation::ReplaceInterfaces { interfaces } => {
+                self.interfaces = interfaces;
+            }
+            AmendmentOperation::RecordProtectedDecision {
+                category,
+                item,
+                decision,
+                reason,
+            } => self.decisions.push(Decision::new(
+                item,
+                category.as_str(),
+                decision,
+                reason,
+                "Confirmed",
+            )),
+            AmendmentOperation::ReplaceTaskOrder { task_order } => {
+                self.task_order = task_order;
+            }
+        }
+        Ok(())
+    }
+
+    fn invalidate_plan_approval(&mut self) {
+        self.approvals
+            .retain(|approval| approval.kind() != ApprovalKind::Plan);
+        self.git_readiness.git_flow_consent = GitFlowConsent::Pending;
+        self.git_readiness.approved_at = None;
+    }
+
+    fn pending_amendment_index(&self, change_id: &str) -> Result<usize, DomainError> {
+        self.amendments
+            .iter()
+            .position(|amendment| amendment.id() == change_id && amendment.is_pending())
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvalidTransition,
+                    format!("Amendment {change_id} is not the current pending change"),
+                )
+            })
+    }
+
+    fn validate_amendment_state(&self) -> Result<(), DomainError> {
+        let mut pending_count = 0_usize;
+        let mut previous_base_revision = 0_u64;
+        for (index, amendment) in self.amendments.iter().enumerate() {
+            amendment.validate()?;
+            let expected_number = index.checked_add(1).ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Amendment count overflowed",
+                )
+            })?;
+            if amendment.id() != format!("C{expected_number}")
+                || amendment.base_revision() <= previous_base_revision
+            {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Amendment identifiers and base revisions must be monotonic",
+                ));
+            }
+            previous_base_revision = amendment.base_revision();
+            if amendment.is_pending() {
+                pending_count = pending_count.checked_add(1).ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "Pending amendment count overflowed",
+                    )
+                })?;
+                if index + 1 != self.amendments.len() {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "Only the latest amendment may remain pending",
+                    ));
+                }
+                let expected_revision = amendment
+                    .base_revision()
+                    .checked_add(match amendment.status() {
+                        AmendmentStatus::Approved => 2,
+                        AmendmentStatus::Proposed | AmendmentStatus::ApprovalRequired => 1,
+                        AmendmentStatus::Applied => 0,
+                    })
+                    .ok_or_else(|| {
+                        DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            "Pending amendment revision overflowed",
+                        )
+                    })?;
+                if self.revision != expected_revision {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "A pending amendment must be the only intervening semantic change",
+                    ));
+                }
+            }
+        }
+        if pending_count > 1 {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "A plan may contain at most one pending amendment",
+            ));
+        }
+        if let Some(amendment) = self.pending_amendment() {
+            match amendment.classification() {
+                AmendmentClassification::Minor
+                    if !matches!(self.status, PlanStatus::Ready | PlanStatus::InProgress) =>
+                {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "A pending Minor amendment requires Ready or In Progress",
+                    ));
+                }
+                AmendmentClassification::Material if !self.is_blocked_for_material_amendment() => {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "A pending Material amendment must own the Blocked state",
+                    ));
+                }
+                AmendmentClassification::Minor | AmendmentClassification::Material => {}
+            }
+        }
+        Ok(())
+    }
+
     fn task_mut(&mut self, task_id: &TaskId) -> Result<&mut Task, DomainError> {
         self.tasks
             .iter_mut()
@@ -3005,10 +3622,30 @@ impl Plan {
         required: PlanStatus,
         action: &'static str,
     ) -> Result<(), DomainError> {
+        self.ensure_no_pending_amendment(action)?;
         if self.status == required {
             Ok(())
         } else {
             Err(self.invalid_transition(action))
+        }
+    }
+
+    fn ensure_no_pending_amendment(&self, action: &'static str) -> Result<(), DomainError> {
+        if let Some(amendment) = self.pending_amendment() {
+            Err(DomainError::new(
+                if amendment.classification() == AmendmentClassification::Material {
+                    DomainErrorKind::ApprovalRequired
+                } else {
+                    DomainErrorKind::InvalidTransition
+                },
+                format!(
+                    "Plan {} cannot {action} while amendment {} awaits apply",
+                    self.id,
+                    amendment.id()
+                ),
+            ))
+        } else {
+            Ok(())
         }
     }
 

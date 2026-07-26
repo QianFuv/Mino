@@ -338,6 +338,12 @@ fn validate_current_evidence(
     evidence: &Evidence,
     all_evidence: &[Evidence],
 ) -> Result<(), MinoError> {
+    if plan.is_evidence_stale(evidence.id()) {
+        return Err(incomplete(format!(
+            "Evidence {} was invalidated by an applied amendment",
+            evidence.id()
+        )));
+    }
     if evidence.plan_id() != plan.id()
         || evidence
             .captured_revision()
@@ -473,6 +479,7 @@ pub(crate) fn validate_review_evidence(
             })?;
             let record = evidence_by_id(evidence, evidence_id)?;
             if superseded.contains(record.id())
+                || plan.is_evidence_stale(record.id())
                 || record.kind() != EvidenceType::Commit
                 || record.plan_id() != plan.id()
                 || record.task_id() != Some(task.id())

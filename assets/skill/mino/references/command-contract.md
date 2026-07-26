@@ -99,6 +99,19 @@ protected amendment and must not be passed to `exec resume`. `review accept` is
 a separate approval boundary: stop, obtain explicit acceptance of the current
 resolved Review, and pass its auditable `--approval-ref`.
 
+## Protected amendments
+
+For Ready or In Progress changes, create a strict YAML patch and run
+`mino plan amend propose --plan <id> --reason <reason> --patch-file <path>
+--expect-revision <revision> --request-id <uuid> --actor <actor> --format json
+--no-input`. Use only typed operations advertised by the CLI. Minor proposals
+can be applied by their returned action. A Material proposal makes context an
+approval stop; never invoke `plan amend approve` until the user approves that
+exact `C<n>` change and supplies an approval reference. Then apply only the
+returned action. Re-read context after each mutation. Pending proposals block
+execution, evidence addition, and Git commits; applied stale evidence cannot
+satisfy current gates.
+
 ## Result handling
 
 - `ok: true` means the command completed; `complete: false` still means more

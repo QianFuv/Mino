@@ -135,6 +135,10 @@ Plan \+ state hash -\> UTF-8 Markdown<br>Existing bytes \+ prior rendering -\> g
 - Inspect | source data
 - Render headings and tables
 
+#### Implementation Notes
+
+_None._
+
 #### File Map
 
 | Path | Change | Reason | Task |
@@ -177,11 +181,15 @@ Plan \+ state hash -\> UTF-8 Markdown<br>Existing bytes \+ prior rendering -\> g
 |---|---|---|---|---|
 | Plan | user | chat:approval | 2026-07-25T12:07:00Z | Approved |
 
+## Protected Amendments
+
+_None._
+
 ## Review Feedback
 
-| ID | Reviewer | Feedback | Classification | Action | Task | Origin Task | Status | Recorded At | Approval Reference |
-|---|---|---|---|---|---|---|---|---|---|
-| REV-1 | reviewer | Projection contract accepted | Accepted | Record acceptance | T1 | N/A | Resolved | 2026-07-25T12:08:00Z | N/A |
+| ID | Reviewer | Feedback | Classification | Action | Task | Origin Task | Status | Recorded At | Approval Reference | Superseded By Change |
+|---|---|---|---|---|---|---|---|---|---|---|
+| REV-1 | reviewer | Projection contract accepted | Accepted | Record acceptance | T1 | N/A | Resolved | 2026-07-25T12:08:00Z | N/A | N/A |
 
 ## Follow-Ups
 

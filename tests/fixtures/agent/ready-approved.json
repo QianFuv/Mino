@@ -10,7 +10,13 @@
     "status": "Ready",
     "active_task": null
   },
-  "allowed_actions": ["plan.show", "plan.validate", "plan.review", "exec.start"],
+  "allowed_actions": [
+    "plan.show",
+    "plan.validate",
+    "plan.review",
+    "plan.amend.propose",
+    "exec.start"
+  ],
   "blocked_actions": [
     {
       "action": "git.commit",

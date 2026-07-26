@@ -81,6 +81,7 @@ fn render_document(plan: &Value, state_hash: &str) -> String {
     render_tasks(&mut output, plan);
     render_global_verification(&mut output, plan);
     render_approvals(&mut output, plan);
+    render_amendments(&mut output, plan);
     render_review_items(&mut output, plan);
     render_follow_ups(&mut output, plan);
     render_lineage(&mut output, plan);
@@ -302,6 +303,12 @@ fn render_tasks(output: &mut String, plan: &Value) {
             ],
         );
         write_list_section(output, 4, "Steps", &task["steps"]);
+        write_list_section(
+            output,
+            4,
+            "Implementation Notes",
+            &task["implementation_notes"],
+        );
         output.push_str("\n#### File Map\n\n");
         render_file_map(output, &task["file_map"]);
         output.push_str("\n#### Acceptance Criteria\n\n");
@@ -425,6 +432,59 @@ fn render_approvals(output: &mut String, plan: &Value) {
     );
 }
 
+fn render_amendments(output: &mut String, plan: &Value) {
+    output.push_str("\n## Protected Amendments\n\n");
+    let rows = array(&plan["amendments"])
+        .iter()
+        .map(|item| {
+            vec![
+                scalar(&item["id"]),
+                scalar(&item["reason"]),
+                scalar(&item["minimum_classification"]),
+                scalar(&item["classification"]),
+                scalar(&item["status"]),
+                scalar(&item["base_revision"]),
+                scalar(&item["base_state_hash"]),
+                joined(&item["impact"]["affected_fields"]),
+                joined(&item["impact"]["affected_tasks"]),
+                joined(&item["impact"]["affected_checks"]),
+                joined(&item["impact"]["stale_evidence"]),
+                scalar(&item["proposer"]),
+                scalar(&item["proposed_at"]),
+                scalar(&item["approval_actor"]),
+                scalar(&item["approval_reference"]),
+                scalar(&item["approved_at"]),
+                scalar(&item["applied_at"]),
+                scalar(&item["operations"]),
+            ]
+        })
+        .collect::<Vec<_>>();
+    write_optional_table(
+        output,
+        &[
+            "ID",
+            "Reason",
+            "Minimum",
+            "Classification",
+            "Status",
+            "Base Revision",
+            "Base State Hash",
+            "Affected Fields",
+            "Affected Tasks",
+            "Affected Checks",
+            "Stale Evidence",
+            "Proposer",
+            "Proposed At",
+            "Approval Actor",
+            "Approval Reference",
+            "Approved At",
+            "Applied At",
+            "Operations",
+        ],
+        rows,
+    );
+}
+
 fn render_review_items(output: &mut String, plan: &Value) {
     output.push_str("\n## Review Feedback\n\n");
     let rows = array(&plan["review_items"])
@@ -441,6 +501,7 @@ fn render_review_items(output: &mut String, plan: &Value) {
                 scalar(&item["status"]),
                 scalar(&item["recorded_at"]),
                 scalar(&item["approval_reference"]),
+                scalar(&item["superseded_by_change"]),
             ]
         })
         .collect::<Vec<_>>();
@@ -457,6 +518,7 @@ fn render_review_items(output: &mut String, plan: &Value) {
             "Status",
             "Recorded At",
             "Approval Reference",
+            "Superseded By Change",
         ],
         rows,
     );

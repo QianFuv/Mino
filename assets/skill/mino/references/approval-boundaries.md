@@ -32,6 +32,21 @@ amendment and cannot use `exec resume`.
 prior plan approval. Stop, obtain explicit acceptance for the fully resolved
 current Review, and pass the user's auditable reference.
 
+## Protected amendments
+
+Use only `plan amend propose` with a strict typed patch after Draft. Never edit
+the canonical JSON or managed Markdown. Treat Minor as the protocol allowlist,
+not a caller preference; a supplied classification may raise but never lower
+the computed minimum. While any proposal is pending, do not execute, add
+evidence, commit, or use generic resume.
+
+`plan.amend.approve` is an approval boundary for the exact pending Material
+`C<n>` record. Stop, show its operations, base revision/hash, and computed
+impact, obtain explicit user approval, and pass the auditable reference. After
+apply, refresh context. A Material apply returns Ready with plan approval and
+Git consent cleared, so validate, review, and obtain new plan approval before
+execution. Stale evidence remains history and must be replaced by fresh runs.
+
 ## Plan-scoped Git Flow
 
 Treat a plan commit gate as a scope and message constraint, not a general Git

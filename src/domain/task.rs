@@ -291,6 +291,30 @@ impl VerificationCheck {
     pub(crate) fn reset_for_rework(&mut self) {
         self.status = CheckStatus::Pending;
     }
+
+    pub(crate) fn replace_definition(
+        &mut self,
+        command: Vec<String>,
+        cwd: String,
+        expected_exit_code: i32,
+        required: bool,
+    ) -> Result<(), DomainError> {
+        if command.is_empty()
+            || command.iter().any(|part| part.trim().is_empty())
+            || cwd.trim().is_empty()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Check {} replacement definition is incomplete", self.id),
+            ));
+        }
+        self.command = command;
+        self.cwd = cwd;
+        self.expected_exit_code = expected_exit_code;
+        self.required = required;
+        self.status = CheckStatus::Pending;
+        Ok(())
+    }
 }
 
 /// The exact task-level commit policy declared by an approved plan.
@@ -408,6 +432,23 @@ impl CommitGate {
         Ok(())
     }
 
+    fn include_scope_path(&mut self, path: &str) {
+        if self.required && !self.scope.iter().any(|scope| scope_covers(scope, path)) {
+            self.scope.push(path.to_owned());
+        }
+    }
+
+    fn reset_for_material_amendment(&mut self) {
+        self.status = if self.required {
+            CommitStatus::Pending
+        } else {
+            CommitStatus::NotRequired
+        };
+        self.actual_commit = None;
+        self.committed_files.clear();
+        self.evidence_refs.clear();
+    }
+
     fn validate(&self, task_status: TaskStatus) -> Result<(), DomainError> {
         let has_terminal_data = self.actual_commit.is_some()
             || !self.committed_files.is_empty()
@@ -465,7 +506,7 @@ impl CommitGate {
     }
 }
 
-fn is_safe_repository_path(value: &str) -> bool {
+pub(crate) fn is_safe_repository_path(value: &str) -> bool {
     let path = Path::new(value);
     !value.is_empty()
         && !value.contains('\\')
@@ -473,6 +514,16 @@ fn is_safe_repository_path(value: &str) -> bool {
         && path
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn scope_covers(scope: &str, path: &str) -> bool {
+    scope == path
+        || scope.strip_suffix("/**").is_some_and(|prefix| {
+            path == prefix
+                || path
+                    .strip_prefix(prefix)
+                    .is_some_and(|remaining| remaining.starts_with('/'))
+        })
 }
 
 /// An ordered implementation unit inside a plan.
@@ -485,6 +536,8 @@ pub struct Task {
     resume_status: Option<TaskStatus>,
     depends_on: Vec<TaskId>,
     steps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    implementation_notes: Vec<String>,
     file_map: Vec<FileMapEntry>,
     acceptance_criteria: Vec<AcceptanceCriterion>,
     verification_checks: Vec<VerificationCheck>,
@@ -502,6 +555,8 @@ struct UncheckedTask {
     resume_status: Option<TaskStatus>,
     depends_on: Vec<TaskId>,
     steps: Vec<String>,
+    #[serde(default)]
+    implementation_notes: Vec<String>,
     file_map: Vec<FileMapEntry>,
     acceptance_criteria: Vec<AcceptanceCriterion>,
     verification_checks: Vec<VerificationCheck>,
@@ -521,6 +576,7 @@ impl TryFrom<UncheckedTask> for Task {
             resume_status: unchecked.resume_status,
             depends_on: unchecked.depends_on,
             steps: unchecked.steps,
+            implementation_notes: unchecked.implementation_notes,
             file_map: unchecked.file_map,
             acceptance_criteria: unchecked.acceptance_criteria,
             verification_checks: unchecked.verification_checks,
@@ -554,6 +610,7 @@ impl Task {
             resume_status: None,
             depends_on,
             steps: Vec::new(),
+            implementation_notes: Vec::new(),
             file_map: Vec::new(),
             acceptance_criteria: Vec::new(),
             verification_checks: Vec::new(),
@@ -651,6 +708,12 @@ impl Task {
         &self.steps
     }
 
+    /// Returns amendment-authored task-local implementation notes.
+    #[must_use]
+    pub fn implementation_notes(&self) -> &[String] {
+        &self.implementation_notes
+    }
+
     /// Returns file responsibilities owned by the task.
     #[must_use]
     pub fn file_map(&self) -> &[FileMapEntry] {
@@ -673,6 +736,12 @@ impl Task {
     #[must_use]
     pub const fn commit_gate(&self) -> Option<&CommitGate> {
         self.commit_gate.as_ref()
+    }
+
+    /// Returns evidence attached directly to the task.
+    #[must_use]
+    pub fn evidence_refs(&self) -> &[EvidenceId] {
+        &self.evidence_refs
     }
 
     /// Adds one non-empty implementation step while the task is Draft.
@@ -944,6 +1013,85 @@ impl Task {
         Ok(())
     }
 
+    pub(crate) fn add_amended_file(&mut self, entry: FileMapEntry) -> Result<(), DomainError> {
+        if self.status == TaskStatus::Draft {
+            return Err(self.invalid_transition("accept an amended file responsibility"));
+        }
+        if entry.task_id != self.id
+            || !is_safe_repository_path(&entry.path)
+            || entry.reason.trim().is_empty()
+            || self
+                .file_map
+                .iter()
+                .any(|current| current.path == entry.path)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Task {} received an invalid amended file entry", self.id),
+            ));
+        }
+        if let Some(commit_gate) = &mut self.commit_gate {
+            commit_gate.include_scope_path(&entry.path);
+        }
+        self.file_map.push(entry);
+        Ok(())
+    }
+
+    pub(crate) fn replace_amended_verification(
+        &mut self,
+        check_id: &CheckId,
+        command: Vec<String>,
+        cwd: String,
+        expected_exit_code: i32,
+        required: bool,
+    ) -> Result<(), DomainError> {
+        if self.status == TaskStatus::Draft {
+            return Err(self.invalid_transition("replace an amended verification check"));
+        }
+        self.verification_checks
+            .iter_mut()
+            .find(|check| check.id() == check_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no check {check_id}", self.id),
+                )
+            })?
+            .replace_definition(command, cwd, expected_exit_code, required)
+    }
+
+    pub(crate) fn add_implementation_note(&mut self, note: String) -> Result<(), DomainError> {
+        if self.status == TaskStatus::Draft {
+            return Err(self.invalid_transition("record an implementation note"));
+        }
+        if note.trim().is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!(
+                    "Task {} cannot contain an empty implementation note",
+                    self.id
+                ),
+            ));
+        }
+        self.implementation_notes.push(note);
+        Ok(())
+    }
+
+    pub(crate) fn reset_for_material_amendment(&mut self) {
+        for criterion in &mut self.acceptance_criteria {
+            criterion.reset_for_rework();
+        }
+        for check in &mut self.verification_checks {
+            check.reset_for_rework();
+        }
+        if let Some(commit_gate) = &mut self.commit_gate {
+            commit_gate.reset_for_material_amendment();
+        }
+        self.status = TaskStatus::Ready;
+        self.resume_status = None;
+        self.blocker = None;
+    }
+
     pub(crate) fn record_criterion_pass(
         &mut self,
         criterion_id: &CriterionId,
@@ -1082,6 +1230,7 @@ impl Task {
                 format!("Task {} contains an empty step", self.id),
             ));
         }
+        self.validate_implementation_notes()?;
         let file_paths = self
             .file_map
             .iter()
@@ -1152,6 +1301,21 @@ impl Task {
         }
         self.validate_completion_state()?;
         Ok(())
+    }
+
+    fn validate_implementation_notes(&self) -> Result<(), DomainError> {
+        if self
+            .implementation_notes
+            .iter()
+            .any(|note| note.trim().is_empty())
+        {
+            Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Task {} contains an empty implementation note", self.id),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     fn validate_completion_state(&self) -> Result<(), DomainError> {

@@ -1,5 +1,6 @@
 //! Canonical plan authoring command tree and application adapter.
 
+mod amend;
 mod review;
 
 use std::io::{self, IsTerminal};
@@ -39,6 +40,8 @@ pub(crate) enum PlanAction {
     Approve(review::ApproveArguments),
     /// Strictly apply authored fields from one YAML document.
     Apply(ApplyArguments),
+    /// Propose, approve, and apply typed protected changes after Draft.
+    Amend(amend::AmendArguments),
     /// Replace human plan metadata while Draft.
     Metadata(MetadataArguments),
     /// Replace the authored plan summary while Draft.
@@ -468,6 +471,7 @@ pub(crate) fn execute(
         PlanAction::Review(arguments) => review::execute_review(&service, &arguments),
         PlanAction::Approve(arguments) => review::execute_approve(&service, arguments),
         PlanAction::Apply(arguments) => execute_apply(&service, arguments),
+        PlanAction::Amend(arguments) => amend::execute(start, arguments),
         PlanAction::Metadata(arguments) => match arguments.action {
             MetadataAction::Set(arguments) => execute_metadata(&service, arguments),
         },

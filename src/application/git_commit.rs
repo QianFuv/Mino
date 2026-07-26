@@ -744,6 +744,7 @@ fn validate_common_plan_gate<'a>(
     task_id: &TaskId,
     allow_blocked_gate: bool,
 ) -> Result<&'a Task, MinoError> {
+    validate_no_pending_amendment(plan)?;
     if plan.status() != PlanStatus::InProgress {
         return Err(MinoError::new(
             ErrorCategory::PolicyViolation,
@@ -795,6 +796,32 @@ fn validate_common_plan_gate<'a>(
             format!("Task {task_id} commit gate is {:?}", gate.status()),
         ));
     }
+    validate_commit_order(plan, task_id, gate)?;
+    Ok(task)
+}
+
+fn validate_no_pending_amendment(plan: &Plan) -> Result<(), MinoError> {
+    if let Some(amendment) = plan.pending_amendment() {
+        return Err(MinoError::new(
+            if amendment.classification() == crate::domain::AmendmentClassification::Material {
+                ErrorCategory::ApprovalRequired
+            } else {
+                ErrorCategory::PolicyViolation
+            },
+            format!(
+                "Task commit cannot continue while amendment {} awaits apply",
+                amendment.id()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_commit_order(
+    plan: &Plan,
+    task_id: &TaskId,
+    gate: &crate::domain::CommitGate,
+) -> Result<(), MinoError> {
     let position = plan
         .task_order()
         .iter()
@@ -835,7 +862,7 @@ fn validate_common_plan_gate<'a>(
             ));
         }
     }
-    Ok(task)
+    Ok(())
 }
 
 fn validate_live_identity(root: &Path, plan: &Plan, facts: &GitFacts) -> Result<(), MinoError> {

@@ -2,6 +2,8 @@
 
 /// Stable machine context, next-action, capability, and active-plan service.
 pub mod agent;
+/// Typed protected-plan amendment proposal, approval, and application service.
+pub mod amendment;
 /// Plan finalization, review, show, and explicit approval service.
 pub mod approval;
 /// Evidence binding, File Map policy, and completion transitions.

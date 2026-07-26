@@ -106,7 +106,10 @@ impl ApprovalService {
         git_flow_consent: GitFlowConsent,
     ) -> Result<PlanOperationReport, MinoError> {
         let current = self.plans.load_verified(&request.plan_id)?;
-        is_replay_candidate(&current, &request)?;
+        if !is_replay_candidate(&current, &request)? {
+            let validation = validate_plan(self.plans.root(), &current)?;
+            require_valid(&validation)?;
+        }
         if git_flow_consent == GitFlowConsent::Approved
             && !current.git_readiness().git_flow_enabled()
         {

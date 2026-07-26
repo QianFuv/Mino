@@ -305,7 +305,7 @@ fn every_review_classification_selects_one_typed_action() {
         .expect("material review context should build");
     assert!(context.approval_required);
     assert!(context.next_actions.is_empty());
-    assert_eq!(context.allowed_actions, ["plan.show"]);
+    assert_eq!(context.allowed_actions, ["plan.show", "plan.amend.propose"]);
     assert!(
         context
             .blocked_actions

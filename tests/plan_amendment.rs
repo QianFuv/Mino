@@ -1,0 +1,738 @@
+//! Protected amendment classification, invalidation, rollback, and review contracts.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use mino::domain::{
+    AcceptanceCriterion, AmendmentClassification, AmendmentPatch, AmendmentStatus, Approval,
+    CheckId, CheckStatus, CheckpointKind, CommitGate, CriterionId, CriterionStatus, EvidenceId,
+    FileChange, FileMapEntry, GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId,
+    PlanStatus, ReviewClassification, ReviewStatus, StandardSelection, Task, TaskId, TaskStatus,
+    Timestamp, VerificationCheck,
+};
+use mino::project::initialize;
+use mino::store::{canonical_json_bytes, sha256_digest};
+use serde_json::json;
+
+static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+struct TestProject {
+    path: PathBuf,
+}
+
+impl TestProject {
+    fn new() -> Self {
+        let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "mino-plan-amendment-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).expect("temporary project should be created");
+        fs::write(
+            path.join("Cargo.toml"),
+            "[package]\nname = \"amendment-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .expect("fixture manifest should be written");
+        fs::create_dir(path.join("src")).expect("source directory should be created");
+        fs::write(path.join("src/lib.rs"), "pub fn fixture() -> u8 { 1 }\n")
+            .expect("fixture source should be written");
+        initialize(&path).expect("temporary project should initialize");
+        Self {
+            path: path.canonicalize().expect("project root should resolve"),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TestProject {
+    fn drop(&mut self) {
+        let temporary_root = std::env::temp_dir();
+        if self.path.starts_with(&temporary_root)
+            && self
+                .path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("mino-plan-amendment-"))
+        {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+fn timestamp(minute: u8) -> Timestamp {
+    Timestamp::parse(format!("2026-07-26T10:{minute:02}:00Z")).expect("timestamp should parse")
+}
+
+fn plan_id(label: &str) -> PlanId {
+    PlanId::parse(format!("2026-07-26-{label}")).expect("plan ID should parse")
+}
+
+fn task_id(value: &str) -> TaskId {
+    TaskId::parse(value).expect("task ID should parse")
+}
+
+fn check_id(value: &str) -> CheckId {
+    CheckId::parse(value).expect("check ID should parse")
+}
+
+fn criterion_id(value: &str) -> CriterionId {
+    CriterionId::parse(value).expect("criterion ID should parse")
+}
+
+fn evidence_id(number: u16) -> EvidenceId {
+    EvidenceId::parse(format!("E{number:04}")).expect("evidence ID should parse")
+}
+
+fn state_hash(plan: &Plan) -> String {
+    sha256_digest(&canonical_json_bytes(plan).expect("plan should canonicalize"))
+}
+
+fn patch(value: &serde_json::Value) -> AmendmentPatch {
+    serde_json::from_value(json!({ "operations": value })).expect("patch should parse")
+}
+
+fn fixture_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/drafts")
+        .join(name)
+}
+
+fn run_mino(arguments: &[String]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_mino"))
+        .args(arguments)
+        .stdin(Stdio::null())
+        .output()
+        .expect("Mino binary should run")
+}
+
+fn base_arguments(project: &TestProject) -> Vec<String> {
+    vec![
+        "--root".to_owned(),
+        project.path().to_string_lossy().into_owned(),
+        "--format".to_owned(),
+        "json".to_owned(),
+        "--no-input".to_owned(),
+    ]
+}
+
+fn request_id(number: u64) -> String {
+    format!("71000000-0000-0000-0000-{number:012}")
+}
+
+fn parse_success(output: &Output) -> serde_json::Value {
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty(), "JSON stderr should be empty");
+    serde_json::from_slice(&output.stdout).expect("stdout should be JSON")
+}
+
+fn mutation_arguments(
+    project: &TestProject,
+    command: &[&str],
+    plan_id: &str,
+    expected_revision: u64,
+    request_number: u64,
+) -> Vec<String> {
+    let mut arguments = base_arguments(project);
+    arguments.extend(command.iter().map(|part| (*part).to_owned()));
+    arguments.extend([
+        "--plan".to_owned(),
+        plan_id.to_owned(),
+        "--expect-revision".to_owned(),
+        expected_revision.to_string(),
+        "--request-id".to_owned(),
+        request_id(request_number),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+    ]);
+    arguments
+}
+
+fn create_approved_cli_plan(project: &TestProject) -> (String, u64) {
+    let request_file = project.path().join("request.md");
+    fs::write(
+        &request_file,
+        "Exercise the protected amendment protocol.\n",
+    )
+    .expect("request should be written");
+    let mut create = base_arguments(project);
+    create.extend([
+        "plan".to_owned(),
+        "create".to_owned(),
+        "--name".to_owned(),
+        "amendment-cli".to_owned(),
+        "--trigger".to_owned(),
+        "durable".to_owned(),
+        "--request-file".to_owned(),
+        request_file.to_string_lossy().into_owned(),
+        "--request-id".to_owned(),
+        request_id(1),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+    ]);
+    let created = parse_success(&run_mino(&create));
+    let plan_id = created["plan_id"]
+        .as_str()
+        .expect("create should return plan ID")
+        .to_owned();
+    let mut apply = mutation_arguments(project, &["plan", "apply"], &plan_id, 1, 2);
+    apply.extend([
+        "--file".to_owned(),
+        fixture_path("complete.yaml").to_string_lossy().into_owned(),
+    ]);
+    let applied = parse_success(&run_mino(&apply));
+    let finalize = mutation_arguments(
+        project,
+        &["plan", "finalize"],
+        &plan_id,
+        applied["revision"].as_u64().expect("revision should exist"),
+        3,
+    );
+    let finalized = parse_success(&run_mino(&finalize));
+    let mut approve = mutation_arguments(
+        project,
+        &["plan", "approve"],
+        &plan_id,
+        finalized["revision"]
+            .as_u64()
+            .expect("revision should exist"),
+        4,
+    );
+    approve.extend([
+        "--approval-ref".to_owned(),
+        "chat:cli-plan-approved".to_owned(),
+        "--git-flow-consent".to_owned(),
+        "disabled".to_owned(),
+    ]);
+    let approved = parse_success(&run_mino(&approve));
+    (
+        plan_id,
+        approved["revision"]
+            .as_u64()
+            .expect("revision should exist"),
+    )
+}
+
+fn configured_task(id: &str, dependency: Option<&str>) -> Task {
+    let id_value = task_id(id);
+    let mut task = Task::new(
+        id_value.clone(),
+        format!("Implement {id}"),
+        dependency.into_iter().map(task_id).collect(),
+    );
+    task.add_step(format!("Implement the {id} behavior"))
+        .expect("step should be added");
+    task.add_file_map_entry(FileMapEntry::new(
+        format!("src/{id}.rs"),
+        FileChange::Modify,
+        format!("Own {id}"),
+        id_value.clone(),
+    ))
+    .expect("file should be added");
+    task.add_acceptance_criterion(AcceptanceCriterion::new(
+        criterion_id(&format!("{id}-A1")),
+        format!("{id} behavior is observable"),
+    ))
+    .expect("criterion should be added");
+    task.add_verification_check(VerificationCheck::new(
+        check_id(&format!("{id}-V1")),
+        vec!["cargo".to_owned(), "test".to_owned()],
+        ".",
+        0,
+        true,
+    ))
+    .expect("check should be added");
+    task.set_commit_gate(CommitGate::new(
+        true,
+        format!("feat({}): implement behavior", id.to_ascii_lowercase()),
+        vec![format!("src/{id}.rs")],
+    ))
+    .expect("commit gate should be added");
+    task
+}
+
+fn approved_plan(label: &str, two_tasks: bool) -> Plan {
+    let mut plan = Plan::from_draft_seed(
+        PlanDraftSeed {
+            id: plan_id(label),
+            name: "Protected amendment".to_owned(),
+            trigger: "durable".to_owned(),
+            original_request: "Implement an approved behavior.".to_owned(),
+            branch: Some("main".to_owned()),
+            markdown_path: format!("docs/plan/2026-07-26-{label}.md"),
+            git_readiness: GitReadiness::detected(
+                "Present",
+                "Clean",
+                Some("main".to_owned()),
+                Some("1111111".to_owned()),
+                "Clean",
+                true,
+            ),
+            standards: Vec::<StandardSelection>::new(),
+            verification_plan: vec![VerificationCheck::new(
+                check_id("GLOBAL-V1"),
+                vec!["cargo".to_owned(), "test".to_owned()],
+                ".",
+                0,
+                true,
+            )],
+        },
+        timestamp(0),
+    );
+    plan.add_task(configured_task("T1", None), timestamp(1))
+        .expect("first task should be added");
+    if two_tasks {
+        plan.add_task(configured_task("T2", Some("T1")), timestamp(2))
+            .expect("second task should be added");
+    }
+    for (index, task) in plan.task_order().to_vec().iter().enumerate() {
+        let minute = 3 + u8::try_from(index).expect("fixture task count should fit u8");
+        plan.mark_task_ready(task, timestamp(minute))
+            .expect("task should become ready");
+    }
+    plan.finalize(timestamp(6)).expect("plan should finalize");
+    plan.record_approval(Approval::plan(
+        "user",
+        "chat:plan-approved",
+        timestamp(7),
+        GitFlowConsent::Approved,
+    ))
+    .expect("plan should be approved");
+    plan
+}
+
+fn start_and_satisfy_first_task(plan: &mut Plan) {
+    let task = task_id("T1");
+    plan.start_task(&task, timestamp(8))
+        .expect("task should start");
+    plan.record_checkpoint(
+        &task,
+        CheckpointKind::Implementation,
+        "Implemented the approved behavior",
+        "codex",
+        timestamp(9),
+    )
+    .expect("checkpoint should be recorded");
+    plan.record_task_criterion_pass(&task, &criterion_id("T1-A1"), evidence_id(1), timestamp(10))
+        .expect("criterion should pass");
+    plan.record_task_check_pass(&task, &check_id("T1-V1"), evidence_id(2), timestamp(11))
+        .expect("check should pass");
+}
+
+#[test]
+fn minor_amendment_invalidates_only_the_replaced_check_and_blocks_bypass() {
+    let mut plan = approved_plan("minor-amendment", false);
+    start_and_satisfy_first_task(&mut plan);
+    let base_revision = plan.revision();
+    let change_id = plan
+        .propose_amendment(
+            "Correct the exact verification executable".to_owned(),
+            patch(&json!([{
+                "operation": "replace-task-verification",
+                "task_id": "T1",
+                "check_id": "T1-V1",
+                "command": ["cargo", "test", "--lib"],
+                "cwd": ".",
+                "expected_exit_code": 0,
+                "required": true
+            }])),
+            Some(AmendmentClassification::Minor),
+            state_hash(&plan),
+            "codex".to_owned(),
+            timestamp(12),
+        )
+        .expect("Minor proposal should succeed");
+    assert_eq!(change_id, "C1");
+    assert_eq!(plan.revision(), base_revision + 1);
+    assert_eq!(plan.status(), PlanStatus::InProgress);
+    assert!(plan.has_pending_amendment());
+    assert!(
+        plan.record_checkpoint(
+            &task_id("T1"),
+            CheckpointKind::Verification,
+            "Attempted bypass",
+            "codex",
+            timestamp(13),
+        )
+        .is_err()
+    );
+
+    plan.apply_amendment("C1", timestamp(14))
+        .expect("Minor proposal should apply without approval");
+    let task = plan.task(&task_id("T1")).expect("task should exist");
+    assert_eq!(task.status(), TaskStatus::InProgress);
+    assert_eq!(
+        task.acceptance_criteria()[0].status(),
+        CriterionStatus::Passed
+    );
+    assert_eq!(task.verification_checks()[0].status(), CheckStatus::Pending);
+    assert_eq!(
+        task.verification_checks()[0].command(),
+        ["cargo", "test", "--lib"]
+    );
+    assert!(!plan.is_evidence_stale(&evidence_id(1)));
+    assert!(plan.is_evidence_stale(&evidence_id(2)));
+    assert!(plan.has_plan_approval());
+    assert_eq!(
+        plan.amendment("C1").expect("change should exist").status(),
+        AmendmentStatus::Applied
+    );
+}
+
+#[test]
+fn minor_file_and_note_allowlist_expands_only_the_task_local_contract() {
+    let mut plan = approved_plan("minor-file", false);
+    plan.propose_amendment(
+        "Add the required fixture and implementation rationale".to_owned(),
+        patch(&json!([
+            {
+                "operation": "add-task-file",
+                "kind": "Test Fixture",
+                "task_id": "T1",
+                "path": "tests/fixtures/T1.json",
+                "change": "Test",
+                "reason": "Provide the existing task fixture"
+            },
+            {
+                "operation": "add-implementation-note",
+                "task_id": "T1",
+                "note": "The fixture exercises the already approved behavior."
+            }
+        ])),
+        None,
+        state_hash(&plan),
+        "codex".to_owned(),
+        timestamp(8),
+    )
+    .expect("allowlisted proposal should succeed");
+    plan.apply_amendment("C1", timestamp(9))
+        .expect("allowlisted proposal should apply");
+
+    let task = plan.task(&task_id("T1")).expect("task should exist");
+    assert!(
+        task.file_map()
+            .iter()
+            .any(|entry| entry.path() == "tests/fixtures/T1.json")
+    );
+    assert_eq!(
+        task.implementation_notes(),
+        ["The fixture exercises the already approved behavior."]
+    );
+    assert!(
+        task.commit_gate()
+            .expect("gate should exist")
+            .scope()
+            .contains(&"tests/fixtures/T1.json".to_owned())
+    );
+    assert!(!plan.has_plan_approval());
+    assert_eq!(
+        plan.git_readiness().git_flow_consent(),
+        GitFlowConsent::Pending
+    );
+}
+
+#[test]
+fn verification_gate_weakening_is_contextually_material() {
+    let mut plan = approved_plan("verification-gate", false);
+    let weakening = patch(&json!([{
+        "operation": "replace-task-verification",
+        "task_id": "T1",
+        "check_id": "T1-V1",
+        "command": ["cargo", "test"],
+        "cwd": ".",
+        "expected_exit_code": 0,
+        "required": false
+    }]));
+    let before = canonical_json_bytes(&plan).expect("plan should canonicalize");
+    assert!(
+        plan.propose_amendment(
+            "Remove a required verification gate".to_owned(),
+            weakening.clone(),
+            Some(AmendmentClassification::Minor),
+            state_hash(&plan),
+            "codex".to_owned(),
+            timestamp(8),
+        )
+        .is_err()
+    );
+    assert_eq!(
+        canonical_json_bytes(&plan).expect("plan should canonicalize"),
+        before
+    );
+    plan.propose_amendment(
+        "Remove a required verification gate".to_owned(),
+        weakening,
+        None,
+        state_hash(&plan),
+        "codex".to_owned(),
+        timestamp(9),
+    )
+    .expect("contextual classifier should raise the proposal");
+    let amendment = plan.amendment("C1").expect("change should exist");
+    assert_eq!(
+        amendment.minimum_classification(),
+        AmendmentClassification::Material
+    );
+    assert_eq!(amendment.status(), AmendmentStatus::ApprovalRequired);
+}
+
+#[test]
+fn material_amendment_cannot_be_lowered_or_applied_without_approval() {
+    let mut plan = approved_plan("material-amendment", false);
+    start_and_satisfy_first_task(&mut plan);
+    let material_patch = patch(&json!([{
+        "operation": "replace-summary",
+        "summary": "Deliver the revised user-visible behavior."
+    }]));
+    let before = canonical_json_bytes(&plan).expect("plan should canonicalize");
+    assert!(
+        plan.propose_amendment(
+            "Change the promised behavior".to_owned(),
+            material_patch.clone(),
+            Some(AmendmentClassification::Minor),
+            state_hash(&plan),
+            "codex".to_owned(),
+            timestamp(12),
+        )
+        .is_err()
+    );
+    assert_eq!(
+        canonical_json_bytes(&plan).expect("plan should canonicalize"),
+        before
+    );
+
+    plan.propose_amendment(
+        "Change the promised behavior".to_owned(),
+        material_patch,
+        None,
+        state_hash(&plan),
+        "codex".to_owned(),
+        timestamp(13),
+    )
+    .expect("Material proposal should succeed");
+    assert_eq!(plan.status(), PlanStatus::Blocked);
+    assert_eq!(
+        plan.amendment("C1").expect("change should exist").status(),
+        AmendmentStatus::ApprovalRequired
+    );
+    assert!(plan.apply_amendment("C1", timestamp(14)).is_err());
+
+    plan.approve_amendment(
+        "C1",
+        "user".to_owned(),
+        "chat:material-approved".to_owned(),
+        timestamp(15),
+    )
+    .expect("Material approval should record");
+    plan.apply_amendment("C1", timestamp(16))
+        .expect("approved Material proposal should apply");
+    assert_eq!(plan.status(), PlanStatus::Ready);
+    assert_eq!(plan.summary(), "Deliver the revised user-visible behavior.");
+    assert!(!plan.has_plan_approval());
+    assert!(
+        plan.execution_state()
+            .expect("state should load")
+            .is_empty()
+    );
+    assert_eq!(
+        plan.task(&task_id("T1"))
+            .expect("task should exist")
+            .status(),
+        TaskStatus::Ready
+    );
+    assert!(plan.is_evidence_stale(&evidence_id(1)));
+    assert!(plan.is_evidence_stale(&evidence_id(2)));
+}
+
+#[test]
+fn material_apply_is_atomic_and_supersedes_review_only_after_success() {
+    let mut plan = approved_plan("material-rollback", true);
+    let invalid_order = patch(&json!([{
+        "operation": "replace-task-order",
+        "task_order": ["T2", "T1"]
+    }]));
+    plan.propose_amendment(
+        "Reverse the core task order".to_owned(),
+        invalid_order,
+        None,
+        state_hash(&plan),
+        "codex".to_owned(),
+        timestamp(8),
+    )
+    .expect("proposal classification should succeed");
+    plan.approve_amendment(
+        "C1",
+        "user".to_owned(),
+        "chat:order-approved".to_owned(),
+        timestamp(9),
+    )
+    .expect("approval should record");
+    let before_apply = canonical_json_bytes(&plan).expect("plan should canonicalize");
+    assert!(plan.apply_amendment("C1", timestamp(10)).is_err());
+    assert_eq!(
+        canonical_json_bytes(&plan).expect("plan should canonicalize"),
+        before_apply
+    );
+
+    let mut reviewed = approved_plan("material-review", false);
+    start_and_satisfy_first_task(&mut reviewed);
+    reviewed
+        .complete_task(&task_id("T1"), timestamp(12))
+        .expect("task should complete");
+    reviewed
+        .record_task_commit(
+            &task_id("T1"),
+            &"a".repeat(40),
+            vec!["src/T1.rs".to_owned()],
+            evidence_id(3),
+            timestamp(13),
+        )
+        .expect("commit should record");
+    reviewed
+        .record_global_check_pass(&check_id("GLOBAL-V1"), evidence_id(4), timestamp(14))
+        .expect("global check should pass");
+    reviewed
+        .finish_execution(timestamp(15))
+        .expect("plan should enter Review");
+    reviewed
+        .record_review(
+            "user".to_owned(),
+            "The public contract must change".to_owned(),
+            ReviewClassification::MaterialChange,
+            None,
+            timestamp(16),
+        )
+        .expect("material review should record");
+    reviewed
+        .propose_amendment(
+            "Apply the requested contract change".to_owned(),
+            patch(&json!([{
+                "operation": "replace-interfaces",
+                "interfaces": "Revised public interface contract"
+            }])),
+            Some(AmendmentClassification::Material),
+            state_hash(&reviewed),
+            "codex".to_owned(),
+            timestamp(17),
+        )
+        .expect("review-owned proposal should record");
+    reviewed
+        .approve_amendment(
+            "C1",
+            "user".to_owned(),
+            "chat:review-change-approved".to_owned(),
+            timestamp(18),
+        )
+        .expect("review amendment should be approved");
+    reviewed
+        .apply_amendment("C1", timestamp(19))
+        .expect("review amendment should apply");
+    let review = reviewed.review_item("REV-1").expect("review should exist");
+    assert_eq!(review.status(), ReviewStatus::Resolved);
+    assert_eq!(review.superseded_by_change(), Some("C1"));
+    assert_eq!(reviewed.status(), PlanStatus::Ready);
+    assert!(reviewed.is_evidence_stale(&evidence_id(3)));
+    assert!(reviewed.is_evidence_stale(&evidence_id(4)));
+}
+
+#[test]
+fn cli_amendment_is_strict_revision_checked_and_replayable() {
+    let project = TestProject::new();
+    let (plan_id, revision) = create_approved_cli_plan(&project);
+    let patch_file = project.path().join("minor-amendment.yaml");
+    fs::write(
+        &patch_file,
+        "operations:\n  - operation: add-implementation-note\n    task_id: T1\n    note: Preserve the approved behavior while documenting the implementation.\n",
+    )
+    .expect("amendment patch should be written");
+    let mut propose = mutation_arguments(
+        &project,
+        &["plan", "amend", "propose"],
+        &plan_id,
+        revision,
+        5,
+    );
+    propose.extend([
+        "--reason".to_owned(),
+        "Record the task-local implementation rationale".to_owned(),
+        "--patch-file".to_owned(),
+        patch_file.to_string_lossy().into_owned(),
+        "--classification".to_owned(),
+        "minor".to_owned(),
+    ]);
+    let proposed = parse_success(&run_mino(&propose));
+    assert_eq!(proposed["assigned_id"], "C1");
+    assert_eq!(proposed["replayed"], false);
+    assert_eq!(proposed["next_actions"][0]["id"], "plan.amend.apply");
+
+    let replayed = parse_success(&run_mino(&propose));
+    assert_eq!(replayed["replayed"], true);
+    assert_eq!(replayed["revision"], proposed["revision"]);
+
+    let apply = mutation_arguments(
+        &project,
+        &["plan", "amend", "apply"],
+        &plan_id,
+        proposed["revision"]
+            .as_u64()
+            .expect("proposal revision should exist"),
+        6,
+    );
+    let mut apply = apply;
+    apply.extend(["--change".to_owned(), "C1".to_owned()]);
+    let applied = parse_success(&run_mino(&apply));
+    assert_eq!(applied["status"], "Ready");
+
+    let mut show = base_arguments(&project);
+    show.extend([
+        "plan".to_owned(),
+        "show".to_owned(),
+        "--plan".to_owned(),
+        plan_id.clone(),
+    ]);
+    let current = parse_success(&run_mino(&show));
+    assert_eq!(current["amendments"][0]["status"], "Applied");
+    assert_eq!(
+        current["tasks"][0]["implementation_notes"][0],
+        "Preserve the approved behavior while documenting the implementation."
+    );
+    assert_eq!(current["approvals"], json!([]));
+
+    let invalid_patch = project.path().join("invalid-amendment.yaml");
+    fs::write(
+        &invalid_patch,
+        "operations:\n  - operation: add-implementation-note\n    task_id: T1\n    note: Invalid extra field.\n    status: Done\n",
+    )
+    .expect("invalid amendment patch should be written");
+    let mut invalid = mutation_arguments(
+        &project,
+        &["plan", "amend", "propose"],
+        &plan_id,
+        applied["revision"]
+            .as_u64()
+            .expect("apply revision should exist"),
+        7,
+    );
+    invalid.extend([
+        "--reason".to_owned(),
+        "Attempt an untyped state injection".to_owned(),
+        "--patch-file".to_owned(),
+        invalid_patch.to_string_lossy().into_owned(),
+    ]);
+    let rejected = run_mino(&invalid);
+    assert_eq!(rejected.status.code(), Some(2));
+    let after_rejection = parse_success(&run_mino(&show));
+    assert_eq!(after_rejection["revision"], applied["revision"]);
+    assert_eq!(
+        after_rejection["amendments"].as_array().map(Vec::len),
+        Some(1)
+    );
+}

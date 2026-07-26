@@ -39,6 +39,7 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
             "review",
             "approve",
             "apply",
+            "amend",
             "metadata",
             "summary",
             "context",
@@ -67,6 +68,10 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     ),
     (&["plan", "file", "--help"], &["add", "help"]),
     (&["plan", "verification", "--help"], &["add", "help"]),
+    (
+        &["plan", "amend", "--help"],
+        &["propose", "approve", "apply", "help"],
+    ),
     (
         &["standards", "--help"],
         &["detect", "recommend", "apply", "sync", "help"],
@@ -125,6 +130,9 @@ const LEAF_COMMANDS: &[&str] = &[
     "git commit",
     "git inspect",
     "plan apply",
+    "plan amend apply",
+    "plan amend approve",
+    "plan amend propose",
     "plan approve",
     "plan context add",
     "plan create",
@@ -285,7 +293,12 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             .filter(|action| action["approval_boundary"] == true)
             .map(|action| action["id"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["git.branch.create", "plan.approve", "review.accept"]
+        [
+            "git.branch.create",
+            "plan.amend.approve",
+            "plan.approve",
+            "review.accept"
+        ]
     );
 }
 

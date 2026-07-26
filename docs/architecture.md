@@ -185,6 +185,9 @@ stateDiagram-v2
     InProgress --> Review: exec finish after all task/global gates
     Review --> InProgress: review rework for acceptance defect or in-scope R task
     Review --> Blocked: review record material-change
+    Ready --> Blocked: propose Material amendment
+    InProgress --> Blocked: propose Material amendment
+    Blocked --> Ready: apply approved Material amendment
     Review --> Done: review accept after resolution and evidence validation
     Done --> [*]
 ```
@@ -207,6 +210,18 @@ Follow-Up records remain outside task order. Material Change records move the
 plan to a Review-owned Blocked state that generic `exec resume` cannot cross.
 `review resolve` revalidates live evidence after rework, and approval-gated
 `review accept` reaches Done only when every blocking item is resolved.
+
+Protected amendments are top-level immutable audit records with contiguous
+`C<n>` identifiers, typed operations, minimum/selected classification, exact
+base revision and canonical state hash, computed impact, approval declaration,
+and application timestamp. Only one proposal may be pending. Minor proposals
+leave Ready/In Progress in place but block execution, evidence, and Git until
+apply; Ready apply invalidates its plan approval. Material proposals own the
+Blocked state until explicit approval and apply. Material apply preserves the
+pre-change store snapshot, resets all task/check/commit gates to Ready/Pending,
+clears execution checkpoints and plan approval/Git consent, marks referenced
+evidence stale, supersedes affected review results, and requires full
+validation/reapproval before execution can restart.
 
 ## Revision, event, and recovery model
 

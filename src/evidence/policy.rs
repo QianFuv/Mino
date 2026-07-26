@@ -196,6 +196,12 @@ impl AddEvidenceRequest {
                 ),
             ));
         }
+        if let Some(amendment) = plan.pending_amendment() {
+            return Err(invalid(format!(
+                "Evidence cannot be added while amendment {} awaits apply",
+                amendment.id()
+            )));
+        }
         let task = match self.task_id() {
             Some(task_id) => Some(plan.task(task_id).ok_or_else(|| {
                 invalid(format!(

@@ -10,7 +10,12 @@
     "status": "Ready",
     "active_task": null
   },
-  "allowed_actions": ["plan.show", "plan.validate", "plan.review"],
+  "allowed_actions": [
+    "plan.show",
+    "plan.validate",
+    "plan.review",
+    "plan.amend.propose"
+  ],
   "blocked_actions": [
     {
       "action": "plan.approve",

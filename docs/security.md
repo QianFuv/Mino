@@ -16,6 +16,10 @@ Final review acceptance is a separate auditable declaration. `review accept`
 requires an explicit approval reference and cannot infer acceptance from clean
 checks, resolved feedback, or an earlier plan approval.
 
+Material amendment approval is also an auditable declaration rather than a
+cryptographic authorization token. `plan amend approve` must identify the exact
+pending `C<n>` proposal and carry a non-empty external approval reference.
+
 ## Filesystem boundaries
 
 - Project roots are canonicalized and discovered deterministically. Managed
@@ -78,7 +82,10 @@ evidence before sharing `.mino` or derived reports.
 Evidence is immutable. Corrections create a new record linked by `supersedes`.
 A superseded record cannot satisfy current completion gates. AcceptedException
 evidence must carry the approval-compatible binding required by policy; it is
-not a general bypass.
+not a general bypass. Applied amendments retain affected records but mark their
+identifiers stale; stale evidence cannot prove a current criterion, check, or
+commit gate. Pending proposals reject new evidence so it cannot be captured
+against ambiguous inputs.
 
 ## Network behavior
 
@@ -158,6 +165,8 @@ Agent consumers must use JSON/no-input mode and inspect `approval_required`,
   and supplied the recorded approval reference.
 - `review.accept`, unless the user explicitly accepted the fully resolved
   current Review revision and supplied an auditable reference.
+- `plan.amend.approve`, unless the user explicitly approved the exact pending
+  Material `C<n>` proposal and supplied an auditable reference.
 - An approval, exception, or Git operation not already covered by explicit user
   and repository policy. A returned `git.commit` action is covered only by the
   current plan's Approved Git Flow gate; branch creation still needs its own
@@ -168,6 +177,8 @@ Agent consumers must use JSON/no-input mode and inspect `approval_required`,
   commit scope.
 - Material review feedback, because it requires a protected amendment and
   cannot be resumed through the generic execution command.
+- Any pending amendment: execute only its advertised approve/apply boundary;
+  do not run checks, add evidence, commit, or resume around it.
 
 Never approve on the user's behalf, infer authorization from conversational
 tone, copy the protocol template as a fallback, or fabricate plan/evidence

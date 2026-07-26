@@ -8,8 +8,9 @@ use crate::application::plan::{
     PlanService, derived_request_id, draft_missing, draft_next_actions,
 };
 use crate::domain::{
-    CURRENT_PROTOCOL_REVISION, CURRENT_PROTOCOL_VERSION, CheckId, CheckStatus, Plan, PlanId,
-    PlanStatus, ReviewClassification, ReviewStatus, TaskId, TaskStatus,
+    AmendmentClassification, AmendmentStatus, CURRENT_PROTOCOL_REVISION, CURRENT_PROTOCOL_VERSION,
+    CheckId, CheckStatus, Plan, PlanId, PlanStatus, ReviewClassification, ReviewStatus, TaskId,
+    TaskStatus,
 };
 use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitHeadState};
 use crate::validation::validate_plan;
@@ -42,6 +43,9 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("git.branch.propose", false, false),
     ("git.commit", false, false),
     ("git.inspect", false, false),
+    ("plan.amend.apply", true, false),
+    ("plan.amend.approve", true, true),
+    ("plan.amend.propose", true, false),
     ("plan.apply", true, false),
     ("plan.approve", true, true),
     ("plan.context.add", true, false),
@@ -401,6 +405,9 @@ struct Guidance {
 }
 
 fn guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
+    if plan.has_pending_amendment() {
+        return Ok(pending_amendment_guidance(plan));
+    }
     match plan.status() {
         PlanStatus::Draft => draft_guidance(root, plan),
         PlanStatus::Ready => Ok(ready_guidance(plan)),
@@ -429,7 +436,7 @@ fn guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
 
 fn material_review_blocked_guidance() -> Guidance {
     Guidance {
-        allowed_actions: action_ids(&["plan.show"]),
+        allowed_actions: action_ids(&["plan.show", "plan.amend.propose"]),
         blocked_actions: vec![
             blocked(
                 "exec.resume",
@@ -439,6 +446,54 @@ fn material_review_blocked_guidance() -> Guidance {
         ],
         approval_required: true,
         next_actions: Vec::new(),
+    }
+}
+
+fn pending_amendment_guidance(plan: &Plan) -> Guidance {
+    let amendment = plan
+        .pending_amendment()
+        .expect("caller established a pending amendment");
+    let blocked_actions = vec![
+        blocked(
+            "exec.start",
+            "The pending protected amendment must be applied first",
+        ),
+        blocked(
+            "evidence.add",
+            "Evidence cannot be captured against unapplied plan inputs",
+        ),
+        blocked(
+            "git.commit",
+            "Git commits cannot cross an unapplied plan change",
+        ),
+    ];
+    match (amendment.classification(), amendment.status()) {
+        (AmendmentClassification::Material, AmendmentStatus::ApprovalRequired) => Guidance {
+            allowed_actions: action_ids(&["plan.show"]),
+            blocked_actions: [
+                blocked_actions,
+                vec![blocked(
+                    "plan.amend.apply",
+                    "Material amendments require explicit approval before apply",
+                )],
+            ]
+            .concat(),
+            approval_required: true,
+            next_actions: Vec::new(),
+        },
+        (AmendmentClassification::Material, AmendmentStatus::Approved)
+        | (AmendmentClassification::Minor, AmendmentStatus::Proposed) => Guidance {
+            allowed_actions: action_ids(&["plan.show", "plan.amend.apply"]),
+            blocked_actions,
+            approval_required: false,
+            next_actions: vec![amendment_apply_action(plan, amendment.id())],
+        },
+        _ => Guidance {
+            allowed_actions: action_ids(&["plan.show"]),
+            blocked_actions,
+            approval_required: true,
+            next_actions: Vec::new(),
+        },
     }
 }
 
@@ -569,7 +624,12 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
 fn ready_guidance(plan: &Plan) -> Guidance {
     if !plan.has_plan_approval() {
         return Guidance {
-            allowed_actions: action_ids(&["plan.show", "plan.validate", "plan.review"]),
+            allowed_actions: action_ids(&[
+                "plan.show",
+                "plan.validate",
+                "plan.review",
+                "plan.amend.propose",
+            ]),
             blocked_actions: vec![
                 blocked(
                     "plan.approve",
@@ -588,7 +648,13 @@ fn ready_guidance(plan: &Plan) -> Guidance {
         .map(|task_id| vec![start_action(plan, task_id)])
         .unwrap_or_default();
     Guidance {
-        allowed_actions: action_ids(&["plan.show", "plan.validate", "plan.review", "exec.start"]),
+        allowed_actions: action_ids(&[
+            "plan.show",
+            "plan.validate",
+            "plan.review",
+            "plan.amend.propose",
+            "exec.start",
+        ]),
         blocked_actions: vec![blocked(
             "git.commit",
             "No task has completed its verification and commit gate",
@@ -604,7 +670,7 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
         .iter()
         .find(|task| task.status() == TaskStatus::InProgress);
     let can_commit = pending_commit_task(plan).is_some();
-    let (allowed_actions, next_actions) = if let Some(task) = active {
+    let (mut allowed_actions, next_actions) = if let Some(task) = active {
         let next_actions = next_execution_check(plan).map_or_else(
             || {
                 if task.acceptance_criteria().iter().any(|criterion| {
@@ -652,6 +718,7 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
             vec![finish_action(plan)],
         )
     };
+    allowed_actions.push("plan.amend.propose".to_owned());
     Guidance {
         allowed_actions,
         blocked_actions: if can_commit {
@@ -730,6 +797,15 @@ fn complete_action(plan: &Plan, task_id: &TaskId) -> NextAction {
 
 fn finish_action(plan: &Plan) -> NextAction {
     mutation_action(plan, "exec.finish", &["exec", "finish"], Vec::new())
+}
+
+fn amendment_apply_action(plan: &Plan, change_id: &str) -> NextAction {
+    mutation_action(
+        plan,
+        "plan.amend.apply",
+        &["plan", "amend", "apply"],
+        vec!["--change".to_owned(), change_id.to_owned()],
+    )
 }
 
 fn review_item_action(plan: &Plan, id: &str, command: &str, review_id: &str) -> NextAction {
