@@ -8,6 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::fs::symlink_dir;
+
 use mino::domain::{
     CheckId, CheckRunContext, CheckRunLease, CheckRunLimits, CheckRunOutcome, PlanId, RequestId,
     TaskId, Timestamp, VerificationCheck,
@@ -131,6 +136,52 @@ fn redactor() -> Redactor {
     .expect("redaction policy should compile")
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn run_journal_rejects_a_symlinked_managed_directory() {
+    let project = TestProject::new("journal-symlink");
+    let external = TestProject::new("journal-symlink-external");
+    fs::create_dir(project.path().join(".mino")).expect("Mino directory should be created");
+    let sentinel = external.path().join("sentinel.txt");
+    fs::write(&sentinel, b"outside\n").expect("outside sentinel should be written");
+    #[cfg(unix)]
+    let symlink_result = symlink(external.path(), project.path().join(".mino/runs"));
+    #[cfg(windows)]
+    let symlink_result = symlink_dir(external.path(), project.path().join(".mino/runs"));
+    if symlink_result
+        .as_ref()
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+    {
+        return;
+    }
+    symlink_result.expect("run journal symlink should be created");
+    let environment = RunEnvironment::empty();
+    let redactor = redactor();
+    let run = lease(
+        90,
+        &fixture_check(),
+        limits(1_000, 1_024),
+        &environment,
+        &redactor,
+    );
+
+    let error = CheckRunJournal::new(project.path(), Path::new(".mino/runs"))
+        .expect("journal root should validate lexically")
+        .begin(&run)
+        .expect_err("symlinked run journal directory must be rejected");
+    assert_eq!(error.kind(), RunnerErrorKind::CorruptJournal);
+    assert_eq!(
+        fs::read(&sentinel).expect("outside sentinel should remain readable"),
+        b"outside\n"
+    );
+    assert_eq!(
+        fs::read_dir(external.path())
+            .expect("outside directory should remain readable")
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn runner_fixture_process() {
     let Ok(mode) = std::env::var("MINO_RUNNER_FIXTURE") else {
@@ -200,7 +251,8 @@ fn runner_fixture_process() {
 #[test]
 fn planned_process_outcomes_are_bounded_and_redacted() {
     let project = TestProject::new("outcomes");
-    let journal = CheckRunJournal::new(project.path().join(".mino").join("runs"));
+    let journal = CheckRunJournal::new(project.path(), Path::new(".mino/runs"))
+        .expect("journal should be valid");
     let runner = ProcessRunner::new(Duration::from_millis(5)).expect("runner should be valid");
     let redactor = redactor();
     let check = fixture_check();
@@ -265,7 +317,8 @@ fn planned_process_outcomes_are_bounded_and_redacted() {
 #[test]
 fn timeout_terminates_descendants_before_they_can_escape() {
     let project = TestProject::new("tree");
-    let journal = CheckRunJournal::new(project.path().join(".mino").join("runs"));
+    let journal = CheckRunJournal::new(project.path(), Path::new(".mino/runs"))
+        .expect("journal should be valid");
     let runner = ProcessRunner::new(Duration::from_millis(5)).expect("runner should be valid");
     let redactor = redactor();
     for (index, mode) in ["child", "leader-exit"].into_iter().enumerate() {
@@ -295,7 +348,8 @@ fn timeout_terminates_descendants_before_they_can_escape() {
 fn request_retries_replay_and_incomplete_leases_close_once() {
     let project = TestProject::new("recovery");
     let marker = project.path().join("execution-count");
-    let journal = CheckRunJournal::new(project.path().join(".mino").join("runs"));
+    let journal = CheckRunJournal::new(project.path(), Path::new(".mino/runs"))
+        .expect("journal should be valid");
     let runner = ProcessRunner::default();
     let redactor = redactor();
     let environment = fixture_environment("replay", Some(&marker));
@@ -431,7 +485,8 @@ fn runner_rejects_shells_traversal_and_conflicting_retries() {
         .expect_err("parent traversal must be rejected");
     assert_eq!(traversal_error.kind(), RunnerErrorKind::InvalidRequest);
 
-    let journal = CheckRunJournal::new(project.path().join(".mino").join("runs"));
+    let journal = CheckRunJournal::new(project.path(), Path::new(".mino/runs"))
+        .expect("journal should be valid");
     let first = lease(
         42,
         &fixture_check(),

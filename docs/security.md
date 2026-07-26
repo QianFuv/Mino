@@ -52,6 +52,8 @@ Mino 会 canonicalize 项目根，并要求受管路径留在根目录内。需�
 
 计划事务、快照、事件、run journal、evidence record 与 blob 分别使用 create-new、guarded replacement、bounded lock、canonical bytes 和 digest check。`.gitignore` 对 `/.mino/` 与 `/docs/plan/` 的忽略不构成访问控制或加密；其中可能包含需求文本、路径、命令摘要、环境摘要和附件，分享前必须按敏感仓库数据处理。
 
+Evidence 的 `records`/`blobs`、检查的 `runs`、monitor summary、active binding、Git branch/commit journal 以及 standards cache generation 均使用同一个 capability-rooted 文件系统入口。任一中间目录或最终目标被替换成 symlink/junction 或错误类型时，操作在发布外部 blob、summary、journal、cache 或 lock 之前失败；已有外部字节不会被读取为受管状态或被替换。
+
 ### 集成与导入
 
 - Skill 和 marker block 更新会拒绝 symlink component、non-file target、unowned bytes 与 malformed/duplicate markers；合法更新只替换 owned bytes。

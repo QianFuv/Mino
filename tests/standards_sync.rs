@@ -12,6 +12,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::fs::symlink_dir;
+
 use mino::project::{ProjectConfig, ProjectLayout, StandardsLock, initialize};
 use mino::standards::{SourcePolicy, SyncLimits, SyncOptions, synchronize_all_with_options};
 use mino::store::sha256_digest;
@@ -345,6 +350,19 @@ fn default_local_options() -> SyncOptions {
     local_options(SyncLimits::default())
 }
 
+#[cfg(any(unix, windows))]
+fn create_directory_symlink(target: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    let result = symlink(target, link);
+    #[cfg(windows)]
+    let result = symlink_dir(target, link);
+    match result {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
+        Err(error) => panic!("standards cache symlink should be created: {error}"),
+    }
+}
+
 fn read_lock(layout: &ProjectLayout) -> StandardsLock {
     toml::from_str(
         &fs::read_to_string(layout.standards_lock()).expect("standards lock should be readable"),
@@ -454,6 +472,47 @@ fn valid_catalog_installs_every_package_and_reuses_exact_generation() {
         .collect::<Result<Vec<_>, _>>()
         .expect("generation entries should be readable");
     assert_eq!(generation_entries.len(), 1);
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn synchronization_rejects_symlinked_cache_ancestors() {
+    for relative in [".mino/cache", ".mino/cache/standards/generations"] {
+        let project = TestProject::new(&format!("symlink-{}", relative.replace('/', "-")));
+        let external = TestProject::new("symlink-external");
+        let packages = vec![PackageFixture::new("rust", Some("rust"), 1)];
+        let server = TestServer::new(|base_url| fixture_routes(base_url, &packages));
+        project.configure_catalog(Some(&server.url("/catalog.toml")));
+        let lock_before =
+            fs::read(project.layout.standards_lock()).expect("standards lock should be readable");
+        let link = project.path.join(relative);
+        if link.exists() {
+            fs::remove_dir_all(&link).expect("fixture cache directory should be removed");
+        }
+        if let Some(parent) = link.parent() {
+            fs::create_dir_all(parent).expect("cache parent should be created");
+        }
+        let sentinel = external.path.join("sentinel.txt");
+        fs::write(&sentinel, b"outside\n").expect("outside sentinel should be written");
+        if !create_directory_symlink(external.path(), &link) {
+            continue;
+        }
+
+        let error = synchronize_all_with_options(project.path(), default_local_options())
+            .expect_err("symlinked standards cache must be rejected");
+        assert_eq!(error.category(), ErrorCategory::DriftDetected);
+        assert_eq!(
+            fs::read(project.layout.standards_lock())
+                .expect("standards lock should remain readable"),
+            lock_before
+        );
+        assert_eq!(
+            fs::read(&sentinel).expect("outside sentinel should remain readable"),
+            b"outside\n"
+        );
+        assert!(!external.path.join("standards").exists());
+        assert!(!external.path.join("catalog.toml").exists());
+    }
 }
 
 #[test]

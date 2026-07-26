@@ -1,8 +1,5 @@
 //! Branch-name validation, hook-disabled creation, and immutable intent journals.
 
-#[cfg(unix)]
-use std::fs::File;
-use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +11,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{PlanId, Timestamp};
+use crate::managed_fs::{ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs};
 
 use super::command::{run_mutating, run_read_only};
 use super::{GitError, GitErrorKind};
@@ -178,25 +176,33 @@ impl GitBranchJournalStore {
     /// Returns an invalid-output or environment error for malformed,
     /// unsupported, oversized, or unreadable journal state.
     pub fn load(&self, plan_id: &PlanId) -> Result<Option<GitBranchJournal>, GitError> {
-        let intent_path = self.intent_path(plan_id);
-        let completion_path = self.completion_path(plan_id);
-        if !intent_path.exists() {
-            if completion_path.exists() {
+        let filesystem = self.filesystem()?;
+        let intent_path = Self::intent_managed(plan_id);
+        let completion_path = Self::completion_managed(plan_id);
+        if !filesystem.exists(&intent_path).map_err(managed_git_error)? {
+            if filesystem
+                .exists(&completion_path)
+                .map_err(managed_git_error)?
+            {
                 return Err(invalid(
                     "Branch completion exists without a prepared intent",
                 ));
             }
             return Ok(None);
         }
-        let intent: GitBranchIntent = read_json(&intent_path)?;
+        let intent: GitBranchIntent = read_json(&filesystem, &intent_path)?;
         validate_intent(&intent)?;
         if &intent.plan_id != plan_id {
             return Err(invalid("Branch intent path and plan identity disagree"));
         }
-        let completion = completion_path
-            .exists()
-            .then(|| read_json(&completion_path))
-            .transpose()?;
+        let completion = if filesystem
+            .exists(&completion_path)
+            .map_err(managed_git_error)?
+        {
+            Some(read_json(&filesystem, &completion_path)?)
+        } else {
+            None
+        };
         if let Some(completion) = &completion {
             validate_completion(&intent, completion)?;
         }
@@ -210,17 +216,25 @@ impl GitBranchJournalStore {
     /// Returns an unavailable error for an uninitialized project, unsafe
     /// directory state, lock I/O failure, or lock timeout.
     pub fn lock(&self) -> Result<GitBranchJournalLock, GitError> {
-        let mino_directory = self.project_root.join(".mino");
-        if !mino_directory.is_dir() {
+        let filesystem = self.filesystem()?;
+        let mino_directory = managed_path(".mino");
+        if !filesystem
+            .is_directory(&mino_directory)
+            .map_err(managed_git_error)?
+        {
             return Err(unavailable(format!(
                 "Mino state directory {} is missing",
-                mino_directory.display()
+                filesystem.display_path(&mino_directory).display()
             )));
         }
-        let git_directory = mino_directory.join("git");
-        fs::create_dir_all(&git_directory)
-            .map_err(|error| path_error("create", &git_directory, &error))?;
-        GitBranchJournalLock::acquire(&git_directory.join("branch.lock"))
+        let git_directory = mino_directory.join("git").map_err(managed_git_error)?;
+        filesystem
+            .ensure_directory(&git_directory)
+            .map_err(managed_git_error)?;
+        let lock_path = git_directory
+            .join("branch.lock")
+            .map_err(managed_git_error)?;
+        GitBranchJournalLock::acquire(&filesystem, &lock_path)
     }
 
     /// Publishes a new intent or replays the semantically identical intent.
@@ -230,6 +244,7 @@ impl GitBranchJournalStore {
     /// Returns a policy error when a different operation already owns the
     /// plan journal, or an environment error when publication fails.
     pub fn prepare(&self, candidate: GitBranchIntent) -> Result<GitBranchIntent, GitError> {
+        let filesystem = self.filesystem()?;
         validate_intent(&candidate)?;
         if let Some(existing) = self.load(&candidate.plan_id)? {
             if same_intent(&existing.intent, &candidate) {
@@ -243,9 +258,15 @@ impl GitBranchJournalStore {
                 ),
             ));
         }
-        let directory = self.operation_directory(&candidate.plan_id);
-        fs::create_dir_all(&directory).map_err(|error| path_error("create", &directory, &error))?;
-        write_new_json(&self.intent_path(&candidate.plan_id), &candidate)?;
+        let directory = Self::operation_managed(&candidate.plan_id);
+        filesystem
+            .ensure_directory(&directory)
+            .map_err(managed_git_error)?;
+        write_new_json(
+            &filesystem,
+            &Self::intent_managed(&candidate.plan_id),
+            &candidate,
+        )?;
         Ok(candidate)
     }
 
@@ -260,6 +281,7 @@ impl GitBranchJournalStore {
         intent: &GitBranchIntent,
         candidate: GitBranchCompletion,
     ) -> Result<GitBranchCompletion, GitError> {
+        let filesystem = self.filesystem()?;
         validate_completion(intent, &candidate)?;
         let journal = self
             .load(&intent.plan_id)?
@@ -277,7 +299,11 @@ impl GitBranchJournalStore {
                 "Stored branch completion conflicts with observed result",
             ));
         }
-        write_new_json(&self.completion_path(&intent.plan_id), &candidate)?;
+        write_new_json(
+            &filesystem,
+            &Self::completion_managed(&intent.plan_id),
+            &candidate,
+        )?;
         Ok(candidate)
     }
 
@@ -285,6 +311,27 @@ impl GitBranchJournalStore {
         self.project_root
             .join(".mino/git/branches")
             .join(plan_id.as_str())
+    }
+
+    fn operation_managed(plan_id: &PlanId) -> ManagedPath {
+        ManagedPath::new(PathBuf::from(".mino/git/branches").join(plan_id.as_str()))
+            .expect("validated plan ID should form a managed branch journal path")
+    }
+
+    fn intent_managed(plan_id: &PlanId) -> ManagedPath {
+        Self::operation_managed(plan_id)
+            .join("intent.json")
+            .expect("static branch intent name should form a managed path")
+    }
+
+    fn completion_managed(plan_id: &PlanId) -> ManagedPath {
+        Self::operation_managed(plan_id)
+            .join("completion.json")
+            .expect("static branch completion name should form a managed path")
+    }
+
+    fn filesystem(&self) -> Result<ProjectFs, GitError> {
+        ProjectFs::open(&self.project_root).map_err(managed_git_error)
     }
 }
 
@@ -295,14 +342,8 @@ pub struct GitBranchJournalLock {
 }
 
 impl GitBranchJournalLock {
-    fn acquire(path: &Path) -> Result<Self, GitError> {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .map_err(|error| path_error("open branch lock", path, &error))?;
+    fn acquire(filesystem: &ProjectFs, path: &ManagedPath) -> Result<Self, GitError> {
+        let file = filesystem.open_lock_file(path).map_err(managed_git_error)?;
         let started_at = Instant::now();
         loop {
             match FileExt::try_lock(&file) {
@@ -313,11 +354,15 @@ impl GitBranchJournalLock {
                 Err(TryLockError::WouldBlock) => {
                     return Err(unavailable(format!(
                         "Timed out acquiring branch-operation lock {}",
-                        path.display()
+                        filesystem.display_path(path).display()
                     )));
                 }
                 Err(TryLockError::Error(error)) => {
-                    return Err(path_error("lock branch operation", path, &error));
+                    return Err(path_error(
+                        "lock branch operation",
+                        &filesystem.display_path(path),
+                        &error,
+                    ));
                 }
             }
         }
@@ -504,24 +549,32 @@ fn valid_approval_reference(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, GitError> {
-    let metadata = fs::metadata(path).map_err(|error| path_error("inspect", path, &error))?;
-    if metadata.len() == 0 || metadata.len() > MAX_BRANCH_JOURNAL_BYTES {
+fn read_json<T: DeserializeOwned>(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+) -> Result<T, GitError> {
+    let bytes = filesystem
+        .read_bounded(path, MAX_BRANCH_JOURNAL_BYTES)
+        .map_err(managed_git_error)?;
+    if bytes.is_empty() {
         return Err(invalid(format!(
             "Branch journal {} has an invalid size",
-            path.display()
+            filesystem.display_path(path).display()
         )));
     }
-    let bytes = fs::read(path).map_err(|error| path_error("read", path, &error))?;
     serde_json::from_slice(&bytes).map_err(|error| {
         invalid(format!(
             "Failed to parse branch journal {}: {error}",
-            path.display()
+            filesystem.display_path(path).display()
         ))
     })
 }
 
-fn write_new_json(path: &Path, value: &impl Serialize) -> Result<(), GitError> {
+fn write_new_json(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    value: &impl Serialize,
+) -> Result<(), GitError> {
     let mut bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| invalid(format!("Failed to encode branch journal: {error}")))?;
     bytes.push(b'\n');
@@ -529,25 +582,29 @@ fn write_new_json(path: &Path, value: &impl Serialize) -> Result<(), GitError> {
         .parent()
         .ok_or_else(|| invalid("Branch journal path has no parent directory"))?;
     let sequence = NEXT_BRANCH_FILE.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".mino-branch-{}-{sequence}.tmp",
-        std::process::id()
-    ));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|error| path_error("create", &temporary, &error))?;
+    let temporary = parent
+        .join(format!(
+            ".mino-branch-{}-{sequence}.tmp",
+            std::process::id()
+        ))
+        .map_err(managed_git_error)?;
+    let mut file = filesystem
+        .create_new_file(&temporary)
+        .map_err(managed_git_error)?;
     if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
-        let _ = fs::remove_file(&temporary);
-        return Err(path_error("write", &temporary, &error));
+        let _ = filesystem.remove_file_if_exists(&temporary);
+        return Err(path_error(
+            "write",
+            &filesystem.display_path(&temporary),
+            &error,
+        ));
     }
     drop(file);
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(path_error("publish", path, &error));
+    if let Err(error) = filesystem.rename(&temporary, path) {
+        let _ = filesystem.remove_file_if_exists(&temporary);
+        return Err(managed_git_error(error));
     }
-    sync_directory(parent)
+    filesystem.sync_parent(path).map_err(managed_git_error)
 }
 
 fn is_object_id(value: &str) -> bool {
@@ -570,16 +627,16 @@ fn path_error(action: &str, path: &Path, error: &std::io::Error) -> GitError {
     unavailable(format!("Failed to {action} {}: {error}", path.display()))
 }
 
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), GitError> {
-    File::open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| path_error("synchronize directory", path, &error))
+fn managed_path(path: &str) -> ManagedPath {
+    ManagedPath::new(path).expect("static Git journal path should be valid")
 }
 
-#[cfg(not(unix))]
-fn sync_directory(path: &Path) -> Result<(), GitError> {
-    fs::metadata(path)
-        .map(|_| ())
-        .map_err(|error| path_error("inspect directory", path, &error))
+fn managed_git_error(error: ManagedFsError) -> GitError {
+    let kind = match error.kind() {
+        ManagedFsErrorKind::InvalidPath | ManagedFsErrorKind::UnsafeComponent => {
+            GitErrorKind::InvalidOutput
+        }
+        ManagedFsErrorKind::Io => GitErrorKind::Unavailable,
+    };
+    GitError::new(kind, error.into_message())
 }

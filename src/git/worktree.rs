@@ -1,8 +1,5 @@
 //! Worktree-aware active-plan binding storage and stale-identity detection.
 
-#[cfg(unix)]
-use std::fs::File;
-use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +10,7 @@ use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{PlanId, Timestamp};
+use crate::managed_fs::{ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs};
 
 use super::{GitError, GitErrorKind, GitFacts};
 
@@ -145,19 +143,26 @@ impl ActiveBindingStore {
         plan_revision: u64,
         bound_at: Timestamp,
     ) -> Result<ActiveBindingWriteReport, GitError> {
+        let filesystem = self.filesystem()?;
         let candidate = binding_from_facts(facts, plan_id, plan_revision, bound_at)?;
-        let mino_directory = self.project_root.join(".mino");
-        if !mino_directory.is_dir() {
+        let mino_directory = managed_path(".mino");
+        if !filesystem
+            .is_directory(&mino_directory)
+            .map_err(managed_git_error)?
+        {
             return Err(GitError::new(
                 GitErrorKind::Unavailable,
                 format!(
                     "Mino state directory {} is missing",
-                    mino_directory.display()
+                    filesystem.display_path(&mino_directory).display()
                 ),
             ));
         }
-        let _lock = BindingLock::acquire(&mino_directory.join("active.lock"))?;
-        let mut file = self.load()?.unwrap_or_default();
+        let lock_path = mino_directory
+            .join("active.lock")
+            .map_err(managed_git_error)?;
+        let _lock = BindingLock::acquire(&filesystem, &lock_path)?;
+        let mut file = Self::load_with(&filesystem)?.unwrap_or_default();
         if let Some(existing) = file
             .bindings
             .iter()
@@ -174,7 +179,7 @@ impl ActiveBindingStore {
         file.bindings.push(candidate.clone());
         file.bindings.sort_by(binding_order);
         validate_file(&file)?;
-        publish_file(&self.path(), &file)?;
+        publish_file(&filesystem, &managed_path(".mino/active.json"), &file)?;
         Ok(ActiveBindingWriteReport {
             binding: candidate,
             replayed: false,
@@ -182,22 +187,31 @@ impl ActiveBindingStore {
     }
 
     fn load(&self) -> Result<Option<ActiveBindingsFile>, GitError> {
-        let path = self.path();
-        if !path.exists() {
+        let filesystem = self.filesystem()?;
+        Self::load_with(&filesystem)
+    }
+
+    fn load_with(filesystem: &ProjectFs) -> Result<Option<ActiveBindingsFile>, GitError> {
+        let path = managed_path(".mino/active.json");
+        if !filesystem.exists(&path).map_err(managed_git_error)? {
             return Ok(None);
         }
-        let bytes = fs::read(&path).map_err(|error| path_error("read", &path, &error))?;
+        let bytes = filesystem.read(&path).map_err(managed_git_error)?;
         let file: ActiveBindingsFile = serde_json::from_slice(&bytes).map_err(|error| {
             GitError::new(
                 GitErrorKind::InvalidOutput,
                 format!(
                     "Failed to parse active bindings {}: {error}",
-                    path.display()
+                    filesystem.display_path(&path).display()
                 ),
             )
         })?;
         validate_file(&file)?;
         Ok(Some(file))
+    }
+
+    fn filesystem(&self) -> Result<ProjectFs, GitError> {
+        ProjectFs::open(&self.project_root).map_err(managed_git_error)
     }
 }
 
@@ -349,7 +363,11 @@ fn binding_key(binding: &ActivePlanBinding) -> (&str, &str, Option<&str>, Option
     )
 }
 
-fn publish_file(path: &Path, file: &ActiveBindingsFile) -> Result<(), GitError> {
+fn publish_file(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    file: &ActiveBindingsFile,
+) -> Result<(), GitError> {
     let mut bytes = serde_json::to_vec_pretty(file).map_err(|error| {
         GitError::new(
             GitErrorKind::InvalidOutput,
@@ -361,47 +379,57 @@ fn publish_file(path: &Path, file: &ActiveBindingsFile) -> Result<(), GitError> 
         .parent()
         .ok_or_else(|| invalid("Active binding path has no parent directory"))?;
     let sequence = NEXT_BINDING_FILE.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".active.json.mino-bind-{}-{sequence}.tmp",
-        std::process::id()
-    ));
-    let backup = parent.join(format!(
-        ".active.json.mino-bind-{}-{sequence}.bak",
-        std::process::id()
-    ));
-    write_new_file(&temporary, &bytes)?;
-    if !path.exists() {
-        fs::rename(&temporary, path).map_err(|error| path_error("publish", path, &error))?;
-        return sync_directory(parent);
+    let temporary = parent
+        .join(format!(
+            ".active.json.mino-bind-{}-{sequence}.tmp",
+            std::process::id()
+        ))
+        .map_err(managed_git_error)?;
+    let backup = parent
+        .join(format!(
+            ".active.json.mino-bind-{}-{sequence}.bak",
+            std::process::id()
+        ))
+        .map_err(managed_git_error)?;
+    write_new_file(filesystem, &temporary, &bytes)?;
+    if !filesystem.exists(path).map_err(managed_git_error)? {
+        filesystem
+            .rename(&temporary, path)
+            .map_err(managed_git_error)?;
+        return filesystem.sync_parent(path).map_err(managed_git_error);
     }
-    fs::rename(path, &backup).map_err(|error| path_error("back up", path, &error))?;
-    if let Err(error) = fs::rename(&temporary, path) {
-        let restoration = fs::rename(&backup, path);
-        let _ = fs::remove_file(&temporary);
+    filesystem
+        .rename(path, &backup)
+        .map_err(managed_git_error)?;
+    if let Err(error) = filesystem.rename(&temporary, path) {
+        let restoration = filesystem.rename(&backup, path);
+        let _ = filesystem.remove_file_if_exists(&temporary);
         return match restoration {
-            Ok(()) => Err(path_error("publish", path, &error)),
+            Ok(()) => Err(managed_git_error(error)),
             Err(restoration_error) => Err(GitError::new(
                 GitErrorKind::Unavailable,
                 format!(
                     "Failed to publish {} ({error}) and restore its backup ({restoration_error})",
-                    path.display()
+                    filesystem.display_path(path).display()
                 ),
             )),
         };
     }
-    fs::remove_file(&backup).map_err(|error| path_error("remove backup", &backup, &error))?;
-    sync_directory(parent)
+    filesystem.remove_file(&backup).map_err(managed_git_error)?;
+    filesystem.sync_parent(path).map_err(managed_git_error)
 }
 
-fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), GitError> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .map_err(|error| path_error("create", path, &error))?;
+fn write_new_file(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    bytes: &[u8],
+) -> Result<(), GitError> {
+    let mut file = filesystem
+        .create_new_file(path)
+        .map_err(managed_git_error)?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|error| path_error("write", path, &error))
+        .map_err(|error| path_error("write", &filesystem.display_path(path), &error))
 }
 
 fn path_string(path: &Path) -> Result<String, GitError> {
@@ -433,14 +461,8 @@ struct BindingLock {
 }
 
 impl BindingLock {
-    fn acquire(path: &Path) -> Result<Self, GitError> {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .map_err(|error| path_error("open binding lock", path, &error))?;
+    fn acquire(filesystem: &ProjectFs, path: &ManagedPath) -> Result<Self, GitError> {
+        let file = filesystem.open_lock_file(path).map_err(managed_git_error)?;
         let started_at = Instant::now();
         loop {
             match FileExt::try_lock(&file) {
@@ -451,11 +473,18 @@ impl BindingLock {
                 Err(TryLockError::WouldBlock) => {
                     return Err(GitError::new(
                         GitErrorKind::Unavailable,
-                        format!("Timed out acquiring active binding lock {}", path.display()),
+                        format!(
+                            "Timed out acquiring active binding lock {}",
+                            filesystem.display_path(path).display()
+                        ),
                     ));
                 }
                 Err(TryLockError::Error(error)) => {
-                    return Err(path_error("lock active bindings", path, &error));
+                    return Err(path_error(
+                        "lock active bindings",
+                        &filesystem.display_path(path),
+                        &error,
+                    ));
                 }
             }
         }
@@ -468,16 +497,16 @@ impl Drop for BindingLock {
     }
 }
 
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), GitError> {
-    File::open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| path_error("synchronize directory", path, &error))
+fn managed_path(path: &str) -> ManagedPath {
+    ManagedPath::new(path).expect("static active binding path should be valid")
 }
 
-#[cfg(not(unix))]
-fn sync_directory(path: &Path) -> Result<(), GitError> {
-    fs::metadata(path)
-        .map(|_| ())
-        .map_err(|error| path_error("inspect directory", path, &error))
+fn managed_git_error(error: ManagedFsError) -> GitError {
+    let kind = match error.kind() {
+        ManagedFsErrorKind::InvalidPath | ManagedFsErrorKind::UnsafeComponent => {
+            GitErrorKind::InvalidOutput
+        }
+        ManagedFsErrorKind::Io => GitErrorKind::Unavailable,
+    };
+    GitError::new(kind, error.into_message())
 }

@@ -280,13 +280,12 @@ impl ExecutionService {
             self.redactor.policy_digest(),
         )
         .map_err(|error| map_domain_error(&error))?;
-        let journal = CheckRunJournal::new(
-            self.root
-                .join(".mino")
-                .join("plans")
-                .join(request.plan_id.as_str())
-                .join("runs"),
-        );
+        let journal_directory = PathBuf::from(".mino")
+            .join("plans")
+            .join(request.plan_id.as_str())
+            .join("runs");
+        let journal = CheckRunJournal::new(&self.root, &journal_directory)
+            .map_err(|error| map_runner_error(&error))?;
         let journaled = self
             .runner
             .run_journaled(

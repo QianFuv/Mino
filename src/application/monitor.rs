@@ -1,6 +1,6 @@
 //! Finite foreground monitoring over the existing planned-check execution service.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +13,9 @@ use crate::application::execution::{CheckExecutionDisposition, ExecutionService}
 use crate::application::plan::{PlanMutationRequest, PlanService};
 use crate::domain::{
     CheckId, CheckRunLimits, CheckRunOutcome, EvidenceId, Plan, PlanId, RequestId, Timestamp,
+};
+use crate::managed_fs::{
+    ManagedEntryKind, ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs,
 };
 use crate::store::{canonical_json_bytes, sha256_digest};
 use crate::{ErrorCategory, MinoError};
@@ -316,17 +319,22 @@ impl MonitorService {
     /// or a corrupt/conflicting terminal summary.
     pub fn run(&self, request: MonitorRequest) -> Result<MonitorReport, MinoError> {
         validate_request(&request)?;
+        let filesystem = ProjectFs::open(&self.root).map_err(managed_monitor_error)?;
         let cancel_file = normalize_cancel_file(request.cancel_file.as_deref())?;
         let request_hash = request_hash(&request, cancel_file.as_deref())?;
-        let summary_path = summary_path(&self.root, &request);
-        inspect_summary_directory(&self.root, &request.plan_id, &request.request_id)?;
-        match fs::symlink_metadata(&summary_path) {
-            Ok(_) => return load_summary(&summary_path, &request_hash),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(environment_error(format!(
-                    "Failed to inspect monitor summary {}: {error}",
-                    summary_path.display()
+        let summary_path = summary_path(&request);
+        match filesystem
+            .entry_kind(&summary_path)
+            .map_err(managed_monitor_error)?
+        {
+            Some(ManagedEntryKind::File) => {
+                return load_summary(&filesystem, &summary_path, &request_hash);
+            }
+            None => {}
+            Some(kind) => {
+                return Err(drift_error(format!(
+                    "Monitor summary {} is {kind:?}, expected a regular file",
+                    filesystem.display_path(&summary_path).display()
                 )));
             }
         }
@@ -347,7 +355,7 @@ impl MonitorService {
         )?;
         let cancellation_path = resolve_cancel_file(&self.root, cancel_file.as_deref())?;
         cancellation_requested(cancellation_path.as_deref())?;
-        prepare_summary_directory(&self.root, &request.plan_id, &request.request_id)?;
+        prepare_summary_directory(&filesystem, &request.plan_id, &request.request_id)?;
 
         let check_limits = CheckRunLimits::new(
             Duration::from_millis(request.bounds.check_timeout_milliseconds()),
@@ -378,8 +386,8 @@ impl MonitorService {
             elapsed_milliseconds: observation.elapsed_milliseconds,
             finished_at: Timestamp::now_utc(),
         };
-        publish_summary(&self.root, &summary_path, &request_hash, &report)?;
-        load_summary(&summary_path, &request_hash)
+        publish_summary(&filesystem, &summary_path, &request_hash, &report)?;
+        load_summary(&filesystem, &summary_path, &request_hash)
     }
 }
 
@@ -720,34 +728,31 @@ fn attempt_revision(base: u64, number: u32) -> Result<u64, MinoError> {
     .ok_or_else(|| revision_error("Monitor expected revision overflowed"))
 }
 
-fn summary_path(root: &Path, request: &MonitorRequest) -> PathBuf {
-    root.join(".mino")
-        .join("plans")
-        .join(request.plan_id.as_str())
-        .join("monitors")
-        .join(request.request_id.to_string())
-        .join("summary.json")
+fn summary_directory(plan_id: &PlanId, request_id: &RequestId) -> ManagedPath {
+    ManagedPath::new(
+        PathBuf::from(".mino")
+            .join("plans")
+            .join(plan_id.as_str())
+            .join("monitors")
+            .join(request_id.as_str()),
+    )
+    .expect("validated monitor identity should form a managed path")
 }
 
-fn load_summary(path: &Path, request_hash: &str) -> Result<MonitorReport, MinoError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        environment_error(format!(
-            "Failed to inspect monitor summary {}: {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() > MAX_MONITOR_SUMMARY_BYTES
-    {
-        return Err(drift_error("Monitor summary is not a bounded regular file"));
-    }
-    let bytes = fs::read(path).map_err(|error| {
-        environment_error(format!(
-            "Failed to read monitor summary {}: {error}",
-            path.display()
-        ))
-    })?;
+fn summary_path(request: &MonitorRequest) -> ManagedPath {
+    summary_directory(&request.plan_id, &request.request_id)
+        .join("summary.json")
+        .expect("static monitor summary name should form a managed path")
+}
+
+fn load_summary(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    request_hash: &str,
+) -> Result<MonitorReport, MinoError> {
+    let bytes = filesystem
+        .read_bounded(path, MAX_MONITOR_SUMMARY_BYTES)
+        .map_err(managed_monitor_error)?;
     let record: MonitorJournalRecord = serde_json::from_slice(&bytes)
         .map_err(|error| drift_error(format!("Failed to parse monitor summary: {error}")))?;
     if record.schema_version != MONITOR_KIND
@@ -769,8 +774,8 @@ fn load_summary(path: &Path, request_hash: &str) -> Result<MonitorReport, MinoEr
 }
 
 fn publish_summary(
-    root: &Path,
-    path: &Path,
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
     request_hash: &str,
     report: &MonitorReport,
 ) -> Result<(), MinoError> {
@@ -786,183 +791,70 @@ fn publish_summary(
             "Monitor summary exceeds its storage bound",
         ));
     }
-    let directory = prepare_summary_directory(root, &report.plan_id, &report.request_id)?;
-    if path.parent() != Some(directory.as_path()) {
+    let directory = prepare_summary_directory(filesystem, &report.plan_id, &report.request_id)?;
+    if path.parent().as_ref() != Some(&directory) {
         return Err(drift_error(
             "Monitor summary path does not match its request identity",
         ));
     }
     let temporary_sequence = NEXT_SUMMARY_TEMPORARY.fetch_add(1, Ordering::Relaxed);
-    let temporary = directory.join(format!(
-        "summary.{}.{temporary_sequence}.tmp",
-        std::process::id()
-    ));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|error| {
-            environment_error(format!(
-                "Failed to create monitor summary {}: {error}",
-                temporary.display()
-            ))
-        })?;
+    let temporary = directory
+        .join(format!(
+            "summary.{}.{temporary_sequence}.tmp",
+            std::process::id()
+        ))
+        .map_err(managed_monitor_error)?;
+    let mut file = filesystem
+        .create_new_file(&temporary)
+        .map_err(managed_monitor_error)?;
     let result = file.write_all(&bytes).and_then(|()| file.sync_all());
     drop(file);
     if let Err(error) = result {
-        let _ = fs::remove_file(&temporary);
+        let _ = filesystem.remove_file_if_exists(&temporary);
         return Err(environment_error(format!(
             "Failed to write monitor summary {}: {error}",
-            temporary.display()
+            filesystem.display_path(&temporary).display()
         )));
     }
-    if let Err(error) = fs::hard_link(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        if fs::symlink_metadata(path).is_ok() {
-            load_summary(path, request_hash)?;
+    if let Err(error) = filesystem.hard_link(&temporary, path) {
+        let _ = filesystem.remove_file_if_exists(&temporary);
+        if filesystem.exists(path).map_err(managed_monitor_error)? {
+            load_summary(filesystem, path, request_hash)?;
             return Ok(());
         }
-        return Err(environment_error(format!(
-            "Failed to publish monitor summary {}: {error}",
-            path.display()
-        )));
+        return Err(managed_monitor_error(error));
     }
-    fs::remove_file(&temporary).map_err(|error| {
-        environment_error(format!(
-            "Failed to remove published monitor temporary {}: {error}",
-            temporary.display()
-        ))
-    })?;
-    Ok(())
-}
-
-fn inspect_summary_directory(
-    root: &Path,
-    plan_id: &PlanId,
-    request_id: &RequestId,
-) -> Result<(), MinoError> {
-    let canonical_plan = canonical_plan_directory(root, plan_id)?;
-    let monitors_directory = root
-        .join(".mino")
-        .join("plans")
-        .join(plan_id.as_str())
-        .join("monitors");
-    if !inspect_optional_safe_directory(&monitors_directory, &canonical_plan)? {
-        return Ok(());
-    }
-    let request_directory = monitors_directory.join(request_id.to_string());
-    inspect_optional_safe_directory(&request_directory, &canonical_plan)?;
+    filesystem
+        .remove_file(&temporary)
+        .map_err(managed_monitor_error)?;
+    filesystem
+        .sync_parent(path)
+        .map_err(managed_monitor_error)?;
     Ok(())
 }
 
 fn prepare_summary_directory(
-    root: &Path,
+    filesystem: &ProjectFs,
     plan_id: &PlanId,
     request_id: &RequestId,
-) -> Result<PathBuf, MinoError> {
-    let canonical_plan = canonical_plan_directory(root, plan_id)?;
-    let plan_directory = root.join(".mino").join("plans").join(plan_id.as_str());
-    let monitors_directory = plan_directory.join("monitors");
-    ensure_safe_directory(&monitors_directory)?;
-    let request_directory = monitors_directory.join(request_id.to_string());
-    ensure_safe_directory(&request_directory)?;
-    for directory in [&monitors_directory, &request_directory] {
-        require_directory_within(directory, &canonical_plan)?;
-    }
-    Ok(request_directory)
-}
-
-fn canonical_plan_directory(root: &Path, plan_id: &PlanId) -> Result<PathBuf, MinoError> {
-    let canonical_root = root.canonicalize().map_err(|error| {
-        environment_error(format!(
-            "Failed to resolve monitor project root {}: {error}",
-            root.display()
-        ))
-    })?;
-    let mino_directory = root.join(".mino");
-    let plans_root = mino_directory.join("plans");
-    let target_plan_directory = plans_root.join(plan_id.as_str());
-    for directory in [&mino_directory, &plans_root, &target_plan_directory] {
-        require_safe_directory(directory)?;
-    }
-    let canonical_plan = target_plan_directory.canonicalize().map_err(|error| {
-        environment_error(format!(
-            "Failed to resolve monitor plan directory {}: {error}",
-            target_plan_directory.display()
-        ))
-    })?;
-    if !canonical_plan.starts_with(&canonical_root) {
-        return Err(drift_error(
-            "Monitor plan directory resolves outside the project",
-        ));
-    }
-    Ok(canonical_plan)
-}
-
-fn inspect_optional_safe_directory(path: &Path, canonical_plan: &Path) -> Result<bool, MinoError> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => {
-            require_safe_directory(path)?;
-            require_directory_within(path, canonical_plan)?;
-            Ok(true)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(environment_error(format!(
-            "Failed to inspect monitor directory {}: {error}",
-            path.display()
-        ))),
-    }
-}
-
-fn require_directory_within(path: &Path, canonical_plan: &Path) -> Result<(), MinoError> {
-    let canonical = path.canonicalize().map_err(|error| {
-        environment_error(format!(
-            "Failed to resolve monitor directory {}: {error}",
-            path.display()
-        ))
-    })?;
-    if !canonical.starts_with(canonical_plan) {
-        return Err(drift_error(
-            "Monitor summary directory resolves outside its plan",
-        ));
-    }
-    Ok(())
-}
-
-fn require_safe_directory(path: &Path) -> Result<(), MinoError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        environment_error(format!(
-            "Failed to inspect monitor directory {}: {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+) -> Result<ManagedPath, MinoError> {
+    let plan_directory =
+        ManagedPath::new(PathBuf::from(".mino").join("plans").join(plan_id.as_str()))
+            .map_err(managed_monitor_error)?;
+    if !filesystem
+        .is_directory(&plan_directory)
+        .map_err(managed_monitor_error)?
+    {
         return Err(drift_error(format!(
-            "Monitor directory {} is not a regular directory",
-            path.display()
+            "Monitor plan directory {} is missing or unsafe",
+            filesystem.display_path(&plan_directory).display()
         )));
     }
-    Ok(())
-}
-
-fn ensure_safe_directory(path: &Path) -> Result<(), MinoError> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => require_safe_directory(path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => match fs::create_dir(path) {
-            Ok(()) => require_safe_directory(path),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                require_safe_directory(path)
-            }
-            Err(error) => Err(environment_error(format!(
-                "Failed to create monitor directory {}: {error}",
-                path.display()
-            ))),
-        },
-        Err(error) => Err(environment_error(format!(
-            "Failed to inspect monitor directory {}: {error}",
-            path.display()
-        ))),
-    }
+    let request_directory = summary_directory(plan_id, request_id);
+    filesystem
+        .ensure_directory(&request_directory)
+        .map_err(managed_monitor_error)?;
+    Ok(request_directory)
 }
 
 fn validate_report(report: &MonitorReport) -> Result<(), MinoError> {
@@ -1053,4 +945,14 @@ fn environment_error(message: impl Into<String>) -> MinoError {
 
 fn drift_error(message: impl Into<String>) -> MinoError {
     MinoError::new(ErrorCategory::DriftDetected, message)
+}
+
+fn managed_monitor_error(error: ManagedFsError) -> MinoError {
+    let category = match error.kind() {
+        ManagedFsErrorKind::InvalidPath | ManagedFsErrorKind::UnsafeComponent => {
+            ErrorCategory::DriftDetected
+        }
+        ManagedFsErrorKind::Io => ErrorCategory::EnvironmentUnavailable,
+    };
+    MinoError::new(category, error.into_message())
 }

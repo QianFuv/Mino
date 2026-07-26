@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::fs::symlink_dir;
+
 use mino::domain::{
     AcceptanceCriterion, CriterionId, EvidenceId, EvidenceType, Plan, PlanId, RequestId, Task,
     TaskId, Timestamp,
@@ -174,6 +179,67 @@ fn blob_path(root: &Path, digest: &str) -> PathBuf {
             .strip_prefix("sha256:")
             .expect("digest should be prefixed")
     ))
+}
+
+#[cfg(any(unix, windows))]
+fn create_directory_symlink(target: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    let result = symlink(target, link);
+    #[cfg(windows)]
+    let result = symlink_dir(target, link);
+    match result {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
+        Err(error) => panic!("evidence symlink should be created: {error}"),
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn symlinked_blob_directory_cannot_publish_outside_the_project() {
+    let project = TestProject::new("blob-symlink", false);
+    let external = TestProject::new("blob-symlink-external", false);
+    let evidence = evidence_directory(project.path());
+    fs::create_dir_all(&evidence).expect("evidence directory should be created");
+    let sentinel = external.path().join("sentinel.txt");
+    fs::write(&sentinel, b"outside\n").expect("outside sentinel should be written");
+    if !create_directory_symlink(external.path(), &evidence.join("blobs")) {
+        return;
+    }
+    fs::write(project.path().join("artifact.txt"), b"artifact\n")
+        .expect("artifact should be written");
+    let request = add_request(
+        10,
+        1,
+        EvidenceType::File,
+        EvidenceSource::Artifact(PathBuf::from("artifact.txt")),
+        "Capture a file",
+    );
+
+    let error = EvidenceStore::new(project.path())
+        .add(&request, &redactor())
+        .expect_err("symlinked blob directory must be rejected");
+    assert_eq!(error.kind(), EvidenceErrorKind::CorruptStore);
+    assert_eq!(
+        fs::read(&sentinel).expect("outside sentinel should remain readable"),
+        b"outside\n"
+    );
+    assert!(
+        fs::read_dir(external.path())
+            .expect("outside directory should remain readable")
+            .all(|entry| entry
+                .expect("outside entry should be readable")
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "blob"))
+    );
+    assert!(!evidence.join("index.jsonl").exists());
+    assert!(
+        fs::read_dir(evidence.join("records"))
+            .expect("record directory should remain empty")
+            .next()
+            .is_none()
+    );
 }
 
 #[test]

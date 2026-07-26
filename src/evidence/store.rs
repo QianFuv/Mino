@@ -1,7 +1,7 @@
 //! Append-only evidence index, immutable records, replay, recovery, and audit.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::domain::{
     CheckRunResult, CheckStatus, Evidence, EvidenceFields, EvidenceId, EvidenceType, Plan, PlanId,
     Redaction, RequestId, VerificationCheck,
+};
+use crate::managed_fs::{
+    ManagedEntryKind, ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs,
 };
 use crate::runner::Redactor;
 use crate::store::{PlanStore, StoreError, StoreErrorKind, canonical_json_bytes, sha256_digest};
@@ -319,12 +322,13 @@ impl EvidenceStore {
         request: &AddEvidenceRequest,
         redactor: &Redactor,
     ) -> Result<EvidenceAddReport, EvidenceError> {
+        let filesystem = self.filesystem()?;
         self.require_plan(request.context().plan_id())?;
         let prepared = PreparedInput::capture(&self.project_root, request, redactor)?;
-        let paths = EvidencePaths::new(&self.project_root, request.context().plan_id());
-        paths.prepare()?;
-        let _lock = EvidenceLock::acquire(&paths.lock_file(), self.lock_timeout)?;
-        let envelopes = Self::recover_locked(&paths)?;
+        let paths = EvidencePaths::new(request.context().plan_id());
+        paths.prepare(&filesystem)?;
+        let _lock = EvidenceLock::acquire(&filesystem, &paths.lock_file(), self.lock_timeout)?;
+        let envelopes = Self::recover_locked(&filesystem, &paths)?;
         let fingerprint = prepared.fingerprint(request)?;
         if let Some(envelope) = envelopes
             .iter()
@@ -382,7 +386,7 @@ impl EvidenceStore {
         .map_err(|error| invalid(error.to_string()))?;
         let request_command = prepared.request_command;
         let blob_reused = match &prepared.artifact {
-            Some(artifact) => blob::publish_blob(&paths.blob_directory(), artifact)?,
+            Some(artifact) => blob::publish_blob(&filesystem, &paths.blob_directory(), artifact)?,
             None => false,
         };
         let envelope = StoredEvidence {
@@ -393,8 +397,8 @@ impl EvidenceStore {
             evidence: evidence.clone(),
         };
         let record_bytes = canonical_envelope(&envelope)?;
-        blob::publish_immutable(&paths.record(&evidence), &record_bytes)?;
-        append_index(&paths.index_file(), &record_bytes)?;
+        blob::publish_immutable(&filesystem, &paths.record(&evidence), &record_bytes)?;
+        append_index(&filesystem, &paths.index_file(), &record_bytes)?;
         Ok(EvidenceAddReport {
             evidence,
             replayed: false,
@@ -412,13 +416,14 @@ impl EvidenceStore {
         &self,
         request: &CommandEvidenceRequest,
     ) -> Result<EvidenceAddReport, EvidenceError> {
+        let filesystem = self.filesystem()?;
         let result = request.result();
         let lease = result.lease();
         self.require_plan(lease.plan_id())?;
-        let paths = EvidencePaths::new(&self.project_root, lease.plan_id());
-        paths.prepare()?;
-        let _lock = EvidenceLock::acquire(&paths.lock_file(), self.lock_timeout)?;
-        let envelopes = Self::recover_locked(&paths)?;
+        let paths = EvidencePaths::new(lease.plan_id());
+        paths.prepare(&filesystem)?;
+        let _lock = EvidenceLock::acquire(&filesystem, &paths.lock_file(), self.lock_timeout)?;
+        let envelopes = Self::recover_locked(&filesystem, &paths)?;
         let fingerprint = canonical_json_bytes(&CommandFingerprintInput {
             request_command: &request.request_command,
             result,
@@ -457,8 +462,8 @@ impl EvidenceStore {
             evidence: evidence.clone(),
         };
         let record_bytes = canonical_envelope(&envelope)?;
-        blob::publish_immutable(&paths.record(&evidence), &record_bytes)?;
-        append_index(&paths.index_file(), &record_bytes)?;
+        blob::publish_immutable(&filesystem, &paths.record(&evidence), &record_bytes)?;
+        append_index(&filesystem, &paths.index_file(), &record_bytes)?;
         Ok(EvidenceAddReport {
             evidence,
             replayed: false,
@@ -472,11 +477,12 @@ impl EvidenceStore {
     ///
     /// Returns an error for a missing plan, lock failure, or corrupt state.
     pub fn list(&self, plan_id: &PlanId) -> Result<Vec<Evidence>, EvidenceError> {
+        let filesystem = self.filesystem()?;
         self.require_plan(plan_id)?;
-        let paths = EvidencePaths::new(&self.project_root, plan_id);
-        paths.prepare()?;
-        let _lock = EvidenceLock::acquire(&paths.lock_file(), self.lock_timeout)?;
-        Self::recover_locked(&paths).map(|envelopes| {
+        let paths = EvidencePaths::new(plan_id);
+        paths.prepare(&filesystem)?;
+        let _lock = EvidenceLock::acquire(&filesystem, &paths.lock_file(), self.lock_timeout)?;
+        Self::recover_locked(&filesystem, &paths).map(|envelopes| {
             envelopes
                 .into_iter()
                 .map(|envelope| envelope.evidence)
@@ -513,11 +519,12 @@ impl EvidenceStore {
     /// Returns an error for a missing plan, lock failure, or corrupt record/index
     /// structure. Missing, mismatched, and orphan blobs are returned as findings.
     pub fn audit(&self, plan_id: &PlanId) -> Result<EvidenceAudit, EvidenceError> {
+        let filesystem = self.filesystem()?;
         self.require_plan(plan_id)?;
-        let paths = EvidencePaths::new(&self.project_root, plan_id);
-        paths.prepare()?;
-        let _lock = EvidenceLock::acquire(&paths.lock_file(), self.lock_timeout)?;
-        let envelopes = Self::recover_locked(&paths)?;
+        let paths = EvidencePaths::new(plan_id);
+        paths.prepare(&filesystem)?;
+        let _lock = EvidenceLock::acquire(&filesystem, &paths.lock_file(), self.lock_timeout)?;
+        let envelopes = Self::recover_locked(&filesystem, &paths)?;
         let mut findings = Vec::new();
         let mut expected_blobs = BTreeMap::<String, EvidenceId>::new();
         for envelope in &envelopes {
@@ -528,7 +535,7 @@ impl EvidenceStore {
                 .entry(digest.to_owned())
                 .or_insert_with(|| envelope.evidence.id().clone());
             let path = blob::blob_path(&paths.blob_directory(), digest)?;
-            if !path.exists() {
+            if !filesystem.exists(&path).map_err(managed_error)? {
                 findings.push(finding(
                     "evidence_blob_missing",
                     format!(
@@ -536,12 +543,11 @@ impl EvidenceStore {
                         envelope.evidence.id()
                     ),
                     Some(envelope.evidence.id().clone()),
-                    &self.project_relative(&path),
+                    &project_relative(&path),
                 ));
                 continue;
             }
-            let bytes =
-                fs::read(&path).map_err(|error| io_error("read evidence blob", &path, &error))?;
+            let bytes = filesystem.read(&path).map_err(managed_error)?;
             if sha256_digest(&bytes) != digest {
                 findings.push(finding(
                     "evidence_blob_digest_mismatch",
@@ -550,11 +556,11 @@ impl EvidenceStore {
                         envelope.evidence.id()
                     ),
                     Some(envelope.evidence.id().clone()),
-                    &self.project_relative(&path),
+                    &project_relative(&path),
                 ));
             }
         }
-        let blob_files = list_blob_files(&paths.blob_directory())?;
+        let blob_files = list_blob_files(&filesystem, &paths.blob_directory())?;
         for path in &blob_files {
             let digest = digest_from_blob_path(path);
             if digest
@@ -565,10 +571,10 @@ impl EvidenceStore {
                     "evidence_blob_orphaned",
                     format!(
                         "Blob {} is not referenced by indexed evidence",
-                        path.display()
+                        filesystem.display_path(path).display()
                     ),
                     None,
-                    &self.project_relative(path),
+                    &project_relative(path),
                 ));
             }
         }
@@ -592,11 +598,14 @@ impl EvidenceStore {
         })
     }
 
-    fn recover_locked(paths: &EvidencePaths) -> Result<Vec<StoredEvidence>, EvidenceError> {
-        truncate_partial_index(&paths.index_file())?;
-        let mut indexed = read_index(&paths.index_file())?;
+    fn recover_locked(
+        filesystem: &ProjectFs,
+        paths: &EvidencePaths,
+    ) -> Result<Vec<StoredEvidence>, EvidenceError> {
+        truncate_partial_index(filesystem, &paths.index_file())?;
+        let mut indexed = read_index(filesystem, &paths.index_file())?;
         validate_sequence(paths.plan_id(), &indexed)?;
-        let records = list_record_files(&paths.record_directory())?;
+        let records = list_record_files(filesystem, &paths.record_directory())?;
         if records.len() < indexed.len() {
             return Err(corrupt(format!(
                 "Evidence index has {} entries but only {} immutable records",
@@ -609,20 +618,20 @@ impl EvidenceStore {
             if envelope.evidence.id() != &records[index].0 {
                 return Err(corrupt(format!(
                     "Evidence record {} does not match index position {}",
-                    path.display(),
+                    filesystem.display_path(path).display(),
                     index + 1
                 )));
             }
-            let record: StoredEvidence = read_canonical(path)?;
+            let record: StoredEvidence = read_canonical(filesystem, path)?;
             if &record != envelope {
                 return Err(corrupt(format!(
                     "Evidence record {} differs from its index entry",
-                    path.display()
+                    filesystem.display_path(path).display()
                 )));
             }
         }
         for (_, path) in records.into_iter().skip(indexed.len()) {
-            let envelope: StoredEvidence = read_canonical(&path)?;
+            let envelope: StoredEvidence = read_canonical(filesystem, &path)?;
             indexed.push(envelope);
             validate_sequence(paths.plan_id(), &indexed)?;
             let bytes = canonical_envelope(
@@ -630,7 +639,7 @@ impl EvidenceStore {
                     .last()
                     .expect("a recovered record was just appended"),
             )?;
-            append_index(&paths.index_file(), &bytes)?;
+            append_index(filesystem, &paths.index_file(), &bytes)?;
         }
         Ok(indexed)
     }
@@ -642,65 +651,63 @@ impl EvidenceStore {
             .map_err(|error| map_store_error(&error))
     }
 
-    fn project_relative(&self, path: &Path) -> String {
-        path.strip_prefix(&self.project_root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/")
+    fn filesystem(&self) -> Result<ProjectFs, EvidenceError> {
+        ProjectFs::open(&self.project_root).map_err(managed_error)
     }
 }
 
 struct EvidencePaths<'a> {
-    project_root: &'a Path,
     plan_id: &'a PlanId,
 }
 
 impl<'a> EvidencePaths<'a> {
-    fn new(project_root: &'a Path, plan_id: &'a PlanId) -> Self {
-        Self {
-            project_root,
-            plan_id,
-        }
+    const fn new(plan_id: &'a PlanId) -> Self {
+        Self { plan_id }
     }
 
-    fn directory(&self) -> PathBuf {
-        self.project_root
-            .join(".mino")
-            .join("plans")
-            .join(self.plan_id.as_str())
-            .join("evidence")
+    fn directory(&self) -> ManagedPath {
+        managed_path(format!(".mino/plans/{}/evidence", self.plan_id.as_str()))
     }
 
-    fn index_file(&self) -> PathBuf {
-        self.directory().join("index.jsonl")
+    fn index_file(&self) -> ManagedPath {
+        self.directory()
+            .join("index.jsonl")
+            .expect("static evidence index name should form a managed path")
     }
 
-    fn lock_file(&self) -> PathBuf {
-        self.directory().join("evidence.lock")
+    fn lock_file(&self) -> ManagedPath {
+        self.directory()
+            .join("evidence.lock")
+            .expect("static evidence lock name should form a managed path")
     }
 
-    fn record_directory(&self) -> PathBuf {
-        self.directory().join("records")
+    fn record_directory(&self) -> ManagedPath {
+        self.directory()
+            .join("records")
+            .expect("static evidence record directory should form a managed path")
     }
 
-    fn blob_directory(&self) -> PathBuf {
-        self.directory().join("blobs")
+    fn blob_directory(&self) -> ManagedPath {
+        self.directory()
+            .join("blobs")
+            .expect("static evidence blob directory should form a managed path")
     }
 
-    fn record(&self, evidence: &Evidence) -> PathBuf {
+    fn record(&self, evidence: &Evidence) -> ManagedPath {
         self.record_directory()
             .join(format!("{}.json", evidence.id()))
+            .expect("validated evidence ID should form a managed path")
     }
 
-    fn prepare(&self) -> Result<(), EvidenceError> {
+    fn prepare(&self, filesystem: &ProjectFs) -> Result<(), EvidenceError> {
         for directory in [
             self.directory(),
             self.record_directory(),
             self.blob_directory(),
         ] {
-            fs::create_dir_all(&directory).map_err(|error| {
-                io_error("create evidence storage directory", &directory, &error)
-            })?;
+            filesystem
+                .ensure_directory(&directory)
+                .map_err(managed_error)?;
         }
         Ok(())
     }
@@ -715,14 +722,12 @@ struct EvidenceLock {
 }
 
 impl EvidenceLock {
-    fn acquire(path: &Path, timeout: Duration) -> Result<Self, EvidenceError> {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .map_err(|error| io_error("open evidence lock", path, &error))?;
+    fn acquire(
+        filesystem: &ProjectFs,
+        path: &ManagedPath,
+        timeout: Duration,
+    ) -> Result<Self, EvidenceError> {
+        let file = filesystem.open_lock_file(path).map_err(managed_error)?;
         let started = Instant::now();
         loop {
             match FileExt::try_lock(&file) {
@@ -738,12 +743,16 @@ impl EvidenceLock {
                         format!(
                             "Timed out after {} ms acquiring evidence lock {}",
                             timeout.as_millis(),
-                            path.display()
+                            filesystem.display_path(path).display()
                         ),
                     ));
                 }
                 Err(TryLockError::Error(error)) => {
-                    return Err(io_error("lock evidence store", path, &error));
+                    return Err(io_error(
+                        "lock evidence store",
+                        &filesystem.display_path(path),
+                        &error,
+                    ));
                 }
             }
         }
@@ -818,15 +827,15 @@ fn canonical_envelope(envelope: &StoredEvidence) -> Result<Vec<u8>, EvidenceErro
         .map_err(|error| serialization_error("encode evidence record", &error))
 }
 
-fn read_canonical<T>(path: &Path) -> Result<T, EvidenceError>
+fn read_canonical<T>(filesystem: &ProjectFs, path: &ManagedPath) -> Result<T, EvidenceError>
 where
     T: for<'de> Deserialize<'de> + Serialize,
 {
-    let bytes = fs::read(path).map_err(|error| io_error("read evidence record", path, &error))?;
+    let bytes = filesystem.read(path).map_err(managed_error)?;
     let value = serde_json::from_slice(&bytes).map_err(|error| {
         corrupt(format!(
             "Failed to decode evidence record {}: {error}",
-            path.display()
+            filesystem.display_path(path).display()
         ))
     })?;
     let canonical = canonical_json_bytes(&value)
@@ -834,17 +843,20 @@ where
     if canonical != bytes {
         return Err(corrupt(format!(
             "Evidence record {} is not canonical",
-            path.display()
+            filesystem.display_path(path).display()
         )));
     }
     Ok(value)
 }
 
-fn read_index(path: &Path) -> Result<Vec<StoredEvidence>, EvidenceError> {
-    if !path.exists() {
+fn read_index(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+) -> Result<Vec<StoredEvidence>, EvidenceError> {
+    if !filesystem.exists(path).map_err(managed_error)? {
         return Ok(Vec::new());
     }
-    let bytes = fs::read(path).map_err(|error| io_error("read evidence index", path, &error))?;
+    let bytes = filesystem.read(path).map_err(managed_error)?;
     let mut envelopes = Vec::new();
     for line in bytes.split_inclusive(|byte| *byte == b'\n') {
         if line.is_empty() {
@@ -853,13 +865,13 @@ fn read_index(path: &Path) -> Result<Vec<StoredEvidence>, EvidenceError> {
         let envelope: StoredEvidence = serde_json::from_slice(line).map_err(|error| {
             corrupt(format!(
                 "Failed to decode evidence index {}: {error}",
-                path.display()
+                filesystem.display_path(path).display()
             ))
         })?;
         if canonical_envelope(&envelope)? != line {
             return Err(corrupt(format!(
                 "Evidence index {} contains a non-canonical entry",
-                path.display()
+                filesystem.display_path(path).display()
             )));
         }
         envelopes.push(envelope);
@@ -867,18 +879,21 @@ fn read_index(path: &Path) -> Result<Vec<StoredEvidence>, EvidenceError> {
     Ok(envelopes)
 }
 
-fn truncate_partial_index(path: &Path) -> Result<(), EvidenceError> {
-    if !path.exists() {
+fn truncate_partial_index(filesystem: &ProjectFs, path: &ManagedPath) -> Result<(), EvidenceError> {
+    if !filesystem.exists(path).map_err(managed_error)? {
         return Ok(());
     }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|error| io_error("open evidence index", path, &error))?;
+    let mut file = filesystem
+        .open_read_write_file(path)
+        .map_err(managed_error)?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|error| io_error("read evidence index", path, &error))?;
+    file.read_to_end(&mut bytes).map_err(|error| {
+        io_error(
+            "read evidence index",
+            &filesystem.display_path(path),
+            &error,
+        )
+    })?;
     let complete_length = bytes
         .iter()
         .rposition(|byte| *byte == b'\n')
@@ -887,49 +902,61 @@ fn truncate_partial_index(path: &Path) -> Result<(), EvidenceError> {
         file.set_len(u64::try_from(complete_length).unwrap_or(u64::MAX))
             .and_then(|()| file.seek(SeekFrom::Start(0)).map(|_| ()))
             .and_then(|()| file.sync_all())
-            .map_err(|error| io_error("recover evidence index", path, &error))?;
+            .map_err(|error| {
+                io_error(
+                    "recover evidence index",
+                    &filesystem.display_path(path),
+                    &error,
+                )
+            })?;
     }
     Ok(())
 }
 
-fn append_index(path: &Path, bytes: &[u8]) -> Result<(), EvidenceError> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|error| io_error("open evidence index", path, &error))?;
+fn append_index(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    bytes: &[u8],
+) -> Result<(), EvidenceError> {
+    let mut file = filesystem.open_append_file(path).map_err(managed_error)?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|error| io_error("append evidence index", path, &error))
+        .map_err(|error| {
+            io_error(
+                "append evidence index",
+                &filesystem.display_path(path),
+                &error,
+            )
+        })
 }
 
-fn list_record_files(directory: &Path) -> Result<Vec<(EvidenceId, PathBuf)>, EvidenceError> {
+fn list_record_files(
+    filesystem: &ProjectFs,
+    directory: &ManagedPath,
+) -> Result<Vec<(EvidenceId, ManagedPath)>, EvidenceError> {
     let mut records = Vec::new();
-    for entry in fs::read_dir(directory)
-        .map_err(|error| io_error("read evidence record directory", directory, &error))?
+    for entry in filesystem
+        .read_directory(directory)
+        .map_err(managed_error)?
     {
-        let entry =
-            entry.map_err(|error| io_error("read evidence record entry", directory, &error))?;
-        if !entry
-            .file_type()
-            .map_err(|error| io_error("inspect evidence record", &entry.path(), &error))?
-            .is_file()
-            || entry
-                .path()
+        let path = directory.join(&entry.name).map_err(managed_error)?;
+        if entry.kind != ManagedEntryKind::File
+            || path
+                .as_path()
                 .extension()
                 .is_none_or(|extension| extension != "json")
         {
             continue;
         }
-        let stem = entry
-            .path()
+        let stem = path
+            .as_path()
             .file_stem()
             .and_then(|stem| stem.to_str())
             .ok_or_else(|| corrupt("Evidence record has a non-UTF-8 file name"))?
             .to_owned();
         let evidence_id = EvidenceId::parse(stem)
             .map_err(|error| corrupt(format!("Invalid evidence record name: {error}")))?;
-        records.push((evidence_id, entry.path()));
+        records.push((evidence_id, path));
     }
     records.sort_by_key(|(evidence_id, _)| evidence_number(evidence_id));
     for (index, (evidence_id, _)) in records.iter().enumerate() {
@@ -948,31 +975,31 @@ fn evidence_number(evidence_id: &EvidenceId) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-fn list_blob_files(directory: &Path) -> Result<Vec<PathBuf>, EvidenceError> {
+fn list_blob_files(
+    filesystem: &ProjectFs,
+    directory: &ManagedPath,
+) -> Result<Vec<ManagedPath>, EvidenceError> {
     let mut files = Vec::new();
-    for entry in fs::read_dir(directory)
-        .map_err(|error| io_error("read evidence blob directory", directory, &error))?
+    for entry in filesystem
+        .read_directory(directory)
+        .map_err(managed_error)?
     {
-        let entry =
-            entry.map_err(|error| io_error("read evidence blob entry", directory, &error))?;
-        if entry
-            .file_type()
-            .map_err(|error| io_error("inspect evidence blob", &entry.path(), &error))?
-            .is_file()
-            && entry
-                .path()
+        let path = directory.join(&entry.name).map_err(managed_error)?;
+        if entry.kind == ManagedEntryKind::File
+            && path
+                .as_path()
                 .extension()
                 .is_some_and(|extension| extension == "blob")
         {
-            files.push(entry.path());
+            files.push(path);
         }
     }
     files.sort();
     Ok(files)
 }
 
-fn digest_from_blob_path(path: &Path) -> Option<String> {
-    let stem = path.file_stem()?.to_str()?;
+fn digest_from_blob_path(path: &ManagedPath) -> Option<String> {
+    let stem = path.as_path().file_stem()?.to_str()?;
     (stem.len() == 64
         && stem
             .bytes()
@@ -1124,6 +1151,24 @@ fn map_store_error(error: &StoreError) -> EvidenceError {
         | StoreErrorKind::InjectedFailure => EvidenceErrorKind::Io,
     };
     EvidenceError::new(kind, error.to_string())
+}
+
+fn project_relative(path: &ManagedPath) -> String {
+    path.as_path().to_string_lossy().replace('\\', "/")
+}
+
+fn managed_path(path: impl AsRef<Path>) -> ManagedPath {
+    ManagedPath::new(path).expect("validated evidence identity should form a managed path")
+}
+
+fn managed_error(error: ManagedFsError) -> EvidenceError {
+    let kind = match error.kind() {
+        ManagedFsErrorKind::InvalidPath | ManagedFsErrorKind::UnsafeComponent => {
+            EvidenceErrorKind::CorruptStore
+        }
+        ManagedFsErrorKind::Io => EvidenceErrorKind::Io,
+    };
+    EvidenceError::new(kind, error.into_message())
 }
 
 fn invalid(message: impl Into<String>) -> EvidenceError {

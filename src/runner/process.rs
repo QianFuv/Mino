@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Debug, Formatter};
-use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -14,13 +13,11 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-#[cfg(unix)]
-use std::fs::File;
-
 use crate::domain::{
     AppliedRedaction, CheckRunCompletion, CheckRunLease, CheckRunOutcome, CheckRunResult,
     RequestId, Timestamp,
 };
+use crate::managed_fs::{ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs};
 use crate::store::{canonical_json_bytes, sha256_digest};
 
 use super::group;
@@ -180,16 +177,24 @@ impl JournaledRun {
 }
 
 /// Immutable per-request lease and terminal-result persistence.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct CheckRunJournal {
-    root: PathBuf,
+    filesystem: ProjectFs,
+    root: ManagedPath,
 }
 
 impl CheckRunJournal {
-    /// Creates a journal rooted at a caller-selected internal directory.
-    #[must_use]
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+    /// Creates a journal at a project-relative managed directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the project root cannot be opened or the journal
+    /// directory is not a normalized project-relative path.
+    pub fn new(project_root: &Path, root: &Path) -> Result<Self, RunnerError> {
+        Ok(Self {
+            filesystem: ProjectFs::open(project_root).map_err(managed_error)?,
+            root: ManagedPath::new(root).map_err(managed_error)?,
+        })
     }
 
     /// Publishes a lease or confirms an identical existing lease.
@@ -204,14 +209,19 @@ impl CheckRunJournal {
             .map_err(|error| invalid_request(error.to_string()))?;
         let lease_path = self.lease_path(lease.request_id());
         let result_path = self.result_path(lease.request_id());
-        if result_path.exists() && !lease_path.exists() {
+        let result_exists = self
+            .filesystem
+            .exists(&result_path)
+            .map_err(managed_error)?;
+        let lease_exists = self.filesystem.exists(&lease_path).map_err(managed_error)?;
+        if result_exists && !lease_exists {
             return Err(corrupt(format!(
                 "Check result {} exists without its lease",
-                result_path.display()
+                self.filesystem.display_path(&result_path).display()
             )));
         }
-        if lease_path.exists() {
-            let existing: CheckRunLease = read_canonical(&lease_path)?;
+        if lease_exists {
+            let existing: CheckRunLease = read_canonical(&self.filesystem, &lease_path)?;
             existing
                 .validate()
                 .map_err(|error| corrupt(error.to_string()))?;
@@ -227,7 +237,7 @@ impl CheckRunJournal {
             return Ok(false);
         }
         let bytes = canonical_bytes(lease)?;
-        publish_immutable(&lease_path, &bytes)?;
+        publish_immutable(&self.filesystem, &lease_path, &bytes)?;
         Ok(true)
     }
 
@@ -238,10 +248,14 @@ impl CheckRunJournal {
     /// Returns a corruption or I/O error for malformed persisted state.
     pub fn result(&self, request_id: &RequestId) -> Result<Option<CheckRunResult>, RunnerError> {
         let result_path = self.result_path(request_id);
-        if !result_path.exists() {
+        if !self
+            .filesystem
+            .exists(&result_path)
+            .map_err(managed_error)?
+        {
             return Ok(None);
         }
-        let result: CheckRunResult = read_canonical(&result_path)?;
+        let result: CheckRunResult = read_canonical(&self.filesystem, &result_path)?;
         result
             .validate()
             .map_err(|error| corrupt(error.to_string()))?;
@@ -259,13 +273,13 @@ impl CheckRunJournal {
             .validate()
             .map_err(|error| invalid_request(error.to_string()))?;
         let lease_path = self.lease_path(result.lease().request_id());
-        if !lease_path.exists() {
+        if !self.filesystem.exists(&lease_path).map_err(managed_error)? {
             return Err(corrupt(format!(
                 "Cannot publish result without lease {}",
-                lease_path.display()
+                self.filesystem.display_path(&lease_path).display()
             )));
         }
-        let stored_lease: CheckRunLease = read_canonical(&lease_path)?;
+        let stored_lease: CheckRunLease = read_canonical(&self.filesystem, &lease_path)?;
         if stored_lease != *result.lease() {
             return Err(RunnerError::new(
                 RunnerErrorKind::JournalConflict,
@@ -277,19 +291,25 @@ impl CheckRunJournal {
         }
         let result_path = self.result_path(result.lease().request_id());
         let bytes = canonical_bytes(result)?;
-        publish_immutable(&result_path, &bytes)
+        publish_immutable(&self.filesystem, &result_path, &bytes)
     }
 
-    fn request_directory(&self, request_id: &RequestId) -> PathBuf {
-        self.root.join(request_id.as_str())
+    fn request_directory(&self, request_id: &RequestId) -> ManagedPath {
+        self.root
+            .join(request_id.as_str())
+            .expect("validated request ID should form a managed path")
     }
 
-    fn lease_path(&self, request_id: &RequestId) -> PathBuf {
-        self.request_directory(request_id).join("lease.json")
+    fn lease_path(&self, request_id: &RequestId) -> ManagedPath {
+        self.request_directory(request_id)
+            .join("lease.json")
+            .expect("static lease file name should form a managed path")
     }
 
-    fn result_path(&self, request_id: &RequestId) -> PathBuf {
-        self.request_directory(request_id).join("result.json")
+    fn result_path(&self, request_id: &RequestId) -> ManagedPath {
+        self.request_directory(request_id)
+            .join("result.json")
+            .expect("static result file name should form a managed path")
     }
 }
 
@@ -878,30 +898,34 @@ fn canonical_bytes(value: &impl Serialize) -> Result<Vec<u8>, RunnerError> {
     })
 }
 
-fn read_canonical<T>(path: &Path) -> Result<T, RunnerError>
+fn read_canonical<T>(filesystem: &ProjectFs, path: &ManagedPath) -> Result<T, RunnerError>
 where
     T: DeserializeOwned + Serialize,
 {
-    let bytes = fs::read(path).map_err(|error| io_error("read", path, &error))?;
+    let bytes = filesystem.read(path).map_err(managed_error)?;
     let value = serde_json::from_slice(&bytes).map_err(|error| {
         corrupt(format!(
             "Failed to decode check journal {}: {error}",
-            path.display()
+            filesystem.display_path(path).display()
         ))
     })?;
     let canonical = canonical_bytes(&value)?;
     if canonical != bytes {
         return Err(corrupt(format!(
             "Check journal {} is not canonical",
-            path.display()
+            filesystem.display_path(path).display()
         )));
     }
     Ok(value)
 }
 
-fn publish_immutable(path: &Path, bytes: &[u8]) -> Result<(), RunnerError> {
-    if path.exists() {
-        let existing = fs::read(path).map_err(|error| io_error("read", path, &error))?;
+fn publish_immutable(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    bytes: &[u8],
+) -> Result<(), RunnerError> {
+    if filesystem.exists(path).map_err(managed_error)? {
+        let existing = filesystem.read(path).map_err(managed_error)?;
         if existing == bytes {
             return Ok(());
         }
@@ -909,43 +933,52 @@ fn publish_immutable(path: &Path, bytes: &[u8]) -> Result<(), RunnerError> {
             RunnerErrorKind::JournalConflict,
             format!(
                 "Immutable check journal {} has conflicting bytes",
-                path.display()
+                filesystem.display_path(path).display()
             ),
         ));
     }
     let parent = path.parent().ok_or_else(|| {
         RunnerError::new(
             RunnerErrorKind::Io,
-            format!("Check journal path {} has no parent", path.display()),
+            format!(
+                "Check journal path {} has no parent",
+                filesystem.display_path(path).display()
+            ),
         )
     })?;
-    fs::create_dir_all(parent).map_err(|error| io_error("create", parent, &error))?;
+    filesystem
+        .ensure_directory(&parent)
+        .map_err(managed_error)?;
     let sequence = NEXT_PENDING_FILE.fetch_add(1, Ordering::Relaxed);
     let file_name = path
+        .as_path()
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("journal");
-    let pending = parent.join(format!(
-        ".{file_name}.{}.{}.pending",
-        std::process::id(),
-        sequence
-    ));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&pending)
-        .map_err(|error| io_error("create", &pending, &error))?;
+    let pending = parent
+        .join(format!(
+            ".{file_name}.{}.{}.pending",
+            std::process::id(),
+            sequence
+        ))
+        .map_err(managed_error)?;
+    let mut file = filesystem
+        .create_new_file(&pending)
+        .map_err(managed_error)?;
     if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         drop(file);
-        let _ = fs::remove_file(&pending);
-        return Err(io_error("write", &pending, &error));
+        let _ = filesystem.remove_file_if_exists(&pending);
+        return Err(io_error(
+            "write",
+            &filesystem.display_path(&pending),
+            &error,
+        ));
     }
     drop(file);
-    if let Err(error) = fs::rename(&pending, path) {
-        let _ = fs::remove_file(&pending);
-        if path.exists() {
-            let existing =
-                fs::read(path).map_err(|read_error| io_error("read", path, &read_error))?;
+    if let Err(error) = filesystem.rename(&pending, path) {
+        let _ = filesystem.remove_file_if_exists(&pending);
+        if filesystem.exists(path).map_err(managed_error)? {
+            let existing = filesystem.read(path).map_err(managed_error)?;
             if existing == bytes {
                 return Ok(());
             }
@@ -953,27 +986,13 @@ fn publish_immutable(path: &Path, bytes: &[u8]) -> Result<(), RunnerError> {
                 RunnerErrorKind::JournalConflict,
                 format!(
                     "Immutable check journal {} was published with different bytes",
-                    path.display()
+                    filesystem.display_path(path).display()
                 ),
             ));
         }
-        return Err(io_error("publish", path, &error));
+        return Err(managed_error(error));
     }
-    sync_directory(parent)
-}
-
-#[cfg(unix)]
-fn sync_directory(directory: &Path) -> Result<(), RunnerError> {
-    File::open(directory)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| io_error("sync", directory, &error))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(directory: &Path) -> Result<(), RunnerError> {
-    fs::metadata(directory)
-        .map(|_| ())
-        .map_err(|error| io_error("inspect", directory, &error))
+    filesystem.sync_parent(path).map_err(managed_error)
 }
 
 fn invalid_request(message: impl Into<String>) -> RunnerError {
@@ -989,4 +1008,14 @@ fn io_error(action: &str, path: &Path, error: &io::Error) -> RunnerError {
         RunnerErrorKind::Io,
         format!("Failed to {action} {}: {error}", path.display()),
     )
+}
+
+fn managed_error(error: ManagedFsError) -> RunnerError {
+    let kind = match error.kind() {
+        ManagedFsErrorKind::InvalidPath | ManagedFsErrorKind::UnsafeComponent => {
+            RunnerErrorKind::CorruptJournal
+        }
+        ManagedFsErrorKind::Io => RunnerErrorKind::Io,
+    };
+    RunnerError::new(kind, error.into_message())
 }

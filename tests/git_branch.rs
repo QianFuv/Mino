@@ -6,8 +6,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::fs::{symlink_dir, symlink_file};
+
 use fs4::FileExt;
 use mino::domain::{GitReadiness, Plan, PlanDraftSeed, PlanId, RequestId, Timestamp};
+use mino::git::{ActiveBindingStore, GitAdapter, GitBranchJournalStore, GitErrorKind};
 use mino::integration::IntegrationOptions;
 use mino::project::initialize_with_options;
 use mino::render::{render_plan, write_projection};
@@ -78,6 +84,75 @@ impl Drop for TestArea {
             let _ = fs::remove_dir_all(&self.root);
         }
     }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn branch_journal_rejects_a_symlinked_git_state_directory() {
+    let area = TestArea::new("journal-symlink");
+    let (root, _) = area.repository("repository");
+    let external = TestArea::new("journal-symlink-external");
+    let sentinel = external.root.join("sentinel.txt");
+    fs::write(&sentinel, b"outside\n").expect("outside sentinel should be written");
+    #[cfg(unix)]
+    let symlink_result = symlink(&external.root, root.join(".mino/git"));
+    #[cfg(windows)]
+    let symlink_result = symlink_dir(&external.root, root.join(".mino/git"));
+    if symlink_result
+        .as_ref()
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+    {
+        return;
+    }
+    symlink_result.expect("Git state symlink should be created");
+
+    let error = GitBranchJournalStore::new(&root)
+        .lock()
+        .expect_err("symlinked Git journal directory must be rejected");
+    assert_eq!(error.kind(), GitErrorKind::InvalidOutput);
+    assert_eq!(
+        fs::read(&sentinel).expect("outside sentinel should remain readable"),
+        b"outside\n"
+    );
+    assert_eq!(
+        fs::read_dir(&external.root)
+            .expect("outside directory should remain readable")
+            .count(),
+        1
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn active_binding_store_rejects_a_symlinked_target_file() {
+    let area = TestArea::new("binding-symlink");
+    let (root, plan_id) = area.repository("repository");
+    let external = TestArea::new("binding-symlink-external");
+    let sentinel = external.root.join("active.json");
+    fs::write(&sentinel, b"outside\n").expect("outside sentinel should be written");
+    #[cfg(unix)]
+    let symlink_result = symlink(&sentinel, root.join(".mino/active.json"));
+    #[cfg(windows)]
+    let symlink_result = symlink_file(&sentinel, root.join(".mino/active.json"));
+    if symlink_result
+        .as_ref()
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+    {
+        return;
+    }
+    symlink_result.expect("active binding symlink should be created");
+    let facts = GitAdapter::new(&root)
+        .inspect()
+        .expect("Git facts should inspect");
+
+    let error = ActiveBindingStore::new(&root)
+        .bind(&facts, plan_id, 1, timestamp())
+        .expect_err("symlinked active binding must be rejected");
+    assert_eq!(error.kind(), GitErrorKind::InvalidOutput);
+    assert_eq!(
+        fs::read(&sentinel).expect("outside sentinel should remain readable"),
+        b"outside\n"
+    );
 }
 
 #[test]

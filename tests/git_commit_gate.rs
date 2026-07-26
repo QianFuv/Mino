@@ -8,6 +8,11 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(windows)]
+use std::os::windows::fs::symlink_dir;
+
 use fs4::FileExt;
 use mino::ErrorCategory;
 use mino::application::completion::CompletionService;
@@ -21,7 +26,7 @@ use mino::domain::{
     PlanStatus, RequestId, Task, TaskId, Timestamp, VerificationCheck,
 };
 use mino::evidence::EvidenceStore;
-use mino::git::{GitAdapter, GitCommitJournalStore};
+use mino::git::{GitAdapter, GitCommitJournalStore, GitErrorKind};
 use mino::project::initialize;
 use mino::render::{render_plan, write_projection};
 use mino::store::{MutationRequest, PlanStore};
@@ -92,6 +97,32 @@ impl Drop for TestRepository {
             let _ = fs::remove_dir_all(&self.root);
         }
     }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn commit_journal_rejects_a_symlinked_git_state_directory() {
+    let repository = TestRepository::new("journal-symlink", FixtureState::Done, true);
+    let external = TestRepository::new("journal-symlink-external", FixtureState::Done, true);
+    let git_state = repository.root.join(".mino/git");
+    #[cfg(unix)]
+    let symlink_result = symlink(external.root(), &git_state);
+    #[cfg(windows)]
+    let symlink_result = symlink_dir(external.root(), &git_state);
+    if symlink_result
+        .as_ref()
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+    {
+        return;
+    }
+    symlink_result.expect("Git state symlink should be created");
+
+    let error = repository
+        .journal()
+        .lock()
+        .expect_err("symlinked commit journal directory must be rejected");
+    assert_eq!(error.kind(), GitErrorKind::InvalidOutput);
+    assert!(!external.root.join("commit.lock").exists());
 }
 
 #[test]

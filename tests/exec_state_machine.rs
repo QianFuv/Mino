@@ -647,16 +647,14 @@ fn prepare_abandoned_lease(project: &TestProject, request: &PlanMutationRequest)
         redactor.policy_digest(),
     )
     .expect("lease should be valid");
-    CheckRunJournal::new(
-        project
-            .path()
-            .join(".mino")
-            .join("plans")
-            .join(plan_id().as_str())
-            .join("runs"),
-    )
-    .begin(&lease)
-    .expect("abandoned lease should persist");
+    let journal_directory = PathBuf::from(".mino")
+        .join("plans")
+        .join(plan_id().as_str())
+        .join("runs");
+    CheckRunJournal::new(project.path(), &journal_directory)
+        .expect("journal should be valid")
+        .begin(&lease)
+        .expect("abandoned lease should persist");
 }
 
 fn phase_request_id(request_id: &RequestId, phase: &str) -> RequestId {

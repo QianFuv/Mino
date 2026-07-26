@@ -194,6 +194,15 @@ impl ProjectFs {
         self.open_directory(path).map(|_| ())
     }
 
+    pub(crate) fn create_directory(&self, path: &ManagedPath) -> Result<(), ManagedFsError> {
+        self.ensure_parent(path)?;
+        self.reject_final_symlink(path)?;
+        self.directory.create_dir(path.as_path()).map_err(|error| {
+            io_error("create managed directory", &self.display_path(path), &error)
+        })?;
+        self.require_directory(path)
+    }
+
     pub(crate) fn entry_kind(
         &self,
         path: &ManagedPath,
@@ -234,6 +243,33 @@ impl ProjectFs {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .map_err(|error| io_error("read managed file", &self.display_path(path), &error))?;
+        Ok(bytes)
+    }
+
+    pub(crate) fn read_bounded(
+        &self,
+        path: &ManagedPath,
+        maximum_bytes: u64,
+    ) -> Result<Vec<u8>, ManagedFsError> {
+        self.require_file(path)?;
+        let file = self
+            .directory
+            .open(path.as_path())
+            .map(cap_std::fs::File::into_std)
+            .map_err(|error| io_error("open managed file", &self.display_path(path), &error))?;
+        let mut bytes = Vec::new();
+        file.take(maximum_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| io_error("read managed file", &self.display_path(path), &error))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum_bytes {
+            return Err(ManagedFsError::new(
+                ManagedFsErrorKind::UnsafeComponent,
+                format!(
+                    "Managed file {} exceeds the {maximum_bytes}-byte limit",
+                    self.display_path(path).display()
+                ),
+            ));
+        }
         Ok(bytes)
     }
 
@@ -280,6 +316,16 @@ impl ProjectFs {
         self.open_with(path, &options, "open managed file for writing")
     }
 
+    pub(crate) fn open_read_write_file(
+        &self,
+        path: &ManagedPath,
+    ) -> Result<std::fs::File, ManagedFsError> {
+        self.require_file(path)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+        self.open_with(path, &options, "open managed file for reading and writing")
+    }
+
     pub(crate) fn rename(
         &self,
         source: &ManagedPath,
@@ -301,6 +347,23 @@ impl ProjectFs {
                     &error,
                 )
             })
+    }
+
+    pub(crate) fn hard_link(
+        &self,
+        source: &ManagedPath,
+        destination: &ManagedPath,
+    ) -> Result<(), ManagedFsError> {
+        self.require_file(source)?;
+        self.ensure_parent(destination)?;
+        self.reject_final_symlink(destination)?;
+        self.directory
+            .hard_link(
+                source.as_path(),
+                self.directory.as_ref(),
+                destination.as_path(),
+            )
+            .map_err(|error| io_error("link managed file", &self.display_path(destination), &error))
     }
 
     pub(crate) fn remove_file(&self, path: &ManagedPath) -> Result<(), ManagedFsError> {
@@ -327,6 +390,19 @@ impl ProjectFs {
         self.directory
             .remove_dir(path.as_path())
             .map_err(|error| io_error("remove managed directory", &self.display_path(path), &error))
+    }
+
+    pub(crate) fn remove_directory_all(&self, path: &ManagedPath) -> Result<(), ManagedFsError> {
+        self.require_directory(path)?;
+        self.directory
+            .remove_dir_all(path.as_path())
+            .map_err(|error| {
+                io_error(
+                    "remove managed directory tree",
+                    &self.display_path(path),
+                    &error,
+                )
+            })
     }
 
     pub(crate) fn read_directory(

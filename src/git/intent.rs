@@ -1,8 +1,5 @@
 //! Immutable prepared, staged, and completed task-commit journals.
 
-#[cfg(unix)]
-use std::fs::File;
-use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +11,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{EvidenceId, PlanId, TaskId, Timestamp};
+use crate::managed_fs::{ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs};
 
 use super::{GitError, GitErrorKind};
 
@@ -304,33 +302,43 @@ impl GitCommitJournalStore {
         plan_id: &PlanId,
         task_id: &TaskId,
     ) -> Result<Option<GitCommitJournal>, GitError> {
-        let intent_path = self.intent_path(plan_id, task_id);
-        let staged_path = self.staged_path(plan_id, task_id);
-        let completion_path = self.completion_path(plan_id, task_id);
-        if !intent_path.exists() {
-            if staged_path.exists() || completion_path.exists() {
+        let filesystem = self.filesystem()?;
+        let intent_path = Self::intent_managed(plan_id, task_id);
+        let staged_path = Self::staged_managed(plan_id, task_id);
+        let completion_path = Self::completion_managed(plan_id, task_id);
+        if !filesystem.exists(&intent_path).map_err(managed_git_error)? {
+            if filesystem.exists(&staged_path).map_err(managed_git_error)?
+                || filesystem
+                    .exists(&completion_path)
+                    .map_err(managed_git_error)?
+            {
                 return Err(invalid("Commit journal phase exists without an intent"));
             }
             return Ok(None);
         }
-        let intent: GitCommitIntent = read_json(&intent_path)?;
+        let intent: GitCommitIntent = read_json(&filesystem, &intent_path)?;
         validate_intent(&intent)?;
         if &intent.plan_id != plan_id || &intent.task_id != task_id {
             return Err(invalid(
                 "Commit journal path and operation identity disagree",
             ));
         }
-        let staged = staged_path
-            .exists()
-            .then(|| read_json(&staged_path))
-            .transpose()?;
+        let staged = if filesystem.exists(&staged_path).map_err(managed_git_error)? {
+            Some(read_json(&filesystem, &staged_path)?)
+        } else {
+            None
+        };
         if let Some(staged) = &staged {
             validate_staged(&intent, staged)?;
         }
-        let completion = completion_path
-            .exists()
-            .then(|| read_json(&completion_path))
-            .transpose()?;
+        let completion = if filesystem
+            .exists(&completion_path)
+            .map_err(managed_git_error)?
+        {
+            Some(read_json(&filesystem, &completion_path)?)
+        } else {
+            None
+        };
         if completion.is_some() && staged.is_none() {
             return Err(invalid("Commit completion exists without staged state"));
         }
@@ -351,17 +359,25 @@ impl GitCommitJournalStore {
     /// Returns an unavailable error for missing project state, I/O failure, or
     /// lock timeout.
     pub fn lock(&self) -> Result<GitCommitJournalLock, GitError> {
-        let mino_directory = self.project_root.join(".mino");
-        if !mino_directory.is_dir() {
+        let filesystem = self.filesystem()?;
+        let mino_directory = managed_path(".mino");
+        if !filesystem
+            .is_directory(&mino_directory)
+            .map_err(managed_git_error)?
+        {
             return Err(unavailable(format!(
                 "Mino state directory {} is missing",
-                mino_directory.display()
+                filesystem.display_path(&mino_directory).display()
             )));
         }
-        let git_directory = mino_directory.join("git");
-        fs::create_dir_all(&git_directory)
-            .map_err(|error| path_error("create", &git_directory, &error))?;
-        GitCommitJournalLock::acquire(&git_directory.join("commit.lock"))
+        let git_directory = mino_directory.join("git").map_err(managed_git_error)?;
+        filesystem
+            .ensure_directory(&git_directory)
+            .map_err(managed_git_error)?;
+        let lock_path = git_directory
+            .join("commit.lock")
+            .map_err(managed_git_error)?;
+        GitCommitJournalLock::acquire(&filesystem, &lock_path)
     }
 
     /// Publishes or replays a semantically identical prepared intent.
@@ -371,6 +387,7 @@ impl GitCommitJournalStore {
     /// Returns a policy error for a conflicting operation or an environment
     /// error when immutable publication fails.
     pub fn prepare(&self, candidate: GitCommitIntent) -> Result<GitCommitIntent, GitError> {
+        let filesystem = self.filesystem()?;
         validate_intent(&candidate)?;
         if let Some(existing) = self.load(&candidate.plan_id, &candidate.task_id)? {
             if same_intent(&existing.intent, &candidate) {
@@ -381,10 +398,13 @@ impl GitCommitJournalStore {
                 candidate.task_id
             )));
         }
-        let directory = self.operation_directory(&candidate.plan_id, &candidate.task_id);
-        fs::create_dir_all(&directory).map_err(|error| path_error("create", &directory, &error))?;
+        let directory = Self::operation_managed(&candidate.plan_id, &candidate.task_id);
+        filesystem
+            .ensure_directory(&directory)
+            .map_err(managed_git_error)?;
         write_new_json(
-            &self.intent_path(&candidate.plan_id, &candidate.task_id),
+            &filesystem,
+            &Self::intent_managed(&candidate.plan_id, &candidate.task_id),
             &candidate,
         )?;
         Ok(candidate)
@@ -401,6 +421,7 @@ impl GitCommitJournalStore {
         intent: &GitCommitIntent,
         candidate: GitStagedCommit,
     ) -> Result<GitStagedCommit, GitError> {
+        let filesystem = self.filesystem()?;
         validate_staged(intent, &candidate)?;
         let journal = self
             .load(&intent.plan_id, &intent.task_id)?
@@ -415,7 +436,8 @@ impl GitCommitJournalStore {
             return Err(invalid("Stored staged tree conflicts with current index"));
         }
         write_new_json(
-            &self.staged_path(&intent.plan_id, &intent.task_id),
+            &filesystem,
+            &Self::staged_managed(&intent.plan_id, &intent.task_id),
             &candidate,
         )?;
         Ok(candidate)
@@ -433,6 +455,7 @@ impl GitCommitJournalStore {
         staged: &GitStagedCommit,
         candidate: GitCommitCompletion,
     ) -> Result<GitCommitCompletion, GitError> {
+        let filesystem = self.filesystem()?;
         validate_completion(intent, staged, &candidate)?;
         let journal = self
             .load(&intent.plan_id, &intent.task_id)?
@@ -454,7 +477,8 @@ impl GitCommitJournalStore {
             ));
         }
         write_new_json(
-            &self.completion_path(&intent.plan_id, &intent.task_id),
+            &filesystem,
+            &Self::completion_managed(&intent.plan_id, &intent.task_id),
             &candidate,
         )?;
         Ok(candidate)
@@ -466,6 +490,37 @@ impl GitCommitJournalStore {
             .join(plan_id.as_str())
             .join(task_id.as_str())
     }
+
+    fn operation_managed(plan_id: &PlanId, task_id: &TaskId) -> ManagedPath {
+        ManagedPath::new(
+            PathBuf::from(".mino/git/commits")
+                .join(plan_id.as_str())
+                .join(task_id.as_str()),
+        )
+        .expect("validated plan and task IDs should form a managed commit journal path")
+    }
+
+    fn intent_managed(plan_id: &PlanId, task_id: &TaskId) -> ManagedPath {
+        Self::operation_managed(plan_id, task_id)
+            .join("intent.json")
+            .expect("static commit intent name should form a managed path")
+    }
+
+    fn staged_managed(plan_id: &PlanId, task_id: &TaskId) -> ManagedPath {
+        Self::operation_managed(plan_id, task_id)
+            .join("staged.json")
+            .expect("static staged record name should form a managed path")
+    }
+
+    fn completion_managed(plan_id: &PlanId, task_id: &TaskId) -> ManagedPath {
+        Self::operation_managed(plan_id, task_id)
+            .join("completion.json")
+            .expect("static commit completion name should form a managed path")
+    }
+
+    fn filesystem(&self) -> Result<ProjectFs, GitError> {
+        ProjectFs::open(&self.project_root).map_err(managed_git_error)
+    }
 }
 
 /// Held advisory lock for one project commit operation.
@@ -475,14 +530,8 @@ pub struct GitCommitJournalLock {
 }
 
 impl GitCommitJournalLock {
-    fn acquire(path: &Path) -> Result<Self, GitError> {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .map_err(|error| path_error("open commit lock", path, &error))?;
+    fn acquire(filesystem: &ProjectFs, path: &ManagedPath) -> Result<Self, GitError> {
+        let file = filesystem.open_lock_file(path).map_err(managed_git_error)?;
         let started_at = Instant::now();
         loop {
             match FileExt::try_lock(&file) {
@@ -493,11 +542,15 @@ impl GitCommitJournalLock {
                 Err(TryLockError::WouldBlock) => {
                     return Err(unavailable(format!(
                         "Timed out acquiring commit-operation lock {}",
-                        path.display()
+                        filesystem.display_path(path).display()
                     )));
                 }
                 Err(TryLockError::Error(error)) => {
-                    return Err(path_error("lock commit operation", path, &error));
+                    return Err(path_error(
+                        "lock commit operation",
+                        &filesystem.display_path(path),
+                        &error,
+                    ));
                 }
             }
         }
@@ -628,24 +681,32 @@ fn same_completion(left: &GitCommitCompletion, right: &GitCommitCompletion) -> b
         && left.recorded_plan_revision == right.recorded_plan_revision
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, GitError> {
-    let metadata = fs::metadata(path).map_err(|error| path_error("inspect", path, &error))?;
-    if metadata.len() == 0 || metadata.len() > MAX_COMMIT_JOURNAL_BYTES {
+fn read_json<T: DeserializeOwned>(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+) -> Result<T, GitError> {
+    let bytes = filesystem
+        .read_bounded(path, MAX_COMMIT_JOURNAL_BYTES)
+        .map_err(managed_git_error)?;
+    if bytes.is_empty() {
         return Err(invalid(format!(
             "Commit journal {} has an invalid size",
-            path.display()
+            filesystem.display_path(path).display()
         )));
     }
-    let bytes = fs::read(path).map_err(|error| path_error("read", path, &error))?;
     serde_json::from_slice(&bytes).map_err(|error| {
         invalid(format!(
             "Failed to parse commit journal {}: {error}",
-            path.display()
+            filesystem.display_path(path).display()
         ))
     })
 }
 
-fn write_new_json(path: &Path, value: &impl Serialize) -> Result<(), GitError> {
+fn write_new_json(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    value: &impl Serialize,
+) -> Result<(), GitError> {
     let mut bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| invalid(format!("Failed to encode commit journal: {error}")))?;
     bytes.push(b'\n');
@@ -653,25 +714,29 @@ fn write_new_json(path: &Path, value: &impl Serialize) -> Result<(), GitError> {
         .parent()
         .ok_or_else(|| invalid("Commit journal path has no parent directory"))?;
     let sequence = NEXT_COMMIT_FILE.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".mino-commit-{}-{sequence}.tmp",
-        std::process::id()
-    ));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|error| path_error("create", &temporary, &error))?;
+    let temporary = parent
+        .join(format!(
+            ".mino-commit-{}-{sequence}.tmp",
+            std::process::id()
+        ))
+        .map_err(managed_git_error)?;
+    let mut file = filesystem
+        .create_new_file(&temporary)
+        .map_err(managed_git_error)?;
     if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
-        let _ = fs::remove_file(&temporary);
-        return Err(path_error("write", &temporary, &error));
+        let _ = filesystem.remove_file_if_exists(&temporary);
+        return Err(path_error(
+            "write",
+            &filesystem.display_path(&temporary),
+            &error,
+        ));
     }
     drop(file);
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(path_error("publish", path, &error));
+    if let Err(error) = filesystem.rename(&temporary, path) {
+        let _ = filesystem.remove_file_if_exists(&temporary);
+        return Err(managed_git_error(error));
     }
-    sync_directory(parent)
+    filesystem.sync_parent(path).map_err(managed_git_error)
 }
 
 fn is_object_id(value: &str) -> bool {
@@ -694,16 +759,16 @@ fn path_error(action: &str, path: &Path, error: &std::io::Error) -> GitError {
     unavailable(format!("Failed to {action} {}: {error}", path.display()))
 }
 
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), GitError> {
-    File::open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| path_error("synchronize directory", path, &error))
+fn managed_path(path: &str) -> ManagedPath {
+    ManagedPath::new(path).expect("static Git journal path should be valid")
 }
 
-#[cfg(not(unix))]
-fn sync_directory(path: &Path) -> Result<(), GitError> {
-    fs::metadata(path)
-        .map(|_| ())
-        .map_err(|error| path_error("inspect directory", path, &error))
+fn managed_git_error(error: ManagedFsError) -> GitError {
+    let kind = match error.kind() {
+        ManagedFsErrorKind::InvalidPath | ManagedFsErrorKind::UnsafeComponent => {
+            GitErrorKind::InvalidOutput
+        }
+        ManagedFsErrorKind::Io => GitErrorKind::Unavailable,
+    };
+    GitError::new(kind, error.into_message())
 }

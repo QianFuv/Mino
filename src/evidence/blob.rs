@@ -1,11 +1,12 @@
 //! Bounded artifact capture and immutable content-addressed blob publication.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::domain::{EvidenceType, Redaction};
+use crate::managed_fs::{ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs};
 use crate::runner::Redactor;
 use crate::store::sha256_digest;
 
@@ -84,23 +85,32 @@ pub(crate) fn prepare_artifact(
     })
 }
 
-pub(crate) fn blob_path(blob_directory: &Path, digest: &str) -> Result<PathBuf, EvidenceError> {
+pub(crate) fn blob_path(
+    blob_directory: &ManagedPath,
+    digest: &str,
+) -> Result<ManagedPath, EvidenceError> {
     let hexadecimal = validated_digest(digest)?;
-    Ok(blob_directory.join(format!("{hexadecimal}.blob")))
+    blob_directory
+        .join(format!("{hexadecimal}.blob"))
+        .map_err(managed_error)
 }
 
 pub(crate) fn publish_blob(
-    blob_directory: &Path,
+    filesystem: &ProjectFs,
+    blob_directory: &ManagedPath,
     artifact: &PreparedArtifact,
 ) -> Result<bool, EvidenceError> {
     let path = blob_path(blob_directory, &artifact.digest)?;
-    publish_immutable(&path, &artifact.bytes)
+    publish_immutable(filesystem, &path, &artifact.bytes)
 }
 
-pub(crate) fn publish_immutable(path: &Path, bytes: &[u8]) -> Result<bool, EvidenceError> {
-    if path.exists() {
-        let existing =
-            fs::read(path).map_err(|error| io_error("read immutable artifact", path, &error))?;
+pub(crate) fn publish_immutable(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    bytes: &[u8],
+) -> Result<bool, EvidenceError> {
+    if filesystem.exists(path).map_err(managed_error)? {
+        let existing = filesystem.read(path).map_err(managed_error)?;
         if existing == bytes {
             return Ok(true);
         }
@@ -108,44 +118,52 @@ pub(crate) fn publish_immutable(path: &Path, bytes: &[u8]) -> Result<bool, Evide
             EvidenceErrorKind::CorruptStore,
             format!(
                 "Immutable artifact {} has conflicting bytes",
-                path.display()
+                filesystem.display_path(path).display()
             ),
         ));
     }
     let parent = path.parent().ok_or_else(|| {
         EvidenceError::new(
             EvidenceErrorKind::Io,
-            format!("Immutable artifact {} has no parent", path.display()),
+            format!(
+                "Immutable artifact {} has no parent",
+                filesystem.display_path(path).display()
+            ),
         )
     })?;
-    fs::create_dir_all(parent)
-        .map_err(|error| io_error("create immutable artifact directory", parent, &error))?;
+    filesystem
+        .ensure_directory(&parent)
+        .map_err(managed_error)?;
     let sequence = NEXT_PENDING_BLOB.fetch_add(1, Ordering::Relaxed);
     let file_name = path
+        .as_path()
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("artifact");
-    let pending = parent.join(format!(
-        ".{file_name}.{}.{}.pending",
-        std::process::id(),
-        sequence
-    ));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&pending)
-        .map_err(|error| io_error("create immutable artifact", &pending, &error))?;
+    let pending = parent
+        .join(format!(
+            ".{file_name}.{}.{}.pending",
+            std::process::id(),
+            sequence
+        ))
+        .map_err(managed_error)?;
+    let mut file = filesystem
+        .create_new_file(&pending)
+        .map_err(managed_error)?;
     if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         drop(file);
-        let _ = fs::remove_file(&pending);
-        return Err(io_error("write immutable artifact", &pending, &error));
+        let _ = filesystem.remove_file_if_exists(&pending);
+        return Err(io_error(
+            "write immutable artifact",
+            &filesystem.display_path(&pending),
+            &error,
+        ));
     }
     drop(file);
-    if let Err(error) = fs::rename(&pending, path) {
-        let _ = fs::remove_file(&pending);
-        if path.exists() {
-            let existing =
-                fs::read(path).map_err(|read_error| io_error("read", path, &read_error))?;
+    if let Err(error) = filesystem.rename(&pending, path) {
+        let _ = filesystem.remove_file_if_exists(&pending);
+        if filesystem.exists(path).map_err(managed_error)? {
+            let existing = filesystem.read(path).map_err(managed_error)?;
             if existing == bytes {
                 return Ok(true);
             }
@@ -153,13 +171,13 @@ pub(crate) fn publish_immutable(path: &Path, bytes: &[u8]) -> Result<bool, Evide
                 EvidenceErrorKind::CorruptStore,
                 format!(
                     "Immutable artifact {} was concurrently published with different bytes",
-                    path.display()
+                    filesystem.display_path(path).display()
                 ),
             ));
         }
-        return Err(io_error("publish immutable artifact", path, &error));
+        return Err(managed_error(error));
     }
-    sync_directory(parent)?;
+    filesystem.sync_parent(path).map_err(managed_error)?;
     Ok(false)
 }
 
@@ -234,16 +252,12 @@ fn io_error(action: &str, path: &Path, error: &std::io::Error) -> EvidenceError 
     )
 }
 
-#[cfg(unix)]
-fn sync_directory(directory: &Path) -> Result<(), EvidenceError> {
-    File::open(directory)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| io_error("synchronize directory", directory, &error))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(directory: &Path) -> Result<(), EvidenceError> {
-    fs::metadata(directory)
-        .map(|_| ())
-        .map_err(|error| io_error("inspect directory", directory, &error))
+fn managed_error(error: ManagedFsError) -> EvidenceError {
+    let kind = match error.kind() {
+        ManagedFsErrorKind::InvalidPath | ManagedFsErrorKind::UnsafeComponent => {
+            EvidenceErrorKind::CorruptStore
+        }
+        ManagedFsErrorKind::Io => EvidenceErrorKind::Io,
+    };
+    EvidenceError::new(kind, error.into_message())
 }

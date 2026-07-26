@@ -1,9 +1,6 @@
 //! Explicit bounded catalog synchronization with digest verification and atomic activation.
 
 use std::collections::BTreeSet;
-#[cfg(unix)]
-use std::fs::File;
-use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +10,9 @@ use std::time::{Duration, Instant};
 use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};
 
+use crate::managed_fs::{
+    ManagedEntryKind, ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs,
+};
 use crate::project::{LockedStandard, ProjectConfig, ProjectLayout, StandardsLock};
 use crate::store::sha256_digest;
 use crate::{ErrorCategory, MinoError, NextAction};
@@ -275,14 +275,10 @@ struct SyncLock {
 }
 
 impl SyncLock {
-    fn acquire(path: &Path) -> Result<Self, MinoError> {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .map_err(|error| path_error("open synchronization lock", path, &error))?;
+    fn acquire(filesystem: &ProjectFs, path: &ManagedPath) -> Result<Self, MinoError> {
+        let file = filesystem
+            .open_lock_file(path)
+            .map_err(managed_sync_error)?;
         let started_at = Instant::now();
         loop {
             match FileExt::try_lock(&file) {
@@ -294,11 +290,15 @@ impl SyncLock {
                 Err(TryLockError::WouldBlock) => {
                     return Err(sync_error(format!(
                         "Timed out acquiring synchronization lock {}",
-                        path.display()
+                        filesystem.display_path(path).display()
                     )));
                 }
                 Err(TryLockError::Error(error)) => {
-                    return Err(path_error("acquire synchronization lock", path, &error));
+                    return Err(path_error(
+                        "acquire synchronization lock",
+                        &filesystem.display_path(path),
+                        &error,
+                    ));
                 }
             }
         }
@@ -312,24 +312,30 @@ impl Drop for SyncLock {
 }
 
 struct StagingDirectory {
-    path: PathBuf,
+    filesystem: ProjectFs,
+    path: ManagedPath,
     should_remove: bool,
 }
 
 impl StagingDirectory {
-    fn create(parent: &Path) -> Result<Self, MinoError> {
+    fn create(filesystem: &ProjectFs, parent: &ManagedPath) -> Result<Self, MinoError> {
         for _ in 0..100 {
             let sequence = NEXT_STAGING_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-            let path = parent.join(format!(".staging-{}-{sequence}", std::process::id()));
-            match fs::create_dir(&path) {
+            let path = parent
+                .join(format!(".staging-{}-{sequence}", std::process::id()))
+                .map_err(managed_sync_error)?;
+            match filesystem.create_directory(&path) {
                 Ok(()) => {
                     return Ok(Self {
+                        filesystem: filesystem.clone(),
                         path,
                         should_remove: true,
                     });
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(path_error("create staging directory", &path, &error)),
+                Err(error)
+                    if error.kind() == ManagedFsErrorKind::Io
+                        && error.to_string().contains("already exists") => {}
+                Err(error) => return Err(managed_sync_error(error)),
             }
         }
         Err(sync_error(
@@ -347,10 +353,11 @@ impl Drop for StagingDirectory {
         if self.should_remove
             && self
                 .path
+                .as_path()
                 .file_name()
                 .is_some_and(|name| name.to_string_lossy().starts_with(".staging-"))
         {
-            let _ = fs::remove_dir_all(&self.path);
+            let _ = self.filesystem.remove_directory_all(&self.path);
         }
     }
 }
@@ -384,7 +391,8 @@ pub fn synchronize_all_with_options(
 ) -> Result<StandardsSyncReport, MinoError> {
     let project_root = crate::project::discover(start)?;
     let layout = ProjectLayout::new(project_root.path());
-    let catalog_url = load_catalog_url(&layout)?;
+    let filesystem = ProjectFs::open(layout.root()).map_err(managed_sync_error)?;
+    let catalog_url = load_catalog_url(&layout, &filesystem)?;
     validate_url(&catalog_url, options.source_policy)?;
     let mut fetch_session = FetchSession::new(options);
     let catalog_bytes = fetch_session.fetch(&catalog_url, options.limits.max_catalog_bytes)?;
@@ -404,18 +412,18 @@ pub fn synchronize_all_with_options(
         ))
     })?;
     let catalog_digest = sha256_digest(&catalog_bytes);
-    let sync_lock_path = layout.mino_directory().join("standards-sync.lock");
-    let sync_lock = SyncLock::acquire(&sync_lock_path)?;
-    let current_url = load_catalog_url(&layout)?;
+    let sync_lock_path = managed_path(".mino/standards-sync.lock");
+    let sync_lock = SyncLock::acquire(&filesystem, &sync_lock_path)?;
+    let current_url = load_catalog_url(&layout, &filesystem)?;
     if current_url != catalog_url {
         return Err(sync_error(
             "Catalog configuration changed while synchronization was in progress",
         ));
     }
     let (generation, reused_generation) =
-        publish_generation(&layout, &catalog_digest, &catalog_bytes, &downloaded)?;
+        publish_generation(&filesystem, &catalog_digest, &catalog_bytes, &downloaded)?;
     let lock = standards_lock(&catalog_digest, &downloaded);
-    replace_lock(&layout.standards_lock(), &lock)?;
+    replace_lock(&filesystem, &ProjectLayout::standards_lock_managed(), &lock)?;
     drop(sync_lock);
     let packages = downloaded
         .into_iter()
@@ -435,11 +443,18 @@ pub fn synchronize_all_with_options(
     })
 }
 
-fn load_catalog_url(layout: &ProjectLayout) -> Result<String, MinoError> {
+fn load_catalog_url(layout: &ProjectLayout, filesystem: &ProjectFs) -> Result<String, MinoError> {
     let path = layout.config();
-    let contents = fs::read_to_string(&path)
-        .map_err(|error| path_error("read project configuration", &path, &error))?;
-    let config: ProjectConfig = toml::from_str(&contents).map_err(|error| {
+    let bytes = filesystem
+        .read(&ProjectLayout::config_managed())
+        .map_err(managed_sync_error)?;
+    let contents = std::str::from_utf8(&bytes).map_err(|error| {
+        sync_error(format!(
+            "Project configuration {} is not UTF-8: {error}",
+            path.display()
+        ))
+    })?;
+    let config: ProjectConfig = toml::from_str(contents).map_err(|error| {
         sync_error(format!(
             "Failed to parse project configuration {}: {error}",
             path.display()
@@ -575,61 +590,88 @@ fn normalize_document(package_id: &str, document: &str, bytes: &[u8]) -> Result<
 }
 
 fn publish_generation(
-    layout: &ProjectLayout,
+    filesystem: &ProjectFs,
     catalog_digest: &str,
     catalog_bytes: &[u8],
     packages: &[DownloadedPackage],
 ) -> Result<(PathBuf, bool), MinoError> {
-    let cache_root = layout.standards_cache();
-    let generations = cache_root.join("generations");
-    fs::create_dir_all(&generations)
-        .map_err(|error| path_error("create cache generations", &generations, &error))?;
-    let mut staging = StagingDirectory::create(&generations)?;
-    write_generation(&staging.path, catalog_bytes, packages)?;
-    verify_generation(&staging.path, catalog_bytes, packages)?;
-    sync_directory(&staging.path)?;
-    let generation = generations.join(digest_segment(catalog_digest)?);
-    let reused_generation = if generation.exists() {
-        verify_generation(&generation, catalog_bytes, packages)?;
+    let cache_root = ProjectLayout::standards_cache_managed();
+    let generations = cache_root
+        .join("generations")
+        .expect("static generations directory should form a managed path");
+    filesystem
+        .ensure_directory(&generations)
+        .map_err(managed_sync_error)?;
+    let mut staging = StagingDirectory::create(filesystem, &generations)?;
+    write_generation(filesystem, &staging.path, catalog_bytes, packages)?;
+    verify_generation(filesystem, &staging.path, catalog_bytes, packages)?;
+    filesystem
+        .sync_directory(Some(&staging.path))
+        .map_err(managed_sync_error)?;
+    let generation = generations
+        .join(digest_segment(catalog_digest)?)
+        .map_err(managed_sync_error)?;
+    let reused_generation = if filesystem.exists(&generation).map_err(managed_sync_error)? {
+        verify_generation(filesystem, &generation, catalog_bytes, packages)?;
         true
     } else {
-        fs::rename(&staging.path, &generation)
-            .map_err(|error| path_error("publish cache generation", &generation, &error))?;
+        filesystem
+            .rename(&staging.path, &generation)
+            .map_err(managed_sync_error)?;
         staging.mark_published();
-        sync_directory(&generations)?;
+        filesystem
+            .sync_directory(Some(&generations))
+            .map_err(managed_sync_error)?;
         false
     };
-    Ok((generation, reused_generation))
+    Ok((filesystem.display_path(&generation), reused_generation))
 }
 
 fn write_generation(
-    root: &Path,
+    filesystem: &ProjectFs,
+    root: &ManagedPath,
     catalog_bytes: &[u8],
     packages: &[DownloadedPackage],
 ) -> Result<(), MinoError> {
-    write_new_file(&root.join("catalog.toml"), catalog_bytes)?;
+    write_new_file(
+        filesystem,
+        &root
+            .join("catalog.toml")
+            .expect("static catalog file name should form a managed path"),
+        catalog_bytes,
+    )?;
     for download in packages {
         let directory = root
             .join("packages")
-            .join(download.package.package_id())
-            .join(download.package.version());
-        fs::create_dir_all(&directory)
-            .map_err(|error| path_error("create package cache", &directory, &error))?;
-        write_new_file(&directory.join("manifest.toml"), &download.manifest)?;
-        write_new_file(&directory.join("rules.toml"), &download.rules)?;
-        write_new_file(&directory.join("checks.toml"), &download.checks)?;
-        sync_directory(&directory)?;
+            .and_then(|path| path.join(download.package.package_id()))
+            .and_then(|path| path.join(download.package.version()))
+            .map_err(managed_sync_error)?;
+        filesystem
+            .ensure_directory(&directory)
+            .map_err(managed_sync_error)?;
+        for (name, bytes) in [
+            ("manifest.toml", download.manifest.as_slice()),
+            ("rules.toml", download.rules.as_slice()),
+            ("checks.toml", download.checks.as_slice()),
+        ] {
+            let path = directory.join(name).map_err(managed_sync_error)?;
+            write_new_file(filesystem, &path, bytes)?;
+        }
+        filesystem
+            .sync_directory(Some(&directory))
+            .map_err(managed_sync_error)?;
     }
     Ok(())
 }
 
 fn verify_generation(
-    root: &Path,
+    filesystem: &ProjectFs,
+    root: &ManagedPath,
     catalog_bytes: &[u8],
     packages: &[DownloadedPackage],
 ) -> Result<(), MinoError> {
     let mut expected_paths = BTreeSet::from([PathBuf::from("catalog.toml")]);
-    verify_cached_file(root, Path::new("catalog.toml"), catalog_bytes)?;
+    verify_cached_file(filesystem, root, Path::new("catalog.toml"), catalog_bytes)?;
     for download in packages {
         let base = PathBuf::from("packages")
             .join(download.package.package_id())
@@ -640,68 +682,72 @@ fn verify_generation(
             ("checks.toml", download.checks.as_slice()),
         ] {
             let relative = base.join(name);
-            verify_cached_file(root, &relative, bytes)?;
+            verify_cached_file(filesystem, root, &relative, bytes)?;
             expected_paths.insert(relative);
         }
     }
     let mut actual_paths = BTreeSet::new();
-    collect_files(root, root, &mut actual_paths)?;
+    collect_files(filesystem, root, root, &mut actual_paths)?;
     if actual_paths != expected_paths {
         return Err(sync_error(format!(
             "Cache generation {} contains missing or unexpected files",
-            root.display()
+            filesystem.display_path(root).display()
         )));
     }
     Ok(())
 }
 
-fn verify_cached_file(root: &Path, relative: &Path, expected: &[u8]) -> Result<(), MinoError> {
-    let path = root.join(relative);
-    let actual =
-        fs::read(&path).map_err(|error| path_error("read cached document", &path, &error))?;
+fn verify_cached_file(
+    filesystem: &ProjectFs,
+    root: &ManagedPath,
+    relative: &Path,
+    expected: &[u8],
+) -> Result<(), MinoError> {
+    let path = root.join(relative).map_err(managed_sync_error)?;
+    let actual = filesystem.read(&path).map_err(managed_sync_error)?;
     if actual != expected {
         return Err(sync_error(format!(
             "Cached document {} differs from verified downloaded bytes",
-            path.display()
+            filesystem.display_path(&path).display()
         )));
     }
     Ok(())
 }
 
 fn collect_files(
-    root: &Path,
-    directory: &Path,
+    filesystem: &ProjectFs,
+    root: &ManagedPath,
+    directory: &ManagedPath,
     files: &mut BTreeSet<PathBuf>,
 ) -> Result<(), MinoError> {
-    for entry in fs::read_dir(directory)
-        .map_err(|error| path_error("enumerate cache generation", directory, &error))?
+    for entry in filesystem
+        .read_directory(directory)
+        .map_err(managed_sync_error)?
     {
-        let entry =
-            entry.map_err(|error| path_error("read cache generation entry", directory, &error))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| path_error("inspect cache generation entry", &path, &error))?;
-        if file_type.is_symlink() {
+        let path = directory.join(&entry.name).map_err(managed_sync_error)?;
+        if entry.kind == ManagedEntryKind::Symlink {
             return Err(sync_error(format!(
                 "Cache generation {} contains a symbolic link",
-                path.display()
+                filesystem.display_path(&path).display()
             )));
         }
-        if file_type.is_dir() {
-            collect_files(root, &path, files)?;
-        } else if file_type.is_file() {
-            let relative = path.strip_prefix(root).map_err(|error| {
-                sync_error(format!(
-                    "Cache path {} escaped its generation: {error}",
-                    path.display()
-                ))
-            })?;
+        if entry.kind == ManagedEntryKind::Directory {
+            collect_files(filesystem, root, &path, files)?;
+        } else if entry.kind == ManagedEntryKind::File {
+            let relative = path
+                .as_path()
+                .strip_prefix(root.as_path())
+                .map_err(|error| {
+                    sync_error(format!(
+                        "Cache path {} escaped its generation: {error}",
+                        filesystem.display_path(&path).display()
+                    ))
+                })?;
             files.insert(relative.to_path_buf());
         } else {
             return Err(sync_error(format!(
                 "Cache generation {} contains an unsupported entry",
-                path.display()
+                filesystem.display_path(&path).display()
             )));
         }
     }
@@ -723,25 +769,31 @@ fn standards_lock(catalog_digest: &str, packages: &[DownloadedPackage]) -> Stand
     }
 }
 
-fn replace_lock(path: &Path, lock: &StandardsLock) -> Result<(), MinoError> {
+fn replace_lock(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    lock: &StandardsLock,
+) -> Result<(), MinoError> {
     let bytes = serialize_lock(lock)?;
     let parent = path.parent().ok_or_else(|| {
         sync_error(format!(
             "Standards lock path {} has no parent directory",
-            path.display()
+            filesystem.display_path(path).display()
         ))
     })?;
     let sequence = NEXT_STAGING_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".standards.lock.sync-{}-{sequence}.tmp",
-        std::process::id()
-    ));
-    write_new_file(&temporary, &bytes)?;
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(path_error("replace standards lock", path, &error));
+    let temporary = parent
+        .join(format!(
+            ".standards.lock.sync-{}-{sequence}.tmp",
+            std::process::id()
+        ))
+        .map_err(managed_sync_error)?;
+    write_new_file(filesystem, &temporary, &bytes)?;
+    if let Err(error) = filesystem.rename(&temporary, path) {
+        let _ = filesystem.remove_file_if_exists(&temporary);
+        return Err(managed_sync_error(error));
     }
-    sync_directory(parent)
+    filesystem.sync_parent(path).map_err(managed_sync_error)
 }
 
 fn serialize_lock(lock: &StandardsLock) -> Result<Vec<u8>, MinoError> {
@@ -754,15 +806,17 @@ fn serialize_lock(lock: &StandardsLock) -> Result<Vec<u8>, MinoError> {
     Ok(rendered.into_bytes())
 }
 
-fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), MinoError> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .map_err(|error| path_error("create cache file", path, &error))?;
+fn write_new_file(
+    filesystem: &ProjectFs,
+    path: &ManagedPath,
+    bytes: &[u8],
+) -> Result<(), MinoError> {
+    let mut file = filesystem
+        .create_new_file(path)
+        .map_err(managed_sync_error)?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|error| path_error("write cache file", path, &error))
+        .map_err(|error| path_error("write cache file", &filesystem.display_path(path), &error))
 }
 
 fn digest_segment(digest: &str) -> Result<&str, MinoError> {
@@ -875,16 +929,16 @@ fn sync_error(message: impl Into<String>) -> MinoError {
     MinoError::new(ErrorCategory::EnvironmentUnavailable, message)
 }
 
-#[cfg(unix)]
-fn sync_directory(directory: &Path) -> Result<(), MinoError> {
-    File::open(directory)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| path_error("synchronize directory", directory, &error))
+fn managed_path(path: &str) -> ManagedPath {
+    ManagedPath::new(path).expect("static standards path should be valid")
 }
 
-#[cfg(not(unix))]
-fn sync_directory(directory: &Path) -> Result<(), MinoError> {
-    fs::metadata(directory)
-        .map(|_| ())
-        .map_err(|error| path_error("inspect directory", directory, &error))
+fn managed_sync_error(error: ManagedFsError) -> MinoError {
+    let category = match error.kind() {
+        ManagedFsErrorKind::InvalidPath | ManagedFsErrorKind::UnsafeComponent => {
+            ErrorCategory::DriftDetected
+        }
+        ManagedFsErrorKind::Io => ErrorCategory::EnvironmentUnavailable,
+    };
+    MinoError::new(category, error.into_message())
 }

@@ -460,6 +460,16 @@ fn create_file_symlink(target: &Path, link: &Path) -> bool {
     std::os::windows::fs::symlink_file(target, link).is_ok()
 }
 
+#[cfg(unix)]
+fn create_directory_symlink(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[cfg(windows)]
+fn create_directory_symlink(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_dir(target, link).is_ok()
+}
+
 fn run_mino(project: &TestProject, arguments: &[String]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mino"))
         .args([
@@ -851,6 +861,35 @@ fn unsafe_cancellation_and_summary_paths_fail_before_plan_mutation() {
     assert_eq!(error.category(), ErrorCategory::DriftDetected);
     assert_eq!(fs::read(plan_path).expect("plan should read"), plan_before);
     assert_eq!(project.marker_attempts(), 0);
+}
+
+#[test]
+fn symlinked_monitor_directory_cannot_publish_an_external_summary() {
+    let project = TestProject::new("monitor-symlink", Fixture::Fail);
+    let external = TestProject::new("monitor-symlink-external", Fixture::Fail);
+    let monitors = project
+        .path
+        .join(".mino/plans")
+        .join(plan_id().as_str())
+        .join("monitors");
+    let sentinel = external.path.join("sentinel.txt");
+    fs::write(&sentinel, b"outside\n").expect("outside sentinel should be written");
+    if !create_directory_symlink(external.path(), &monitors) {
+        return;
+    }
+    let service = MonitorService::discover(project.path()).expect("service should discover");
+    let bounds = MonitorBounds::new(1, 1, 10_000).expect("bounds should validate");
+
+    let error = service
+        .run(monitor_request(&project, 64, bounds, None))
+        .expect_err("symlinked monitor directory must be rejected");
+    assert_eq!(error.category(), ErrorCategory::DriftDetected);
+    assert_eq!(project.marker_attempts(), 0);
+    assert_eq!(
+        fs::read(&sentinel).expect("outside sentinel should remain readable"),
+        b"outside\n"
+    );
+    assert!(!external.path.join(request_id(64).as_str()).exists());
 }
 
 #[test]
