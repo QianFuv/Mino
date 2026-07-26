@@ -9,7 +9,7 @@ mod sync;
 
 pub use apply::{
     CommandSource, ResolvedCheck, ResolvedCheckStatus, StandardsApplication, SystemToolProbe,
-    ToolProbe, apply_recommendation,
+    ToolProbe, ToolProbeOutcome, apply_recommendation,
 };
 pub use catalog::{
     CheckTemplate, EmbeddedCatalog, RuleLevel, StandardRule, StandardsPackage,

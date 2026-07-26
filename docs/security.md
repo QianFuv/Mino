@@ -85,6 +85,12 @@ spawn failure、unexpected exit、timeout、output limit、capture failure 与�
 
 可选 cancellation file 必须是规范化的项目相对普通文件，其父目录已经存在并留在项目内。absolute path、traversal、symlink、directory 和 escaping parent 会在尝试前被拒绝。
 
+### 自动工具探测
+
+标准推荐只以 `<tool> --version`（`cargo-miri` 使用固定的 `cargo +nightly miri --version` argv）探测可用性，不经过 shell。探测使用空 stdin、显式基础环境 allowlist、三秒 deadline 和 64 KiB 合并 stdout/stderr 上限；timeout、输出超限或 capture/observation failure 会终止整个进程树。父进程中的凭据、代理和其他非 allowlist 环境不会传入。
+
+探测异常不会中止标准解析或 `plan create`。结果被类型化为 Available、Unavailable、TimedOut、OutputLimitExceeded 或 Failed；后四种生成 `ResolvedCheckStatus::Unresolved` 与稳定的 `unresolved_reason`，不会被误报为可运行检查。
+
 终态 summary 有大小上限，绑定完整 request hash，并使用 no-clobber publication。失败、超时或取消仍保留所有已完成尝试的证据，并返回 exit 6。
 
 ### 调度说明

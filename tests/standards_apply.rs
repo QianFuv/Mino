@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use mino::project::{Language, scan_root};
 use mino::standards::{
-    CommandSource, EmbeddedCatalog, ResolvedCheckStatus, ToolProbe, apply_recommendation,
-    recommend_for_paths, recommend_initial,
+    CommandSource, EmbeddedCatalog, ResolvedCheckStatus, ToolProbe, ToolProbeOutcome,
+    apply_recommendation, recommend_for_paths, recommend_initial,
 };
 use serde_json::Value;
 
@@ -62,8 +62,20 @@ impl FixedProbe {
 }
 
 impl ToolProbe for FixedProbe {
-    fn is_available(&self, tool: &str, _working_directory: &Path) -> bool {
-        self.available.contains(tool)
+    fn probe(&self, tool: &str, _working_directory: &Path) -> ToolProbeOutcome {
+        if self.available.contains(tool) {
+            ToolProbeOutcome::Available
+        } else {
+            ToolProbeOutcome::Unavailable
+        }
+    }
+}
+
+struct OutcomeProbe(ToolProbeOutcome);
+
+impl ToolProbe for OutcomeProbe {
+    fn probe(&self, _tool: &str, _working_directory: &Path) -> ToolProbeOutcome {
+        self.0
     }
 }
 
@@ -269,6 +281,44 @@ fn application_is_idempotent_prefers_project_scripts_and_marks_missing_tools() {
             .as_deref()
             .is_some_and(|reason| reason.contains("mypy"))
     );
+}
+
+#[test]
+fn typed_probe_failures_produce_stable_unresolved_reasons() {
+    let project = TestProject::new("probe-outcomes");
+    fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname='probe-outcomes'\nversion='0.1.0'\n",
+    )
+    .expect("manifest should be written");
+    fs::create_dir(project.path().join("src")).expect("source directory should be created");
+    fs::write(project.path().join("src/lib.rs"), "pub fn value() {}\n")
+        .expect("source should be written");
+    let catalog = EmbeddedCatalog::load().expect("catalog should load");
+    let scan = scan_root(project.path()).expect("project should scan");
+    let recommendation = recommend_initial(&catalog, &scan).expect("recommendation should work");
+
+    for (outcome, expected_reason) in [
+        (ToolProbeOutcome::TimedOut, "Tool probe timed out"),
+        (
+            ToolProbeOutcome::OutputLimitExceeded,
+            "Tool probe output exceeded 65536 bytes",
+        ),
+        (ToolProbeOutcome::Failed, "Tool probe failed"),
+    ] {
+        let application = apply_recommendation(
+            project.path(),
+            &catalog,
+            &recommendation,
+            &OutcomeProbe(outcome),
+        )
+        .expect("typed probe failure should not fail standards application");
+        assert!(!application.checks.is_empty());
+        assert!(application.checks.iter().all(|check| {
+            check.status == ResolvedCheckStatus::Unresolved
+                && check.unresolved_reason.as_deref() == Some(expected_reason)
+        }));
+    }
 }
 
 #[test]

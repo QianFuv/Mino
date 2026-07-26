@@ -214,6 +214,8 @@ Markdown 投影包含 plan ID、revision、状态哈希和 renderer version。�
 4. 语言包；
 5. Common。
 
+自动生成检查时，`SystemToolProbe` 与 Git adapter 复用同一 bounded command runner，但使用独立的三秒、64 KiB tool profile。probe 清空环境后只恢复跨平台工具链基础变量，关闭 stdin，并在异常时终止进程树。`ToolProbe` 返回类型化 outcome；标准应用保留 unresolved check 及精确原因，因此工具 shim 不会无限阻塞计划创建，也不会把 timeout 或输出洪泛压缩成普通“未安装”。
+
 检测会保留全部候选，不拼接也不静默选择。`standards conflict refresh` 把当前候选指纹记录进计划，`resolve` 则保存选择、理由、外部决策引用、actor 与时间。任一来源字节变化都会使旧决定失效，直到再次 refresh 并显式选择。
 
 ## 版本所有权

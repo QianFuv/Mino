@@ -13,6 +13,8 @@ use super::group;
 
 const CAPTURE_CHUNK_BYTES: usize = 8 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+const TOOL_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const TOOL_PROBE_OUTPUT_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BoundedCommandErrorKind {
@@ -59,6 +61,13 @@ pub(crate) struct BoundedCommandRunner {
 }
 
 impl BoundedCommandRunner {
+    pub(crate) const fn tool_probe() -> Self {
+        Self {
+            timeout: TOOL_PROBE_TIMEOUT,
+            output_limit: TOOL_PROBE_OUTPUT_BYTES,
+        }
+    }
+
     pub(crate) fn new(timeout: Duration, output_limit: usize) -> Result<Self, BoundedCommandError> {
         if timeout.is_zero() || output_limit == 0 {
             return Err(command_error(

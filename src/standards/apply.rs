@@ -1,6 +1,7 @@
 //! Idempotent package application and project-aware check resolution.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,15 +9,62 @@ use std::process::Command;
 use serde::Serialize;
 
 use crate::project::LockedStandard;
+use crate::runner::probe::{BoundedCommandErrorKind, BoundedCommandRunner};
 use crate::{ErrorCategory, MinoError};
 
 use super::catalog::{CheckTemplate, EmbeddedCatalog, StandardRule};
 use super::recommend::StandardsRecommendation;
 
+const TOOL_ENVIRONMENT_ALLOWLIST: &[&str] = &[
+    "CARGO_HOME",
+    "HOME",
+    "LANG",
+    "PATH",
+    "PATHEXT",
+    "RUSTUP_HOME",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USERPROFILE",
+    "WINDIR",
+];
+
+/// Typed terminal result of one automatic tool availability probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolProbeOutcome {
+    /// The version command exited successfully within every bound.
+    Available,
+    /// The executable could not start or returned an unsuccessful status.
+    Unavailable,
+    /// The version command exceeded the tool-probe deadline.
+    TimedOut,
+    /// Combined stdout and stderr exceeded the capture limit.
+    OutputLimitExceeded,
+    /// Output capture, observation, or process-tree termination failed.
+    Failed,
+}
+
+impl ToolProbeOutcome {
+    const fn is_available(self) -> bool {
+        matches!(self, Self::Available)
+    }
+
+    fn unresolved_reason(self, tool: &str) -> Option<String> {
+        match self {
+            Self::Available => None,
+            Self::Unavailable => Some(format!("Required tool {tool} is unavailable")),
+            Self::TimedOut => Some("Tool probe timed out".to_owned()),
+            Self::OutputLimitExceeded => Some("Tool probe output exceeded 65536 bytes".to_owned()),
+            Self::Failed => Some("Tool probe failed".to_owned()),
+        }
+    }
+}
+
 /// Availability probe used to keep command resolution deterministic in tests.
 pub trait ToolProbe {
-    /// Returns whether a required executable or capability is available.
-    fn is_available(&self, tool: &str, working_directory: &Path) -> bool;
+    /// Returns a typed terminal outcome for one required executable or capability.
+    fn probe(&self, tool: &str, working_directory: &Path) -> ToolProbeOutcome;
 }
 
 /// Host-process tool probe that invokes only `--version` checks.
@@ -24,7 +72,7 @@ pub trait ToolProbe {
 pub struct SystemToolProbe;
 
 impl ToolProbe for SystemToolProbe {
-    fn is_available(&self, tool: &str, working_directory: &Path) -> bool {
+    fn probe(&self, tool: &str, working_directory: &Path) -> ToolProbeOutcome {
         let mut command = if tool == "cargo-miri" {
             let mut command = Command::new("cargo");
             command.args(["+nightly", "miri", "--version"]);
@@ -36,9 +84,23 @@ impl ToolProbe for SystemToolProbe {
         };
         command
             .current_dir(working_directory)
+            .env_clear()
+            .envs(allowed_tool_environment())
             .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
-            .is_ok_and(|output| output.status.success())
+            .env("LC_ALL", "C");
+        match BoundedCommandRunner::tool_probe().run(&mut command) {
+            Ok(output) if output.status.success() => ToolProbeOutcome::Available,
+            Ok(_) => ToolProbeOutcome::Unavailable,
+            Err(error) => match error.kind() {
+                BoundedCommandErrorKind::Spawn => ToolProbeOutcome::Unavailable,
+                BoundedCommandErrorKind::Timeout => ToolProbeOutcome::TimedOut,
+                BoundedCommandErrorKind::OutputLimit => ToolProbeOutcome::OutputLimitExceeded,
+                BoundedCommandErrorKind::InvalidLimits
+                | BoundedCommandErrorKind::Capture
+                | BoundedCommandErrorKind::Observe
+                | BoundedCommandErrorKind::Terminate => ToolProbeOutcome::Failed,
+            },
+        }
     }
 }
 
@@ -182,19 +244,19 @@ fn resolve_check<P: ToolProbe>(
             CommandSource::EmbeddedTemplate,
         )
     };
-    let is_available = probe.is_available(&tool, project_root);
+    let outcome = probe.probe(&tool, project_root);
     ResolvedCheck {
         id: template.id.clone(),
         argv,
         cwd: PathBuf::from("."),
         required: template.required,
-        status: if is_available {
+        status: if outcome.is_available() {
             ResolvedCheckStatus::Runnable
         } else {
             ResolvedCheckStatus::Unresolved
         },
         source,
-        unresolved_reason: (!is_available).then(|| format!("Required tool {tool} is unavailable")),
+        unresolved_reason: outcome.unresolved_reason(&tool),
         tool,
     }
 }
@@ -237,7 +299,7 @@ fn resolve_python_check<P: ToolProbe>(
     template: &CheckTemplate,
     probe: &P,
 ) -> (Vec<String>, String, CommandSource) {
-    if project_root.join("uv.lock").is_file() || probe.is_available("uv", project_root) {
+    if project_root.join("uv.lock").is_file() || probe.probe("uv", project_root).is_available() {
         return (
             template.argv.clone(),
             "uv".to_owned(),
@@ -251,6 +313,13 @@ fn resolve_python_check<P: ToolProbe>(
         .unwrap_or_else(|| template.tool.clone());
     let argv = template.argv.iter().skip(2).cloned().collect::<Vec<_>>();
     (argv, tool, CommandSource::EmbeddedTemplate)
+}
+
+fn allowed_tool_environment() -> Vec<(String, OsString)> {
+    TOOL_ENVIRONMENT_ALLOWLIST
+        .iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| ((*name).to_owned(), value)))
+        .collect()
 }
 
 fn package_manager(project_root: &Path) -> String {
