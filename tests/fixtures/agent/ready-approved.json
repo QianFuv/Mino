@@ -15,7 +15,10 @@
     "plan.validate",
     "plan.review",
     "plan.amend.propose",
-    "exec.start"
+    "exec.start",
+    "standards.conflict.list",
+    "standards.conflict.refresh",
+    "standards.conflict.resolve"
   ],
   "blocked_actions": [
     {
@@ -23,7 +26,7 @@
       "reason": "No task has completed its verification and commit gate"
     }
   ],
-  "standards": [],
+  "standards": ["common@1.0.0"],
   "approval_required": false,
   "next_actions": [
     {

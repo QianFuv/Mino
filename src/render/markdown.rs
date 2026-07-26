@@ -76,6 +76,7 @@ fn render_document(plan: &Value, state_hash: &str) -> String {
     render_interfaces(&mut output, plan);
     render_edge_cases(&mut output, plan);
     render_standards(&mut output, plan);
+    render_standards_conflicts(&mut output, plan);
     render_git_readiness(&mut output, plan);
     render_task_order(&mut output, plan);
     render_tasks(&mut output, plan);
@@ -254,6 +255,83 @@ fn render_standards(output: &mut String, plan: &Value) {
         })
         .collect::<Vec<_>>();
     write_optional_table(output, &["Package", "Version", "Digest", "Source"], rows);
+}
+
+fn render_standards_conflicts(output: &mut String, plan: &Value) {
+    let state = &plan["extensions"]["standards_conflicts"];
+    let records = array(&state["records"]);
+    if records.is_empty() {
+        return;
+    }
+    output.push_str("\n## Standards Conflicts\n");
+    for record in records {
+        let conflict = &record["conflict"];
+        output.push_str("\n### `");
+        output.push_str(&escape_code(text(&conflict["id"])));
+        output.push_str("`\n\n");
+        write_table(
+            output,
+            &["Field", "Value"],
+            vec![
+                row("Rule", &scalar(&conflict["rule_id"])),
+                row("Fingerprint", &scalar(&conflict["fingerprint"])),
+                row(
+                    "Default Candidate",
+                    &scalar(&conflict["default_candidate_id"]),
+                ),
+            ],
+        );
+        output.push_str("\n#### Candidates\n\n");
+        let candidates = array(&conflict["candidates"])
+            .iter()
+            .map(|candidate| {
+                vec![
+                    scalar(&candidate["id"]),
+                    scalar(&candidate["value"]),
+                    scalar(&candidate["source_kind"]),
+                    scalar(&candidate["precedence"]),
+                    scalar(&candidate["source"]),
+                    scalar(&candidate["source_digest"]),
+                ]
+            })
+            .collect::<Vec<_>>();
+        write_table(
+            output,
+            &[
+                "Candidate",
+                "Value",
+                "Source Kind",
+                "Precedence",
+                "Source",
+                "Source Digest",
+            ],
+            candidates,
+        );
+        output.push_str("\n#### Explicit Decision\n\n");
+        if record["decision"].is_null() {
+            output.push_str("_Unresolved._\n");
+        } else {
+            let decision = &record["decision"];
+            write_table(
+                output,
+                &["Field", "Value"],
+                vec![
+                    row(
+                        "Selected Candidate",
+                        &scalar(&decision["selected_candidate_id"]),
+                    ),
+                    row("Rationale", &scalar(&decision["rationale"])),
+                    row("Reference", &scalar(&decision["reference"])),
+                    row("Actor", &scalar(&decision["actor"])),
+                    row("Decided At", &scalar(&decision["decided_at"])),
+                    row(
+                        "Conflict Fingerprint",
+                        &scalar(&decision["conflict_fingerprint"]),
+                    ),
+                ],
+            );
+        }
+    }
 }
 
 fn render_git_readiness(output: &mut String, plan: &Value) {
@@ -568,12 +646,13 @@ fn render_final_outcome(output: &mut String, plan: &Value) {
 
 fn render_extensions(output: &mut String, plan: &Value) {
     output.push_str("\n## Extensions\n\n");
-    let extensions = &plan["extensions"];
-    if extensions.as_object().is_none_or(serde_json::Map::is_empty) {
+    let mut extensions = plan["extensions"].as_object().cloned().unwrap_or_default();
+    extensions.remove("standards_conflicts");
+    if extensions.is_empty() {
         output.push_str("_None._\n");
         return;
     }
-    let json = serde_json::to_string_pretty(extensions)
+    let json = serde_json::to_string_pretty(&extensions)
         .expect("a previously serialized JSON value must serialize again");
     let fence = code_fence(&json);
     output.push_str(&fence);

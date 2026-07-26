@@ -17,7 +17,7 @@
       "reason": "The plan is already Done"
     }
   ],
-  "standards": [],
+  "standards": ["common@1.0.0"],
   "approval_required": false,
   "next_actions": []
 }

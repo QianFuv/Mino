@@ -65,6 +65,7 @@ execution state.
 ├── .mino/
 │   ├── config.toml                      project format and optional catalog URL
 │   ├── protocol.lock                    schema/protocol/renderer lock
+│   ├── standards.local.toml             optional source-backed conflict declarations
 │   ├── standards.lock                   selected standards and catalog generation
 │   ├── active.json                      worktree-keyed active-plan bindings
 │   ├── active.lock                      bounded active-binding writer lock
@@ -103,6 +104,7 @@ tracked like other stable repository instructions.
 |---|---|
 | `.mino/config.toml` | Mino project configuration; change only through supported configuration workflows. |
 | `.mino/protocol.lock` | Mino protocol lock; never hand-rewrite to claim compatibility. |
+| `.mino/standards.local.toml` | Optional user-reviewed declarations that map rule values to safe project sources; Mino reads but does not generate it. |
 | `.mino/standards.lock` | Mino standards lock; explicit sync may atomically replace it. |
 | `.mino/active.json` | Versioned active-plan bindings; change only through `mino git bind`. |
 | `.mino/active.lock` | Advisory binding lock; Mino owns its lifecycle and contents. |
@@ -113,6 +115,22 @@ tracked like other stable repository instructions.
 | `.agents/skills/mino/` | Stable bundled repository Skill; Mino updates only marker-owned bundle files. |
 | `AGENTS.md` | User-owned except for the exact Mino workflow marker region. |
 | `.gitignore` | User-owned except for the exact Mino runtime marker region. |
+
+## Standards conflict precedence
+
+The standards engine combines selected embedded package rules with optional
+source-backed declarations in `.mino/standards.local.toml`. Each declaration
+names a canonical project source or the plan's exact original request. Mino
+hashes those bytes and orders competing values by current user requirement,
+repository hard rule, formatter/linter/build/CI configuration, selected
+language package, then Common.
+
+Detection preserves every candidate; it does not concatenate or silently pick
+values. `standards conflict refresh` records the exact candidate fingerprint in
+the plan extension. `standards conflict resolve` records one candidate,
+rationale, external decision reference, actor, timestamp, and that fingerprint.
+Any source-byte or candidate-set change makes the prior decision stale and
+blocks validation until refresh and a new explicit decision.
 
 ## Worktree-aware active-plan identity
 

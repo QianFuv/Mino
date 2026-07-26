@@ -20,12 +20,23 @@ Material amendment approval is also an auditable declaration rather than a
 cryptographic authorization token. `plan amend approve` must identify the exact
 pending `C<n>` proposal and carry a non-empty external approval reference.
 
+Standards-conflict resolution is a separate auditable declaration.
+`standards conflict resolve` must select a displayed current candidate and
+carry both a rationale and external decision reference. A precedence default,
+plan approval, or prior conflict decision is not a substitute. `exec start`
+rechecks the live source fingerprints at the current revision, so a source
+change after approval cannot bypass refresh and a renewed explicit decision.
+
 ## Filesystem boundaries
 
 - Project roots are canonicalized and discovered deterministically. Managed
   artifact paths must remain project-relative; absolute paths and traversal are
   rejected where the protocol requires repository ownership.
 - `.mino/plans/**` is the canonical store. Do not edit it manually.
+- `.mino/standards.local.toml` is optional user-reviewed input. Each declared
+  file source must remain within the canonical project root, be a regular file,
+  and fit the bounded read limit; traversal and symbolic-link escapes are
+  rejected.
 - `.mino/active.json` is a versioned worktree/branch binding store. Change it
   only through `mino git bind`; malformed or stale identity is diagnosed
   instead of silently repaired.
@@ -173,6 +184,9 @@ Agent consumers must use JSON/no-input mode and inspect `approval_required`,
   current Review revision and supplied an auditable reference.
 - `plan.amend.approve`, unless the user explicitly approved the exact pending
   Material `C<n>` proposal and supplied an auditable reference.
+- `standards.conflict.resolve`, unless the user explicitly selected one exact
+  current candidate and supplied its rationale and auditable decision
+  reference.
 - An approval, exception, or Git operation not already covered by explicit user
   and repository policy. A returned `git.commit` action is covered only by the
   current plan's Approved Git Flow gate; branch creation still needs its own

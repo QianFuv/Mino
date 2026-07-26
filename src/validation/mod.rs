@@ -94,8 +94,11 @@ fn derive_next_actions(plan: &Plan, findings: &[ValidationFinding]) -> Vec<NextA
         return Vec::new();
     }
     let mut actions = Vec::new();
+    actions.extend(conflict_next_action(plan, findings));
     if findings.iter().any(|finding| {
-        finding.id.starts_with("POLICY-STANDARD") || finding.id == "POLICY-TOOL-UNAVAILABLE"
+        (finding.id.starts_with("POLICY-STANDARD")
+            && !finding.id.starts_with("POLICY-STANDARD-CONFLICT"))
+            || finding.id == "POLICY-TOOL-UNAVAILABLE"
     }) {
         let mut argv = vec![
             "mino".to_owned(),
@@ -115,26 +118,80 @@ fn derive_next_actions(plan: &Plan, findings: &[ValidationFinding]) -> Vec<NextA
             argv,
         });
     }
-    actions.push(NextAction {
-        id: "plan.apply".to_owned(),
-        argv: vec![
-            "mino".to_owned(),
-            "plan".to_owned(),
-            "apply".to_owned(),
-            "--plan".to_owned(),
-            plan.id().to_string(),
-            "--file".to_owned(),
-            "draft.yaml".to_owned(),
-            "--expect-revision".to_owned(),
-            plan.revision().to_string(),
-            "--request-id".to_owned(),
-            derived_request_id(plan, "plan.apply.validation"),
-            "--format".to_owned(),
-            "json".to_owned(),
-            "--no-input".to_owned(),
-        ],
-    });
+    if findings
+        .iter()
+        .any(|finding| !finding.id.starts_with("POLICY-STANDARD-CONFLICT"))
+    {
+        actions.push(NextAction {
+            id: "plan.apply".to_owned(),
+            argv: vec![
+                "mino".to_owned(),
+                "plan".to_owned(),
+                "apply".to_owned(),
+                "--plan".to_owned(),
+                plan.id().to_string(),
+                "--file".to_owned(),
+                "draft.yaml".to_owned(),
+                "--expect-revision".to_owned(),
+                plan.revision().to_string(),
+                "--request-id".to_owned(),
+                derived_request_id(plan, "plan.apply.validation"),
+                "--format".to_owned(),
+                "json".to_owned(),
+                "--no-input".to_owned(),
+            ],
+        });
+    }
     actions
+}
+
+fn conflict_next_action(plan: &Plan, findings: &[ValidationFinding]) -> Option<NextAction> {
+    let has_stale_conflict = findings.iter().any(|finding| {
+        matches!(
+            finding.id.as_str(),
+            "POLICY-STANDARD-CONFLICT-UNTRACKED" | "POLICY-STANDARD-CONFLICT-STALE"
+        )
+    });
+    let has_unresolved_conflict = findings
+        .iter()
+        .any(|finding| finding.id == "POLICY-STANDARD-CONFLICT-UNRESOLVED");
+    if has_stale_conflict {
+        Some(NextAction {
+            id: "standards.conflict.refresh".to_owned(),
+            argv: vec![
+                "mino".to_owned(),
+                "standards".to_owned(),
+                "conflict".to_owned(),
+                "refresh".to_owned(),
+                "--plan".to_owned(),
+                plan.id().to_string(),
+                "--expect-revision".to_owned(),
+                plan.revision().to_string(),
+                "--request-id".to_owned(),
+                derived_request_id(plan, "standards.conflict.refresh"),
+                "--format".to_owned(),
+                "json".to_owned(),
+                "--no-input".to_owned(),
+            ],
+        })
+    } else if has_unresolved_conflict {
+        Some(NextAction {
+            id: "standards.conflict.list".to_owned(),
+            argv: vec![
+                "mino".to_owned(),
+                "standards".to_owned(),
+                "conflict".to_owned(),
+                "list".to_owned(),
+                "--plan".to_owned(),
+                plan.id().to_string(),
+                "--format".to_owned(),
+                "json".to_owned(),
+                "--no-input".to_owned(),
+            ],
+        })
+    } else {
+        None
+    }
 }
 
 fn derived_request_id(plan: &Plan, action: &str) -> String {

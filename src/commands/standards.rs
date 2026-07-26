@@ -2,10 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use crate::application::plan::PlanMutationRequest;
+use crate::application::standards::{StandardsConflictReport, StandardsConflictService};
 use crate::commands::CommandResponse;
+use crate::domain::{PlanId, RequestId, Timestamp};
 use crate::project;
 use crate::standards::{
     EmbeddedCatalog, SystemToolProbe, apply_recommendation, detected_languages,
@@ -41,6 +44,65 @@ pub(crate) enum StandardsAction {
         #[arg(long)]
         all: bool,
     },
+    /// Inspect, refresh, or explicitly resolve plan-scoped rule conflicts.
+    Conflict(ConflictArguments),
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct ConflictArguments {
+    #[command(subcommand)]
+    action: ConflictAction,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum ConflictAction {
+    /// List current candidates, sources, precedence, and decisions.
+    List {
+        /// Target plan identifier.
+        #[arg(long)]
+        plan: String,
+    },
+    /// Persist the exact current conflict candidates without selecting one.
+    Refresh(ConflictMutationArguments),
+    /// Record one explicit candidate decision and rationale.
+    Resolve(ConflictResolveArguments),
+}
+
+#[derive(Clone, Debug, Args)]
+struct ConflictMutationArguments {
+    /// Target plan identifier.
+    #[arg(long)]
+    plan: String,
+    /// Required optimistic-concurrency revision.
+    #[arg(long)]
+    expect_revision: u64,
+    /// Idempotency UUID for this semantic mutation.
+    #[arg(long)]
+    request_id: String,
+    /// Actor recorded in the plan event log.
+    #[arg(long, default_value = "user")]
+    actor: String,
+    /// Canonical live-source digest accepted only for normalized retry argv.
+    #[arg(long, hide = true)]
+    source_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Args)]
+struct ConflictResolveArguments {
+    #[command(flatten)]
+    mutation: ConflictMutationArguments,
+    /// Stable conflict identifier from `standards conflict list`.
+    #[arg(long)]
+    conflict: String,
+    /// Exact candidate identifier selected by the user.
+    #[arg(long)]
+    candidate: String,
+    /// Non-empty reason for choosing this candidate.
+    #[arg(long)]
+    rationale: String,
+    /// Auditable external reference for the explicit decision.
+    #[arg(long)]
+    decision_ref: String,
 }
 
 pub(crate) fn execute(start: &Path, action: StandardsAction) -> Result<CommandResponse, MinoError> {
@@ -96,7 +158,185 @@ pub(crate) fn execute(start: &Path, action: StandardsAction) -> Result<CommandRe
                 crate::standards::synchronize_all(start)?,
             )
         }
+        StandardsAction::Conflict(arguments) => execute_conflict(start, arguments.action),
     }
+}
+
+fn execute_conflict(start: &Path, action: ConflictAction) -> Result<CommandResponse, MinoError> {
+    let service = StandardsConflictService::discover(start)?;
+    match action {
+        ConflictAction::List { plan } => {
+            let plan_id = parse_plan_id(&plan)?;
+            let report = service.inspect(&plan_id)?;
+            conflict_response("Standards conflicts inspected.", report)
+        }
+        ConflictAction::Refresh(arguments) => {
+            let plan_id = parse_plan_id(&arguments.plan)?;
+            let request_id = parse_request_id(&arguments.request_id)?;
+            let live = service.inspect(&plan_id)?;
+            require_matching_digest(arguments.source_digest.as_deref(), &live.source_digest)?;
+            let command =
+                conflict_mutation_command("refresh", &arguments, &live.source_digest, Vec::new());
+            let report = service.refresh(
+                PlanMutationRequest {
+                    plan_id,
+                    expected_revision: arguments.expect_revision,
+                    request_id,
+                    actor: arguments.actor,
+                    command,
+                    updated_at: Timestamp::now_utc(),
+                },
+                &live.source_digest,
+            )?;
+            conflict_operation_response("Standards conflict snapshots refreshed.", report)
+        }
+        ConflictAction::Resolve(arguments) => {
+            let plan_id = parse_plan_id(&arguments.mutation.plan)?;
+            let request_id = parse_request_id(&arguments.mutation.request_id)?;
+            let live = service.inspect(&plan_id)?;
+            require_matching_digest(
+                arguments.mutation.source_digest.as_deref(),
+                &live.source_digest,
+            )?;
+            let command = conflict_mutation_command(
+                "resolve",
+                &arguments.mutation,
+                &live.source_digest,
+                vec![
+                    "--conflict".to_owned(),
+                    arguments.conflict.clone(),
+                    "--candidate".to_owned(),
+                    arguments.candidate.clone(),
+                    "--rationale".to_owned(),
+                    arguments.rationale.clone(),
+                    "--decision-ref".to_owned(),
+                    arguments.decision_ref.clone(),
+                ],
+            );
+            let report = service.resolve(
+                PlanMutationRequest {
+                    plan_id,
+                    expected_revision: arguments.mutation.expect_revision,
+                    request_id,
+                    actor: arguments.mutation.actor,
+                    command,
+                    updated_at: Timestamp::now_utc(),
+                },
+                &live.source_digest,
+                &arguments.conflict,
+                &arguments.candidate,
+                arguments.rationale,
+                arguments.decision_ref,
+            )?;
+            conflict_operation_response("Standards conflict decision recorded.", report)
+        }
+    }
+}
+
+fn conflict_mutation_command(
+    action: &str,
+    arguments: &ConflictMutationArguments,
+    source_digest: &str,
+    extra: Vec<String>,
+) -> Vec<String> {
+    let mut command = vec![
+        "mino".to_owned(),
+        "standards".to_owned(),
+        "conflict".to_owned(),
+        action.to_owned(),
+        "--plan".to_owned(),
+        arguments.plan.clone(),
+        "--expect-revision".to_owned(),
+        arguments.expect_revision.to_string(),
+        "--request-id".to_owned(),
+        arguments.request_id.clone(),
+        "--actor".to_owned(),
+        arguments.actor.clone(),
+        "--source-digest".to_owned(),
+        source_digest.to_owned(),
+    ];
+    command.extend(extra);
+    command
+}
+
+fn conflict_operation_response(
+    message: &str,
+    report: crate::application::standards::StandardsConflictOperationReport,
+) -> Result<CommandResponse, MinoError> {
+    let complete = report.standards_conflicts.resolved;
+    let missing = conflict_missing(&report.standards_conflicts);
+    let payload = serde_json::to_value(report).map_err(|error| serialization_error(&error))?;
+    Ok(CommandResponse {
+        message: message.to_owned(),
+        complete,
+        payload,
+        missing,
+        next_actions: Vec::new(),
+    })
+}
+
+fn conflict_response(
+    message: &str,
+    report: StandardsConflictReport,
+) -> Result<CommandResponse, MinoError> {
+    let complete = report.resolved;
+    let missing = conflict_missing(&report);
+    let payload = serde_json::to_value(report).map_err(|error| serialization_error(&error))?;
+    Ok(CommandResponse {
+        message: message.to_owned(),
+        complete,
+        payload,
+        missing,
+        next_actions: Vec::new(),
+    })
+}
+
+fn conflict_missing(report: &StandardsConflictReport) -> Vec<String> {
+    let mut missing = report
+        .conflicts
+        .iter()
+        .filter(|conflict| conflict.status != crate::standards::StandardConflictStatus::Resolved)
+        .map(|conflict| format!("standards.conflicts.{}", conflict.conflict.id()))
+        .collect::<Vec<_>>();
+    missing.extend(
+        report
+            .stale_conflict_ids
+            .iter()
+            .map(|id| format!("standards.conflicts.{id}")),
+    );
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
+fn parse_plan_id(value: &str) -> Result<PlanId, MinoError> {
+    PlanId::parse(value).map_err(|error| validation_error(error.to_string()))
+}
+
+fn parse_request_id(value: &str) -> Result<RequestId, MinoError> {
+    RequestId::parse(value).map_err(|error| validation_error(error.to_string()))
+}
+
+fn require_matching_digest(provided: Option<&str>, actual: &str) -> Result<(), MinoError> {
+    if provided.is_none_or(|provided| provided == actual) {
+        Ok(())
+    } else {
+        Err(MinoError::new(
+            ErrorCategory::DriftDetected,
+            "Provided standards source digest does not match current candidates",
+        ))
+    }
+}
+
+fn serialization_error(error: &serde_json::Error) -> MinoError {
+    MinoError::new(
+        ErrorCategory::EnvironmentUnavailable,
+        format!("Failed to serialize standards conflict result: {error}"),
+    )
+}
+
+fn validation_error(message: impl Into<String>) -> MinoError {
+    MinoError::new(ErrorCategory::IncompleteOrValidation, message)
 }
 
 fn response<T: Serialize>(

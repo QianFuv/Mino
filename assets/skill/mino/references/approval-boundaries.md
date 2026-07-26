@@ -10,13 +10,23 @@ Stop and request user action when any of these is true:
 - A command exits with the approval-required category or exit code 4.
 - The next operation would approve a plan, accept an exception, mutate Git
   outside a current plan-scoped commit gate or explicitly approved branch
-  proposal, replace an unowned Skill, or repair malformed managed markers.
+  proposal, resolve a standards conflict, replace an unowned Skill, or repair
+  malformed managed markers.
 - The requested change materially exceeds the approved plan File Map, task
   outcome, acceptance criteria, or commit scope.
 
 Do not convert user intent, an earlier approval, or a clean validation result
 into a new approval declaration. Never invoke approval commands on the user's
 behalf.
+
+## Standards conflicts
+
+Show every current candidate with its source, digest, source class, and numeric
+precedence. A unique highest-precedence candidate is only a displayed default;
+never treat it as approval or merge competing values. Before invoking
+`standards.conflict.resolve`, obtain the user's exact candidate choice,
+rationale, and auditable decision reference. A source change invalidates the
+decision and requires a new explicit choice.
 
 ## Review and rework
 

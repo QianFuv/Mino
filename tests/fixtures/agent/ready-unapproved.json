@@ -14,7 +14,10 @@
     "plan.show",
     "plan.validate",
     "plan.review",
-    "plan.amend.propose"
+    "plan.amend.propose",
+    "standards.conflict.list",
+    "standards.conflict.refresh",
+    "standards.conflict.resolve"
   ],
   "blocked_actions": [
     {
@@ -26,7 +29,7 @@
       "reason": "Plan execution requires explicit user approval"
     }
   ],
-  "standards": [],
+  "standards": ["common@1.0.0"],
   "approval_required": true,
   "next_actions": []
 }

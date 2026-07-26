@@ -7,10 +7,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use mino::application::agent::build_agent_context;
 use mino::domain::{
-    AcceptanceCriterion, Approval, CheckId, CriterionId, EvidenceId, FileChange, FileMapEntry,
-    GitFlowConsent, Plan, PlanId, Task, TaskId, Timestamp, VerificationCheck,
+    Approval, CheckId, CriterionId, DraftCriterionInput, DraftFileInput, DraftMetadataInput,
+    DraftPlanInput, DraftScopeInput, DraftTaskInput, DraftVerificationInput, EvidenceId,
+    FileChange, GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId, StandardSelection,
+    TaskId, Timestamp, VerificationCheck,
 };
 use mino::project::initialize;
+use mino::standards::EmbeddedCatalog;
+use mino::validation::validate_plan;
 use serde_json::Value;
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -27,14 +31,6 @@ impl TestProject {
             std::process::id()
         ));
         fs::create_dir(&path).expect("temporary project should be created");
-        fs::write(
-            path.join("Cargo.toml"),
-            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-        )
-        .expect("fixture manifest should be written");
-        fs::create_dir(path.join("src")).expect("fixture source directory should be created");
-        fs::write(path.join("src/lib.rs"), "pub fn fixture() -> u8 { 1 }\n")
-            .expect("fixture source should be written");
         initialize(&path).expect("temporary project should initialize");
         Self {
             path: path.canonicalize().expect("project root should resolve"),
@@ -85,44 +81,93 @@ fn evidence_id(value: &str) -> EvidenceId {
 }
 
 fn configured_draft() -> Plan {
-    let task_id = task_id();
-    let mut task = Task::new(task_id.clone(), "Implement the fixture", Vec::new());
-    task.add_step("Implement deterministic behavior")
-        .expect("step should be added");
-    task.add_file_map_entry(FileMapEntry::new(
-        "src/lib.rs",
-        FileChange::Modify,
-        "Own the fixture behavior",
-        task_id.clone(),
-    ))
-    .expect("file should be added");
-    task.add_acceptance_criterion(AcceptanceCriterion::new(
-        criterion_id(),
-        "The behavior is observable",
-    ))
-    .expect("criterion should be added");
-    task.add_verification_check(VerificationCheck::new(
-        check_id("TASK-V1"),
-        vec!["cargo".to_owned(), "test".to_owned()],
-        ".",
-        0,
-        true,
-    ))
-    .expect("task check should be added");
-    let mut plan = Plan::new(plan_id(), "Build Agent context fixtures", timestamp(0));
-    plan.add_task(task, timestamp(1))
-        .expect("task should be added");
-    plan.add_global_verification(
-        VerificationCheck::new(
-            check_id("GLOBAL-V1"),
-            vec!["cargo".to_owned(), "test".to_owned()],
-            ".",
-            0,
-            true,
-        ),
+    let catalog = EmbeddedCatalog::load().expect("embedded standards should load");
+    let common = catalog
+        .package("common")
+        .expect("Common standards should exist");
+    let mut plan = Plan::from_draft_seed(
+        PlanDraftSeed {
+            id: plan_id(),
+            name: "Build Agent context fixtures".to_owned(),
+            trigger: "durable".to_owned(),
+            original_request: "Build Agent context fixtures".to_owned(),
+            branch: None,
+            markdown_path: "docs/plan/2026-07-26-agent-fixture.md".to_owned(),
+            git_readiness: GitReadiness::detected(
+                "Missing",
+                "Not Applicable",
+                None,
+                None,
+                "Not Applicable: lifecycle fixture",
+                false,
+            ),
+            standards: vec![StandardSelection::new(
+                common.package_id(),
+                common.version(),
+                common.digest(),
+                "embedded",
+            )],
+            verification_plan: vec![VerificationCheck::new(
+                check_id("GLOBAL-V1"),
+                vec!["cargo".to_owned(), "test".to_owned()],
+                ".",
+                0,
+                true,
+            )],
+        },
+        timestamp(0),
+    );
+    plan.apply_draft_input(
+        DraftPlanInput {
+            metadata: Some(DraftMetadataInput {
+                priority: Some("P1".to_owned()),
+                area: Some("agent".to_owned()),
+                owner: Some("codex".to_owned()),
+                ..DraftMetadataInput::default()
+            }),
+            summary: Some("Exercise every stable Agent lifecycle state.".to_owned()),
+            scope: Some(DraftScopeInput {
+                goal: Some("Keep Agent lifecycle guidance deterministic.".to_owned()),
+                deliverables: Some(vec!["Stable Agent context fixtures".to_owned()]),
+                in_scope: Some(vec!["Agent lifecycle state".to_owned()]),
+                out_of_scope: Some(vec!["External side effects".to_owned()]),
+            }),
+            approach: Some("Build one complete in-memory lifecycle aggregate.".to_owned()),
+            interfaces: Some(
+                "Agent context projects one plan state into canonical actions.".to_owned(),
+            ),
+            ..DraftPlanInput::default()
+        },
+        timestamp(1),
+    )
+    .expect("authored plan fields should be added");
+    plan.author_task(
+        DraftTaskInput {
+            id: Some(task_id()),
+            title: "Implement the fixture".to_owned(),
+            depends_on: Vec::new(),
+            steps: vec!["Implement deterministic behavior".to_owned()],
+            files: vec![DraftFileInput {
+                path: "fixture.txt".to_owned(),
+                change: FileChange::Modify,
+                reason: "Own the fixture behavior".to_owned(),
+            }],
+            acceptance_criteria: vec![DraftCriterionInput {
+                id: Some(criterion_id()),
+                description: "The behavior is observable".to_owned(),
+            }],
+            verification: vec![DraftVerificationInput {
+                id: check_id("TASK-V1"),
+                command: vec!["cargo".to_owned(), "test".to_owned()],
+                cwd: ".".to_owned(),
+                expected_exit_code: 0,
+                required: true,
+            }],
+            commit_gate: None,
+        },
         timestamp(2),
     )
-    .expect("global check should be added");
+    .expect("task should be added");
     plan
 }
 
@@ -219,8 +264,18 @@ fn normalized(mut value: Value) -> Value {
 
 #[test]
 fn every_lifecycle_state_matches_its_agent_context_golden() {
-    let root = Path::new("C:/fixture");
+    let project = TestProject::new("goldens");
+    let root = project.path();
     for (name, plan) in lifecycle_contexts() {
+        if matches!(name, "ready-unapproved" | "ready-approved") {
+            let report = validate_plan(root, plan.as_ref().expect("Ready plan should exist"))
+                .expect("Ready plan should be validated");
+            assert!(
+                report.valid,
+                "Ready fixture findings: {:?}",
+                report.findings
+            );
+        }
         let context = build_agent_context(root, plan.as_ref()).expect("context should build");
         let actual = normalized(serde_json::to_value(context).expect("context should serialize"));
         let expected: Value = serde_json::from_str(

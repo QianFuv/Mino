@@ -24,7 +24,7 @@
       "reason": "Task verification or completion is incomplete"
     }
   ],
-  "standards": [],
+  "standards": ["common@1.0.0"],
   "approval_required": false,
   "next_actions": [
     {

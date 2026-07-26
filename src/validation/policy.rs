@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::domain::{Plan, PlanStatus, StandardSelection, VerificationCheck};
 use crate::standards::{
-    EmbeddedCatalog, ResolvedCheck, ResolvedCheckStatus, StandardsRecommendation, SystemToolProbe,
-    apply_recommendation, recommend_for_paths, recommend_initial,
+    EmbeddedCatalog, ResolvedCheck, ResolvedCheckStatus, StandardConflictStatus,
+    StandardsRecommendation, SystemToolProbe, apply_recommendation, assess_standard_conflicts,
+    detect_standard_conflicts, recommend_for_paths, recommend_initial,
 };
 use crate::{MinoError, project};
 
@@ -156,7 +157,74 @@ fn validate_standards(
     let selected = validate_selected_standards(&catalog, plan, findings);
     validate_required_standards(&recommendation, &selected, findings);
     validate_required_checks(plan, expected.checks, findings);
+    validate_standards_conflicts(root, plan, findings)?;
     Ok(())
+}
+
+fn validate_standards_conflicts(
+    root: &Path,
+    plan: &Plan,
+    findings: &mut Vec<ValidationFinding>,
+) -> Result<(), MinoError> {
+    let detected = detect_standard_conflicts(root, plan)?;
+    let state = plan.standards_conflict_state().map_err(|error| {
+        crate::MinoError::new(crate::ErrorCategory::PolicyViolation, error.to_string())
+    })?;
+    let assessment = assess_standard_conflicts(&detected, &state);
+    for conflict in assessment.conflicts {
+        let (id, action) = match conflict.status {
+            StandardConflictStatus::Untracked => ("POLICY-STANDARD-CONFLICT-UNTRACKED", "refresh"),
+            StandardConflictStatus::Unresolved => ("POLICY-STANDARD-CONFLICT-UNRESOLVED", "decide"),
+            StandardConflictStatus::Stale => ("POLICY-STANDARD-CONFLICT-STALE", "refresh"),
+            StandardConflictStatus::Resolved => continue,
+        };
+        let candidates = conflict
+            .conflict
+            .candidates()
+            .iter()
+            .map(|candidate| {
+                format!(
+                    "{} [precedence {}, {:?}, {}] = {}",
+                    candidate.id(),
+                    candidate.precedence(),
+                    candidate.source_kind(),
+                    candidate.source(),
+                    bounded_value(candidate.value())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        findings.push(ValidationFinding::error(
+            id,
+            ValidationLayer::Policy,
+            format!("standards.conflicts.{}", conflict.conflict.id()),
+            format!(
+                "Rule {} has conflicting candidates: {candidates}. Explicitly {action} this conflict; no candidate is merged automatically",
+                conflict.conflict.rule_id()
+            ),
+        ));
+    }
+    for conflict_id in assessment.stale_conflict_ids {
+        findings.push(ValidationFinding::error(
+            "POLICY-STANDARD-CONFLICT-STALE",
+            ValidationLayer::Policy,
+            format!("standards.conflicts.{conflict_id}"),
+            format!(
+                "Persisted standards conflict {conflict_id} no longer matches live sources; refresh is required"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn bounded_value(value: &str) -> String {
+    const MAX_CHARACTERS: usize = 160;
+    let mut characters = value.chars();
+    let mut bounded = characters.by_ref().take(MAX_CHARACTERS).collect::<String>();
+    if characters.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
 }
 
 fn validate_selected_standards<'a>(

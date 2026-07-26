@@ -162,9 +162,17 @@ Follow-Up is Deferred and never changes task order or a Git gate.
 | `mino standards recommend` | No | Recommend Common plus applicable language packages, optionally for File Map paths. |
 | `mino standards apply` | No | Resolve exact packages/rules/checks; v0.1 requires `--recommended --seed-verification`. |
 | `mino standards sync` | Cache/lock | Explicitly fetch and activate a digest-verified catalog; v0.1 requires `--all`. |
+| `mino standards conflict list` | No | Show every conflicting candidate, source class, precedence, source digest, and current decision status. |
+| `mino standards conflict refresh` | Plan | Snapshot the exact live candidate set without selecting a value; source changes clear stale decisions. |
+| `mino standards conflict resolve` | Plan, approval boundary | Select one current candidate with rationale and an auditable decision reference. |
 
 Detection, recommendation, and apply are offline over embedded or already
-cached packages. Only sync uses the configured network catalog.
+cached packages. Only sync uses the configured network catalog. Conflict
+precedence is user requirement, repository rule or local declaration, project
+configuration, language package, then Common. A unique highest-precedence
+candidate is displayed as a default, never applied as an implicit merge or
+decision. Validation remains blocked until every exact current conflict has an
+explicit decision.
 
 ### Agent API
 

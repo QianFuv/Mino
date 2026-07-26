@@ -20,3 +20,4 @@ pub mod git_commit;
 pub mod plan;
 /// Classified review, rework, resolution, and final acceptance service.
 pub mod review;
+pub mod standards;

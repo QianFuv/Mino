@@ -10,9 +10,9 @@ The current package is `mino 0.1.0`. It contains the stable v0.1 lifecycle plus
 the v0.2 local Git, review, and protected-amendment increments: worktree-aware plan binding,
 explicitly approved branch creation, exact plan-scoped task commits, classified
 review feedback, rework, final acceptance, typed Minor/Material plan changes,
-and conservative legacy-plan import. Standards-conflict resolution, plan
-variants, scheduled observation, team catalogs, and plugin distribution remain
-deferred.
+conservative legacy-plan import, and explicit source-bound standards-conflict
+decisions. Plan variants, scheduled observation, team catalogs, and plugin
+distribution remain deferred.
 
 ## What v0.1 provides
 
@@ -53,6 +53,12 @@ authored fields from one bounded legacy Markdown plan, reports every mapping and
 warning, and creates a separate Draft through the normal plan APIs. Source bytes
 are preserved; historical status, approval, check, commit, and evidence claims
 are always ignored and marked unverified.
+
+The v0.2 standards increment adds `standards conflict list`, `refresh`, and
+approval-gated `resolve`. Conflicting values are shown with exact source,
+digest, source class, and precedence: current user requirement, repository
+rule, project configuration, language package, then Common. Mino never merges
+them silently; a source change invalidates the prior decision.
 
 ## Requirements and installation
 
@@ -120,6 +126,9 @@ and read context again. Stop whenever `approval_required` is true. Never edit
   task commit; Git Flow consent is auditable scope, not broad or cryptographic
   authorization.
 - Existing unowned Skills and malformed managed blocks are preserved.
+- Standards conflicts block validation until their exact candidates are
+  snapshotted and an explicit source-bound decision with rationale and external
+  reference is recorded.
 - Legacy workflow analysis produces inert proposals. Legacy plan import may
   create one separate Draft, but neither command deletes, renames, or edits a
   legacy source.

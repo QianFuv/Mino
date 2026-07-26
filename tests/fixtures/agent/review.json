@@ -21,7 +21,7 @@
       "reason": "Implementation is complete and awaiting review"
     }
   ],
-  "standards": [],
+  "standards": ["common@1.0.0"],
   "approval_required": true,
   "next_actions": []
 }

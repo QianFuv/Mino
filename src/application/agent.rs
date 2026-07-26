@@ -79,6 +79,9 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("review.resolve", true, false),
     ("review.rework", true, false),
     ("standards.apply", false, false),
+    ("standards.conflict.list", false, false),
+    ("standards.conflict.refresh", true, false),
+    ("standards.conflict.resolve", true, true),
     ("standards.detect", false, false),
     ("standards.recommend", false, false),
     ("standards.sync", false, false),
@@ -411,7 +414,7 @@ fn guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
     }
     match plan.status() {
         PlanStatus::Draft => draft_guidance(root, plan),
-        PlanStatus::Ready => Ok(ready_guidance(plan)),
+        PlanStatus::Ready => ready_guidance(root, plan),
         PlanStatus::InProgress => Ok(in_progress_guidance(plan)),
         PlanStatus::Blocked if plan.is_blocked_for_material_review() => {
             Ok(material_review_blocked_guidance())
@@ -565,8 +568,13 @@ fn review_guidance(plan: &Plan) -> Guidance {
 
 fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
     let missing = draft_missing(plan);
-    let (next_actions, is_valid, blocking_count) = if missing.is_empty() {
+    let (next_actions, is_valid, blocking_count, requires_conflict_decision) = if missing.is_empty()
+    {
         let report = validate_plan(root, plan)?;
+        let requires_conflict_decision = report
+            .findings
+            .iter()
+            .any(|finding| finding.id == "POLICY-STANDARD-CONFLICT-UNRESOLVED");
         (
             report.next_actions,
             report.valid,
@@ -575,9 +583,15 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
                 .iter()
                 .filter(|finding| finding.blocking)
                 .count(),
+            requires_conflict_decision,
         )
     } else {
-        (draft_next_actions(plan, &missing), false, missing.len())
+        (
+            draft_next_actions(plan, &missing),
+            false,
+            missing.len(),
+            false,
+        )
     };
     let mut allowed_actions = action_ids(&[
         "plan.apply",
@@ -595,6 +609,9 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
         "plan.verification.add",
         "plan.validate",
         "plan.show",
+        "standards.conflict.list",
+        "standards.conflict.refresh",
+        "standards.conflict.resolve",
     ]);
     let mut blocked_actions = vec![
         blocked("plan.approve", "The plan must be Ready before approval"),
@@ -617,19 +634,51 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
     Ok(Guidance {
         allowed_actions,
         blocked_actions,
-        approval_required: false,
+        approval_required: requires_conflict_decision,
         next_actions,
     })
 }
 
-fn ready_guidance(plan: &Plan) -> Guidance {
+fn ready_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
+    let validation = validate_plan(root, plan)?;
+    if !validation.valid {
+        let requires_conflict_decision = validation
+            .findings
+            .iter()
+            .any(|finding| finding.id == "POLICY-STANDARD-CONFLICT-UNRESOLVED");
+        return Ok(Guidance {
+            allowed_actions: action_ids(&[
+                "plan.show",
+                "plan.validate",
+                "plan.amend.propose",
+                "standards.conflict.list",
+                "standards.conflict.refresh",
+                "standards.conflict.resolve",
+            ]),
+            blocked_actions: vec![
+                blocked(
+                    "plan.approve",
+                    "Current repository or standards validation is blocking",
+                ),
+                blocked(
+                    "exec.start",
+                    "Current repository or standards validation is blocking",
+                ),
+            ],
+            approval_required: requires_conflict_decision,
+            next_actions: validation.next_actions,
+        });
+    }
     if !plan.has_plan_approval() {
-        return Guidance {
+        return Ok(Guidance {
             allowed_actions: action_ids(&[
                 "plan.show",
                 "plan.validate",
                 "plan.review",
                 "plan.amend.propose",
+                "standards.conflict.list",
+                "standards.conflict.refresh",
+                "standards.conflict.resolve",
             ]),
             blocked_actions: vec![
                 blocked(
@@ -643,18 +692,21 @@ fn ready_guidance(plan: &Plan) -> Guidance {
             ],
             approval_required: true,
             next_actions: Vec::new(),
-        };
+        });
     }
     let next_actions = first_incomplete_task(plan)
         .map(|task_id| vec![start_action(plan, task_id)])
         .unwrap_or_default();
-    Guidance {
+    Ok(Guidance {
         allowed_actions: action_ids(&[
             "plan.show",
             "plan.validate",
             "plan.review",
             "plan.amend.propose",
             "exec.start",
+            "standards.conflict.list",
+            "standards.conflict.refresh",
+            "standards.conflict.resolve",
         ]),
         blocked_actions: vec![blocked(
             "git.commit",
@@ -662,7 +714,7 @@ fn ready_guidance(plan: &Plan) -> Guidance {
         )],
         approval_required: false,
         next_actions,
-    }
+    })
 }
 
 fn in_progress_guidance(plan: &Plan) -> Guidance {

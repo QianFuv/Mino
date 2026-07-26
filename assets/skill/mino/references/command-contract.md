@@ -59,6 +59,20 @@ the gate. On a hook/Git failure, preserve the staged state, use the returned
 `exec resume` action, and retry the exact commit argv. Never reset, unstage,
 delete journals, use `--no-verify`, or create a replacement commit manually.
 
+## Standards conflicts
+
+When validation or Agent context reports a standards conflict, run the returned
+`standards conflict list` or `refresh` argv and present every candidate, source,
+precedence, and digest. Precedence is user requirement, repository rule,
+project configuration, language package, then Common; it supplies display
+order only and never authorizes an implicit selection.
+
+`standards.conflict.resolve` is an approval boundary. Stop until the user
+selects one exact current candidate and supplies a rationale plus auditable
+decision reference, then execute only the returned resolve shape with those
+values. Re-read context afterward. If source bytes change, the decision is
+stale and must be refreshed and explicitly made again.
+
 ## Initial creation
 
 Only when the user explicitly requests formal or durable planning and context

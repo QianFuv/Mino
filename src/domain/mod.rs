@@ -10,6 +10,7 @@ mod execution;
 mod id;
 mod plan;
 mod review;
+mod standards;
 mod state;
 mod task;
 mod timestamp;
@@ -40,6 +41,10 @@ pub use plan::{
     GitReadiness, Lineage, Plan, PlanMetadata, PlanScope, StandardSelection,
 };
 pub use review::ReviewItem;
+pub use standards::{
+    StandardConflict, StandardConflictCandidate, StandardConflictDecision, StandardConflictRecord,
+    StandardSourceKind, StandardsConflictState,
+};
 pub use state::{
     CheckStatus, CommitStatus, CriterionStatus, GitFlowConsent, PlanStatus, ReviewClassification,
     ReviewStatus, TaskStatus,

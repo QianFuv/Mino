@@ -25,7 +25,10 @@
     "plan.file.add",
     "plan.verification.add",
     "plan.validate",
-    "plan.show"
+    "plan.show",
+    "standards.conflict.list",
+    "standards.conflict.refresh",
+    "standards.conflict.resolve"
   ],
   "blocked_actions": [
     {

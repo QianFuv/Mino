@@ -48,7 +48,8 @@ return to the required workflow and follow the CLI's canonical next actions.
   the exact same command and inputs.
 - Never infer approval from plan completeness, conversation tone, or a prior
   task. Read [approval-boundaries.md](references/approval-boundaries.md) before
-  approval, exception, review/rework, or plan-scoped Git operations.
+  approval, standards-conflict resolution, exception, review/rework, or
+  plan-scoped Git operations.
 - Do not run an unsupported or hidden Git mutation. Invoke branch creation only
   after its separate explicit approval, and invoke task commit only through an
   exact returned `git.commit` argv under current Approved Git Flow consent.

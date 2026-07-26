@@ -6,6 +6,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 
 use super::execution::EXECUTION_EXTENSION_KEY;
+use super::standards::STANDARDS_CONFLICT_EXTENSION_KEY;
 use super::{
     Amendment, AmendmentClassification, AmendmentImpact, AmendmentOperation, AmendmentPatch,
     AmendmentStatus, CheckId, CheckStatus, CheckpointKind, CommitStatus, CriterionId, DomainError,
@@ -13,8 +14,8 @@ use super::{
     DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,
     DraftTaskInput, DraftVerificationInput, EvidenceId, ExecutionState, FileMapEntry,
     GitFlowConsent, PlanDraftSeed, PlanId, PlanStatus, ProtocolVersion, ReviewClassification,
-    ReviewItem, ReviewStatus, SchemaVersion, Task, TaskId, TaskStatus, Timestamp,
-    VerificationCheck,
+    ReviewItem, ReviewStatus, SchemaVersion, StandardConflict, StandardsConflictState, Task,
+    TaskId, TaskStatus, Timestamp, VerificationCheck,
 };
 
 /// Human and repository metadata associated with a plan.
@@ -912,6 +913,28 @@ impl Plan {
                         DomainError::new(
                             DomainErrorKind::InvariantViolation,
                             format!("Execution extension is malformed: {error}"),
+                        )
+                    })
+                },
+            )
+    }
+
+    /// Returns typed standards-conflict snapshots stored in the extension namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when the standards-conflict extension is malformed.
+    pub fn standards_conflict_state(&self) -> Result<StandardsConflictState, DomainError> {
+        self.extensions
+            .get(STANDARDS_CONFLICT_EXTENSION_KEY)
+            .cloned()
+            .map_or_else(
+                || Ok(StandardsConflictState::default()),
+                |value| {
+                    serde_json::from_value(value).map_err(|error| {
+                        DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            format!("Standards conflict extension is malformed: {error}"),
                         )
                     })
                 },
@@ -1938,6 +1961,91 @@ impl Plan {
         self.validate_invariants()
     }
 
+    /// Replaces detected standards conflicts while preserving only current decisions.
+    ///
+    /// A Ready-plan refresh invalidates its plan approval because the reviewed
+    /// standards sources changed. Draft and Ready are the only legal states.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an illegal state, malformed conflict snapshot, or
+    /// a refresh that would make no semantic change.
+    pub fn refresh_standards_conflicts(
+        &mut self,
+        conflicts: Vec<StandardConflict>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if !matches!(self.status, PlanStatus::Draft | PlanStatus::Ready) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!(
+                    "Plan {} cannot refresh standards conflicts from status {:?}",
+                    self.id, self.status
+                ),
+            ));
+        }
+        let refreshed = self.standards_conflict_state()?.refreshed(conflicts)?;
+        if refreshed == self.standards_conflict_state()? {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Standards conflict refresh made no semantic change",
+            ));
+        }
+        let mut candidate = self.clone();
+        candidate.store_standards_conflicts(&refreshed)?;
+        if candidate.status == PlanStatus::Ready {
+            candidate.invalidate_plan_approval();
+        }
+        candidate.record_revision(candidate.next_revision()?, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Records one explicit standards candidate decision with required rationale.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an illegal lifecycle state, unknown conflict or
+    /// candidate, duplicate resolution, empty rationale, or malformed state.
+    pub fn resolve_standards_conflict(
+        &mut self,
+        conflict_id: &str,
+        candidate_id: &str,
+        rationale: String,
+        decision_reference: String,
+        actor: String,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if !matches!(self.status, PlanStatus::Draft | PlanStatus::Ready) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!(
+                    "Plan {} cannot resolve standards conflicts from status {:?}",
+                    self.id, self.status
+                ),
+            ));
+        }
+        let mut state = self.standards_conflict_state()?;
+        state.resolve(
+            conflict_id,
+            candidate_id,
+            rationale,
+            decision_reference,
+            actor,
+            updated_at.clone(),
+        )?;
+        let mut candidate = self.clone();
+        candidate.store_standards_conflicts(&state)?;
+        if candidate.status == PlanStatus::Ready {
+            candidate.invalidate_plan_approval();
+        }
+        candidate.record_revision(candidate.next_revision()?, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Leases one task or global verification check for external execution.
     ///
     /// # Errors
@@ -2595,6 +2703,26 @@ impl Plan {
         self.validate_amendment_state()?;
         self.validate_review_state()?;
         self.validate_execution_state()?;
+        self.standards_conflict_state()?.validate()?;
+        Ok(())
+    }
+
+    fn store_standards_conflicts(
+        &mut self,
+        state: &StandardsConflictState,
+    ) -> Result<(), DomainError> {
+        if state.is_empty() {
+            self.extensions.remove(STANDARDS_CONFLICT_EXTENSION_KEY);
+            return Ok(());
+        }
+        let value = serde_json::to_value(state).map_err(|error| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Failed to encode standards conflict extension: {error}"),
+            )
+        })?;
+        self.extensions
+            .insert(STANDARDS_CONFLICT_EXTENSION_KEY.to_owned(), value);
         Ok(())
     }
 

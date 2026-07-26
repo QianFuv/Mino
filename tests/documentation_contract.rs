@@ -77,7 +77,11 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     ),
     (
         &["standards", "--help"],
-        &["detect", "recommend", "apply", "sync", "help"],
+        &["detect", "recommend", "apply", "sync", "conflict", "help"],
+    ),
+    (
+        &["standards", "conflict", "--help"],
+        &["list", "refresh", "resolve", "help"],
     ),
     (
         &["agent", "--help"],
@@ -168,6 +172,9 @@ const LEAF_COMMANDS: &[&str] = &[
     "review resolve",
     "review rework",
     "standards apply",
+    "standards conflict list",
+    "standards conflict refresh",
+    "standards conflict resolve",
     "standards detect",
     "standards recommend",
     "standards sync",
@@ -301,7 +308,8 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             "git.branch.create",
             "plan.amend.approve",
             "plan.approve",
-            "review.accept"
+            "review.accept",
+            "standards.conflict.resolve"
         ]
     );
 }

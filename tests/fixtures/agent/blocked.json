@@ -17,7 +17,7 @@
       "reason": "The plan must resume from its recorded blocked state"
     }
   ],
-  "standards": [],
+  "standards": ["common@1.0.0"],
   "approval_required": false,
   "next_actions": [
     {

@@ -1,0 +1,19 @@
+format_version = 1
+
+[[rules]]
+rule_id = "rust.docs"
+value = "The current task explicitly requires documentation on every function."
+source_kind = "user_requirement"
+source = "plan.original_request"
+
+[[rules]]
+rule_id = "rust.docs"
+value = "Repository policy requires documentation only on public Rust APIs."
+source_kind = "repository_rule"
+source = "AGENTS.md"
+
+[[rules]]
+rule_id = "rust.docs"
+value = "Project configuration requires documentation warnings for the entire crate."
+source_kind = "project_configuration"
+source = "rustdoc.toml"

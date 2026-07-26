@@ -16,6 +16,7 @@ use crate::runner::{
     RunnerErrorKind,
 };
 use crate::store::sha256_digest;
+use crate::validation::{validate_plan, validation_failure};
 use crate::{ErrorCategory, MinoError};
 
 const DEFAULT_CHECK_TIMEOUT: Duration = Duration::from_mins(5);
@@ -138,6 +139,15 @@ impl ExecutionService {
         request: PlanMutationRequest,
         task_id: TaskId,
     ) -> Result<PlanOperationReport, MinoError> {
+        let stored = self.plans.load_stored(&request.plan_id)?;
+        if stored.revision() == request.expected_revision {
+            let validation = validate_plan(&self.root, &stored)?;
+            if validation.findings.iter().any(|finding| {
+                finding.blocking && finding.id.starts_with("POLICY-STANDARD-CONFLICT")
+            }) {
+                return Err(validation_failure(&validation));
+            }
+        }
         let changed_fields = vec!["status".to_owned(), format!("tasks.{task_id}.status")];
         self.plans.commit_semantic(
             request,
