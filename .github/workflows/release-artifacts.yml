@@ -49,7 +49,9 @@ jobs:
       - name: Fetch locked dependencies
         run: cargo fetch --locked
       - name: Validate canonical plugin contract
-        run: cargo test --locked --test plugin_contract -- --test-threads=1
+        run: |
+          cargo build --locked --bin mino
+          cargo test --locked --test plugin_contract -- --test-threads=1
       - name: Build native Mino binary
         run: cargo build --release --locked --bin mino
       - name: Assemble and smoke native artifact
