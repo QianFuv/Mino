@@ -3,19 +3,18 @@
 mod agents_block;
 mod gitignore_block;
 mod skill;
+mod transaction;
 
-#[cfg(unix)]
-use std::fs::File;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
 use crate::{ErrorCategory, MinoError};
 
-static NEXT_INTEGRATION_FILE: AtomicU64 = AtomicU64::new(1);
+pub use transaction::IntegrationFailurePoint;
+use transaction::IntegrationWriter;
+pub(crate) use transaction::inspect_transactions;
 
 /// Repository integration surfaces managed or inspected by Mino.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -137,10 +136,41 @@ pub fn integrate_project(
     root: &Path,
     options: IntegrationOptions,
 ) -> Result<IntegrationReport, MinoError> {
+    integrate_project_internal(root, options, None)
+}
+
+/// Runs integration reconciliation with one deterministic injected interruption.
+///
+/// This entry point exists to validate crash recovery at exact publication
+/// boundaries. Production callers should use [`integrate_project`].
+///
+/// # Errors
+///
+/// Returns the configured injected interruption or any normal integration error.
+pub fn integrate_project_with_failure(
+    root: &Path,
+    options: IntegrationOptions,
+    failure_point: IntegrationFailurePoint,
+) -> Result<IntegrationReport, MinoError> {
+    integrate_project_internal(root, options, Some(failure_point))
+}
+
+fn integrate_project_internal(
+    root: &Path,
+    options: IntegrationOptions,
+    failure_point: Option<IntegrationFailurePoint>,
+) -> Result<IntegrationReport, MinoError> {
+    let writer = IntegrationWriter::open(root, failure_point)?;
+    let root = writer.root();
     let mut report = IntegrationReport::default();
-    skill::reconcile(root, true, &mut report)?;
-    agents_block::reconcile(root, options.apply_agents_block, &mut report)?;
-    gitignore_block::reconcile(root, options.apply_gitignore_block, &mut report)?;
+    skill::reconcile(root, true, Some(&writer), &mut report)?;
+    agents_block::reconcile(root, options.apply_agents_block, Some(&writer), &mut report)?;
+    gitignore_block::reconcile(
+        root,
+        options.apply_gitignore_block,
+        Some(&writer),
+        &mut report,
+    )?;
     finish_report(&mut report);
     Ok(report)
 }
@@ -152,10 +182,19 @@ pub fn integrate_project(
 /// Returns an environment error when an existing integration path cannot be
 /// inspected safely.
 pub fn inspect_project(root: &Path) -> Result<IntegrationReport, MinoError> {
+    let root = root.canonicalize().map_err(|error| {
+        MinoError::new(
+            ErrorCategory::EnvironmentUnavailable,
+            format!(
+                "Failed to resolve integration root {}: {error}",
+                root.display()
+            ),
+        )
+    })?;
     let mut report = IntegrationReport::default();
-    skill::reconcile(root, false, &mut report)?;
-    agents_block::reconcile(root, false, &mut report)?;
-    gitignore_block::reconcile(root, false, &mut report)?;
+    skill::reconcile(&root, false, None, &mut report)?;
+    agents_block::reconcile(&root, false, None, &mut report)?;
+    gitignore_block::reconcile(&root, false, None, &mut report)?;
     finish_report(&mut report);
     Ok(report)
 }
@@ -178,6 +217,7 @@ fn reconcile_block(
     root: &Path,
     spec: &ManagedBlockSpec,
     should_apply: bool,
+    writer: Option<&IntegrationWriter>,
     report: &mut IntegrationReport,
 ) -> Result<(), MinoError> {
     let path = root.join(spec.relative_path);
@@ -197,7 +237,7 @@ fn reconcile_block(
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return reconcile_missing_block(root, spec, &path, should_apply, report);
+            return reconcile_missing_block(spec, &path, should_apply, writer, report);
         }
         Err(error) => return Err(io_error("inspect", &path, &error)),
     }
@@ -219,7 +259,7 @@ fn reconcile_block(
     let line_start_count = marker_line_count(contents, spec.start_marker);
     let line_end_count = marker_line_count(contents, spec.end_marker);
     if raw_start_count == 0 && raw_end_count == 0 {
-        return reconcile_absent_block(root, spec, path, &bytes, contents, should_apply, report);
+        return reconcile_absent_block(spec, path, &bytes, contents, should_apply, writer, report);
     }
     if raw_start_count != 1 || raw_end_count != 1 || line_start_count != 1 || line_end_count != 1 {
         add_malformed_block(spec, path, spec.malformed_message, report);
@@ -249,7 +289,7 @@ fn reconcile_block(
         &contents[managed_end..]
     );
     if should_apply {
-        let status = guarded_write(root, &path, Some(&bytes), replacement.as_bytes())?;
+        let status = guarded_write(writer, &path, Some(&bytes), replacement.as_bytes())?;
         report
             .artifacts
             .push(artifact(spec.kind, path, status, None));
@@ -271,15 +311,15 @@ fn reconcile_block(
 }
 
 fn reconcile_missing_block(
-    root: &Path,
     spec: &ManagedBlockSpec,
     path: &Path,
     should_apply: bool,
+    writer: Option<&IntegrationWriter>,
     report: &mut IntegrationReport,
 ) -> Result<(), MinoError> {
     if should_apply {
         let replacement = format!("{}\n", spec.block);
-        let status = guarded_write(root, path, None, replacement.as_bytes())?;
+        let status = guarded_write(writer, path, None, replacement.as_bytes())?;
         report
             .artifacts
             .push(artifact(spec.kind, path.to_path_buf(), status, None));
@@ -290,12 +330,12 @@ fn reconcile_missing_block(
 }
 
 fn reconcile_absent_block(
-    root: &Path,
     spec: &ManagedBlockSpec,
     path: PathBuf,
     bytes: &[u8],
     contents: &str,
     should_apply: bool,
+    writer: Option<&IntegrationWriter>,
     report: &mut IntegrationReport,
 ) -> Result<(), MinoError> {
     if should_apply {
@@ -307,7 +347,7 @@ fn reconcile_absent_block(
             "\n\n"
         };
         let replacement = format!("{contents}{separator}{}\n", spec.block);
-        let status = guarded_write(root, &path, Some(bytes), replacement.as_bytes())?;
+        let status = guarded_write(writer, &path, Some(bytes), replacement.as_bytes())?;
         report
             .artifacts
             .push(artifact(spec.kind, path, status, None));
@@ -405,38 +445,19 @@ fn finding(
 }
 
 fn guarded_write(
-    root: &Path,
+    writer: Option<&IntegrationWriter>,
     path: &Path,
     expected: Option<&[u8]>,
     replacement: &[u8],
 ) -> Result<IntegrationStatus, MinoError> {
-    ensure_no_symlink(root, path)?;
-    match fs::read(path) {
-        Ok(actual) if actual == replacement => Ok(IntegrationStatus::Current),
-        Ok(actual) if expected.is_some_and(|expected| actual == expected) => {
-            guarded_replace(path, &actual, replacement)?;
-            Ok(IntegrationStatus::Updated)
-        }
-        Ok(_) => Err(MinoError::new(
-            ErrorCategory::DriftDetected,
-            format!(
-                "Integration bytes changed before writing {}",
-                path.display()
-            ),
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && expected.is_none() => {
-            create_file(path, replacement)?;
-            Ok(IntegrationStatus::Created)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(MinoError::new(
-            ErrorCategory::DriftDetected,
-            format!(
-                "Integration path disappeared before writing {}",
-                path.display()
-            ),
-        )),
-        Err(error) => Err(io_error("read", path, &error)),
-    }
+    writer
+        .ok_or_else(|| {
+            MinoError::new(
+                ErrorCategory::EnvironmentUnavailable,
+                "Integration apply requires a transaction writer",
+            )
+        })?
+        .guarded_write(path, expected, replacement)
 }
 
 fn ensure_no_symlink(root: &Path, path: &Path) -> Result<(), MinoError> {
@@ -471,119 +492,9 @@ fn ensure_no_symlink(root: &Path, path: &Path) -> Result<(), MinoError> {
     Ok(())
 }
 
-fn create_file(path: &Path, bytes: &[u8]) -> Result<(), MinoError> {
-    let parent = parent_directory(path)?;
-    fs::create_dir_all(parent).map_err(|error| io_error("create directory", parent, &error))?;
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .map_err(|error| io_error("create", path, &error))?;
-    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-        drop(file);
-        let _ = fs::remove_file(path);
-        return Err(io_error("write", path, &error));
-    }
-    drop(file);
-    sync_directory(parent)
-}
-
-fn guarded_replace(path: &Path, expected: &[u8], replacement: &[u8]) -> Result<(), MinoError> {
-    let actual = fs::read(path).map_err(|error| io_error("read", path, &error))?;
-    if actual != expected {
-        return Err(MinoError::new(
-            ErrorCategory::DriftDetected,
-            format!(
-                "Integration bytes changed before replacing {}",
-                path.display()
-            ),
-        ));
-    }
-    let parent = parent_directory(path)?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            MinoError::new(
-                ErrorCategory::EnvironmentUnavailable,
-                format!("Integration path {} has no UTF-8 file name", path.display()),
-            )
-        })?;
-    let sequence = NEXT_INTEGRATION_FILE.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".{file_name}.mino-integration-{}-{sequence}.tmp",
-        std::process::id()
-    ));
-    let backup = parent.join(format!(
-        ".{file_name}.mino-integration-{}-{sequence}.bak",
-        std::process::id()
-    ));
-    create_temporary(&temporary, replacement)?;
-    if let Err(error) = fs::rename(path, &backup) {
-        let _ = fs::remove_file(&temporary);
-        return Err(io_error("back up", path, &error));
-    }
-    if let Err(error) = fs::rename(&temporary, path) {
-        let restoration = fs::rename(&backup, path);
-        let _ = fs::remove_file(&temporary);
-        return match restoration {
-            Ok(()) => Err(io_error("publish", path, &error)),
-            Err(restoration_error) => Err(MinoError::new(
-                ErrorCategory::EnvironmentUnavailable,
-                format!(
-                    "Failed to publish {}: {error}; restoration failed: {restoration_error}",
-                    path.display()
-                ),
-            )),
-        };
-    }
-    fs::remove_file(&backup).map_err(|error| io_error("remove backup", &backup, &error))?;
-    sync_directory(parent)
-}
-
-fn create_temporary(path: &Path, bytes: &[u8]) -> Result<(), MinoError> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .map_err(|error| io_error("create", path, &error))?;
-    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-        drop(file);
-        let _ = fs::remove_file(path);
-        return Err(io_error("write", path, &error));
-    }
-    Ok(())
-}
-
-fn parent_directory(path: &Path) -> Result<&Path, MinoError> {
-    path.parent().ok_or_else(|| {
-        MinoError::new(
-            ErrorCategory::EnvironmentUnavailable,
-            format!(
-                "Integration path {} has no parent directory",
-                path.display()
-            ),
-        )
-    })
-}
-
 fn io_error(action: &str, path: &Path, error: &std::io::Error) -> MinoError {
     MinoError::new(
         ErrorCategory::EnvironmentUnavailable,
         format!("Failed to {action} {}: {error}", path.display()),
     )
-}
-
-#[cfg(unix)]
-fn sync_directory(directory: &Path) -> Result<(), MinoError> {
-    File::open(directory)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| io_error("synchronize", directory, &error))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(directory: &Path) -> Result<(), MinoError> {
-    fs::metadata(directory)
-        .map(|_| ())
-        .map_err(|error| io_error("inspect", directory, &error))
 }

@@ -1,5 +1,6 @@
 //! Contract tests for project root discovery, initialization, show, and doctor.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -11,7 +12,9 @@ use std::os::unix::fs::symlink;
 use std::os::windows::fs::symlink_dir;
 
 use mino::domain::{Plan, PlanId, RequestId, Timestamp};
-use mino::integration::IntegrationOptions;
+use mino::integration::{
+    IntegrationFailurePoint, IntegrationOptions, integrate_project_with_failure,
+};
 use mino::project::{
     FindingSeverity, ProjectConfig, ProjectLayout, ProtocolLock, RootSource, StandardsLock,
     discover, doctor, initialize, initialize_with_options, show,
@@ -96,6 +99,45 @@ fn apply_integrations(root: &Path) {
         },
     )
     .expect("repository integrations should apply");
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TreeEntrySnapshot {
+    Directory,
+    File(Vec<u8>),
+    Other,
+}
+
+fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, TreeEntrySnapshot> {
+    let mut snapshot = BTreeMap::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let mut entries = fs::read_dir(&directory)
+            .expect("snapshot directory should be readable")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("snapshot entries should be readable");
+        entries.sort_by_key(std::fs::DirEntry::path);
+        for entry in entries {
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .expect("snapshot path should be relative")
+                .to_path_buf();
+            let metadata = fs::symlink_metadata(&path).expect("snapshot metadata should read");
+            if metadata.is_dir() {
+                snapshot.insert(relative, TreeEntrySnapshot::Directory);
+                directories.push(path);
+            } else if metadata.is_file() {
+                snapshot.insert(
+                    relative,
+                    TreeEntrySnapshot::File(fs::read(path).expect("snapshot file should read")),
+                );
+            } else {
+                snapshot.insert(relative, TreeEntrySnapshot::Other);
+            }
+        }
+    }
+    snapshot
 }
 
 #[cfg(any(unix, windows))]
@@ -220,6 +262,45 @@ fn doctor_reports_a_symlinked_mino_directory_without_following_it() {
     assert_eq!(
         fs::read(&sentinel).expect("outside sentinel should remain readable"),
         b"outside\n"
+    );
+}
+
+#[test]
+fn doctor_reports_pending_integration_replacement_without_changing_any_tree_entry() {
+    let project = TestProject::new("doctor-integration-transaction");
+    apply_integrations(project.path());
+    let agents = project.path().join("AGENTS.md");
+    let stale = fs::read_to_string(&agents)
+        .expect("AGENTS should be readable")
+        .replace(
+            "Invoke `$mino` for an explicitly requested formal plan",
+            "Invoke a stale workflow for an explicitly requested formal plan",
+        );
+    fs::write(&agents, stale).expect("owned AGENTS drift should be written");
+    integrate_project_with_failure(
+        project.path(),
+        IntegrationOptions {
+            apply_agents_block: true,
+            apply_gitignore_block: true,
+        },
+        IntegrationFailurePoint::AfterBackup,
+    )
+    .expect_err("integration replacement should stop after backup");
+    assert!(!agents.exists());
+
+    let before = snapshot_tree(project.path());
+    let report = doctor(project.path()).expect("doctor should inspect pending replacement");
+    assert!(finding_codes(&report.findings).contains(&"integration_transaction_pending"));
+    assert_eq!(snapshot_tree(project.path()), before);
+
+    initialize(project.path()).expect("init should recover the pending replacement");
+    assert!(agents.is_file());
+    assert!(
+        doctor(project.path())
+            .expect("doctor should run after recovery")
+            .findings
+            .iter()
+            .all(|finding| !finding.code.starts_with("integration_transaction_"))
     );
 }
 

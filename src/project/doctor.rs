@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::domain::Plan;
 use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter};
-use crate::integration::{IntegrationFindingSeverity, inspect_project};
+use crate::integration::{IntegrationFindingSeverity, inspect_project, inspect_transactions};
 use crate::managed_fs::{
     ManagedDirEntry, ManagedEntryKind, ManagedFsErrorKind, ManagedPath, ProjectFs,
 };
@@ -110,6 +110,7 @@ pub fn diagnose(layout: &ProjectLayout) -> Result<DoctorReport, MinoError> {
         inspect_config(layout, &filesystem, &mut findings);
         inspect_protocol_lock(layout, &filesystem, &mut findings);
         inspect_standards_lock(layout, &filesystem, &mut findings);
+        inspect_integration_transactions(layout, &mut findings);
         inspect_transactions_and_projections(
             layout,
             &filesystem,
@@ -728,4 +729,31 @@ fn inspect_integrations(
         ));
     }
     Ok(())
+}
+
+fn inspect_integration_transactions(layout: &ProjectLayout, findings: &mut Vec<DoctorFinding>) {
+    let inspections = match inspect_transactions(layout.root()) {
+        Ok(inspections) => inspections,
+        Err(error) => {
+            findings.push(DoctorFinding::new(
+                "integration_transaction_corrupt",
+                FindingSeverity::Error,
+                error.to_string(),
+                Some(layout.integration_transactions()),
+            ));
+            return;
+        }
+    };
+    for inspection in inspections {
+        findings.push(DoctorFinding::new(
+            if inspection.is_corrupt {
+                "integration_transaction_corrupt"
+            } else {
+                "integration_transaction_pending"
+            },
+            FindingSeverity::Error,
+            inspection.message,
+            Some(inspection.path),
+        ));
+    }
 }

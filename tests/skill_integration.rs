@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mino::integration::{IntegrationOptions, IntegrationStatus};
+use mino::ErrorCategory;
+use mino::integration::{
+    IntegrationFailurePoint, IntegrationOptions, IntegrationStatus, integrate_project_with_failure,
+};
 use mino::project::{doctor, initialize, initialize_with_options};
 use serde_json::Value;
 
@@ -343,6 +346,124 @@ fn managed_blocks_preserve_outer_bytes_and_refuse_malformed_markers() {
 }
 
 #[test]
+fn every_replacement_interruption_recovers_one_valid_target_and_cleans_residuals() {
+    let cases = [
+        (IntegrationFailurePoint::BeforeBackup, true),
+        (IntegrationFailurePoint::AfterBackup, false),
+        (IntegrationFailurePoint::BeforePublish, true),
+        (IntegrationFailurePoint::AfterPublish, false),
+        (IntegrationFailurePoint::BeforeBackupRemoval, true),
+    ];
+    for (index, (failure_point, use_agents)) in cases.into_iter().enumerate() {
+        let project = TestProject::new(&format!("recovery-{index}"));
+        initialize_with_options(project.path(), apply_all_options())
+            .expect("baseline integrations should apply");
+        let target = project.path().join(if use_agents {
+            "AGENTS.md"
+        } else {
+            ".gitignore"
+        });
+        let replacement = fs::read(&target).expect("current integration should be readable");
+        let stale = stale_integration_bytes(&replacement, use_agents);
+        fs::write(&target, &stale).expect("owned integration drift should be written");
+
+        let failure =
+            integrate_project_with_failure(project.path(), apply_all_options(), failure_point)
+                .expect_err("integration replacement should stop at the injected boundary");
+        assert_eq!(failure.category(), ErrorCategory::EnvironmentUnavailable);
+        assert!(
+            finding_codes(
+                &doctor(project.path())
+                    .expect("doctor should inspect the pending transaction")
+                    .findings
+            )
+            .contains(&"integration_transaction_pending")
+        );
+
+        initialize(project.path()).expect("the next init should recover before reconciliation");
+        let recovered = fs::read(&target).expect("recovered target must exist");
+        assert!(recovered == stale || recovered == replacement);
+        assert_no_integration_residuals(&project);
+    }
+}
+
+#[test]
+fn unexpected_backup_and_journal_bytes_are_reported_and_preserved() {
+    let backup_project = TestProject::new("corrupt-backup");
+    let backup_target = prepare_agents_replacement(&backup_project);
+    integrate_project_with_failure(
+        backup_project.path(),
+        apply_all_options(),
+        IntegrationFailurePoint::AfterBackup,
+    )
+    .expect_err("replacement should stop after backup");
+    let backup = only_residual_with_extension(&backup_project, "bak");
+    fs::write(&backup, b"tampered backup\n").expect("backup should be corrupted");
+    let before = snapshot_transaction_artifacts(&backup_project);
+    let diagnosed = doctor(backup_project.path()).expect("doctor should inspect corruption");
+    assert!(finding_codes(&diagnosed.findings).contains(&"integration_transaction_corrupt"));
+    assert_eq!(snapshot_transaction_artifacts(&backup_project), before);
+    let error = initialize(backup_project.path()).expect_err("corrupt backup must block recovery");
+    assert_eq!(error.category(), ErrorCategory::DriftDetected);
+    assert_eq!(snapshot_transaction_artifacts(&backup_project), before);
+    assert!(!backup_target.exists());
+
+    let journal_project = TestProject::new("corrupt-journal");
+    let journal_target = prepare_agents_replacement(&journal_project);
+    integrate_project_with_failure(
+        journal_project.path(),
+        apply_all_options(),
+        IntegrationFailurePoint::BeforeBackup,
+    )
+    .expect_err("replacement should stop before backup");
+    let journal = transaction_phase_file(&journal_project, "prepared.json");
+    fs::write(&journal, b"{}\n").expect("journal should be corrupted");
+    let before = snapshot_transaction_artifacts(&journal_project);
+    let diagnosed = doctor(journal_project.path()).expect("doctor should inspect bad journal");
+    assert!(finding_codes(&diagnosed.findings).contains(&"integration_transaction_corrupt"));
+    assert_eq!(snapshot_transaction_artifacts(&journal_project), before);
+    let error = initialize(journal_project.path()).expect_err("bad journal must block recovery");
+    assert_eq!(error.category(), ErrorCategory::DriftDetected);
+    assert_eq!(snapshot_transaction_artifacts(&journal_project), before);
+    assert!(journal_target.is_file());
+}
+
+#[test]
+fn interrupted_skill_refresh_recovers_then_finishes_remaining_owned_files() {
+    let project = TestProject::new("skill-resume");
+    initialize(project.path()).expect("baseline Skill should install");
+    let skill_entry = installed_skill_root(&project).join("SKILL.md");
+    let metadata = installed_skill_root(&project).join("agents/openai.yaml");
+    let stale_entry = fs::read_to_string(&skill_entry)
+        .expect("Skill entry should be readable")
+        .replace("Treat the `mino` CLI", "Treat an interrupted CLI");
+    let stale_metadata = fs::read_to_string(&metadata)
+        .expect("Skill metadata should be readable")
+        .replace("Mino Planning Workflow", "Interrupted Planning Workflow");
+    fs::write(&skill_entry, stale_entry).expect("Skill entry drift should be written");
+    fs::write(&metadata, &stale_metadata).expect("Skill metadata drift should be written");
+
+    integrate_project_with_failure(
+        project.path(),
+        IntegrationOptions::default(),
+        IntegrationFailurePoint::AfterPublish,
+    )
+    .expect_err("Skill refresh should stop after the first publication");
+    assert_eq!(
+        fs::read(&skill_entry).expect("published Skill entry should exist"),
+        fs::read(bundled_skill_root().join("SKILL.md")).expect("bundled entry should read")
+    );
+    assert_eq!(
+        fs::read_to_string(&metadata).expect("unprocessed metadata should exist"),
+        stale_metadata
+    );
+
+    initialize(project.path()).expect("next init should recover and finish the Skill refresh");
+    assert_installed_skill_matches_bundle(&project);
+    assert_no_integration_residuals(&project);
+}
+
+#[test]
 fn project_init_returns_one_canonical_action_that_completes_integrations() {
     let project = TestProject::new("cli");
     let first = parse_success(&run_mino(
@@ -386,4 +507,109 @@ fn project_init_returns_one_canonical_action_that_completes_integrations() {
         ],
     ));
     assert_eq!(doctor["complete"], true);
+}
+
+fn prepare_agents_replacement(project: &TestProject) -> PathBuf {
+    initialize_with_options(project.path(), apply_all_options())
+        .expect("baseline integrations should apply");
+    let target = project.path().join("AGENTS.md");
+    let current = fs::read(&target).expect("AGENTS should be readable");
+    fs::write(&target, stale_integration_bytes(&current, true))
+        .expect("owned AGENTS drift should be written");
+    target
+}
+
+fn stale_integration_bytes(current: &[u8], use_agents: bool) -> Vec<u8> {
+    let current = std::str::from_utf8(current).expect("integration bytes should be UTF-8");
+    if use_agents {
+        current
+            .replace(
+                "Invoke `$mino` for an explicitly requested formal plan",
+                "Invoke a stale workflow for an explicitly requested formal plan",
+            )
+            .into_bytes()
+    } else {
+        current
+            .replace("/docs/plan/", "/docs/interrupted-plan/")
+            .into_bytes()
+    }
+}
+
+fn assert_no_integration_residuals(project: &TestProject) {
+    let transaction_root = project.path().join(".mino/integration-transactions");
+    if transaction_root.exists() {
+        assert_eq!(
+            fs::read_dir(&transaction_root)
+                .expect("transaction root should be readable")
+                .count(),
+            0
+        );
+    }
+    assert!(
+        recursive_files(project.path())
+            .iter()
+            .all(|path| !path.to_string_lossy().contains(".mino-integration-"))
+    );
+}
+
+fn only_residual_with_extension(project: &TestProject, extension: &str) -> PathBuf {
+    let matches = recursive_files(project.path())
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|value| value == extension))
+        .filter(|path| path.to_string_lossy().contains(".mino-integration-"))
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 1, "expected one {extension} residual");
+    matches.into_iter().next().expect("residual should exist")
+}
+
+fn transaction_phase_file(project: &TestProject, name: &str) -> PathBuf {
+    recursive_files(&project.path().join(".mino/integration-transactions"))
+        .into_iter()
+        .find(|path| path.file_name().is_some_and(|value| value == name))
+        .expect("transaction phase file should exist")
+}
+
+fn snapshot_transaction_artifacts(project: &TestProject) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut artifacts = recursive_files(project.path())
+        .into_iter()
+        .filter(|path| {
+            path.starts_with(project.path().join(".mino/integration-transactions"))
+                || path.to_string_lossy().contains(".mino-integration-")
+        })
+        .map(|path| {
+            let relative = path
+                .strip_prefix(project.path())
+                .expect("artifact should be project-relative")
+                .to_path_buf();
+            let bytes = fs::read(&path).expect("transaction artifact should be readable");
+            (relative, bytes)
+        })
+        .collect::<Vec<_>>();
+    artifacts.sort_by(|left, right| left.0.cmp(&right.0));
+    artifacts
+}
+
+fn recursive_files(root: &Path) -> Vec<PathBuf> {
+    if !root.exists() {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let mut entries = fs::read_dir(directory)
+            .expect("test directory should be readable")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("test entries should be readable");
+        entries.sort_by_key(std::fs::DirEntry::path);
+        for entry in entries {
+            let path = entry.path();
+            if entry.file_type().expect("entry type should read").is_dir() {
+                directories.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
 }

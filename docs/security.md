@@ -57,6 +57,8 @@ Evidence 的 `records`/`blobs`、检查的 `runs`、monitor summary、active bin
 ### 集成与导入
 
 - Skill 和 marker block 更新会拒绝 symlink component、non-file target、unowned bytes 与 malformed/duplicate markers；合法更新只替换 owned bytes。
+- 每次合法集成替换先写 canonical、digest-bound phase record，再备份和发布目标。`project init` 是唯一恢复入口；它只移动或删除摘要精确匹配的 target/backup/temporary。异常目标或 journal 字节会产生 drift/corruption 并原样保留。
+- `project doctor` 对 `.mino/integration-transactions/**` 仅做 no-follow 读取，报告 `integration_transaction_pending` 或 `integration_transaction_corrupt`；它不创建 lock、不改 phase、不恢复目标，也不清理残留。
 - legacy analysis 完全只读。
 - legacy import 要求普通、非空、UTF-8、无 NUL、最大 1 MiB 的源文件，并保存路径、大小和 SHA-256 provenance。
 - 导入时忽略 lifecycle、approval、result、commit、review 与 evidence 声明；unsafe path、shell control syntax 和已知 destructive executable 会被移除并产生 warning。

@@ -81,6 +81,12 @@ impl ProjectLayout {
         self.mino_directory().join("cache").join("standards")
     }
 
+    /// Returns the recoverable repository-integration transaction directory.
+    #[must_use]
+    pub fn integration_transactions(&self) -> PathBuf {
+        self.mino_directory().join("integration-transactions")
+    }
+
     /// Returns the repository-level Mino Skill entry point.
     #[must_use]
     pub fn skill_file(&self) -> PathBuf {

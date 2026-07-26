@@ -4,7 +4,10 @@ use std::path::Path;
 
 use crate::MinoError;
 
-use super::{IntegrationArtifactKind, IntegrationReport, ManagedBlockSpec, reconcile_block};
+use super::{
+    IntegrationArtifactKind, IntegrationReport, IntegrationWriter, ManagedBlockSpec,
+    reconcile_block,
+};
 
 const GITIGNORE_BLOCK: &str = r"# mino:runtime:start
 /.mino/
@@ -28,7 +31,8 @@ const SPEC: ManagedBlockSpec = ManagedBlockSpec {
 pub(super) fn reconcile(
     root: &Path,
     should_apply: bool,
+    writer: Option<&IntegrationWriter>,
     report: &mut IntegrationReport,
 ) -> Result<(), MinoError> {
-    reconcile_block(root, &SPEC, should_apply, report)
+    reconcile_block(root, &SPEC, should_apply, writer, report)
 }

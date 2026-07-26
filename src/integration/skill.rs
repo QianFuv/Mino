@@ -7,7 +7,7 @@ use crate::MinoError;
 
 use super::{
     IntegrationArtifactKind, IntegrationFindingSeverity, IntegrationReport, IntegrationStatus,
-    artifact, ensure_no_symlink, finding, guarded_write,
+    IntegrationWriter, artifact, ensure_no_symlink, finding, guarded_write,
 };
 
 const SKILL_MARKER: &str = "<!-- mino-managed-skill:v1 -->";
@@ -42,6 +42,7 @@ const BUNDLED_FILES: &[BundledFile] = &[
 pub(super) fn reconcile(
     root: &Path,
     should_apply: bool,
+    writer: Option<&IntegrationWriter>,
     report: &mut IntegrationReport,
 ) -> Result<(), MinoError> {
     let skill_root = root.join(SKILL_RELATIVE_ROOT);
@@ -61,7 +62,7 @@ pub(super) fn reconcile(
         return Ok(());
     }
     if !skill_root.exists() {
-        return reconcile_missing(root, &skill_root, should_apply, report);
+        return reconcile_missing(&skill_root, should_apply, writer, report);
     }
     if !skill_root.is_dir() {
         conflict(
@@ -125,7 +126,7 @@ pub(super) fn reconcile(
         return Ok(());
     }
     for (path, actual, expected) in current {
-        guarded_write(root, &path, actual.as_deref(), expected)?;
+        guarded_write(writer, &path, actual.as_deref(), expected)?;
     }
     report.artifacts.push(artifact(
         IntegrationArtifactKind::Skill,
@@ -137,15 +138,15 @@ pub(super) fn reconcile(
 }
 
 fn reconcile_missing(
-    root: &Path,
     skill_root: &Path,
     should_apply: bool,
+    writer: Option<&IntegrationWriter>,
     report: &mut IntegrationReport,
 ) -> Result<(), MinoError> {
     if should_apply {
         for bundled in BUNDLED_FILES {
             guarded_write(
-                root,
+                writer,
                 &skill_root.join(bundled.relative_path),
                 None,
                 bundled.bytes,

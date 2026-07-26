@@ -49,7 +49,7 @@ flowchart TD
 2. 向上查找最近的 `.mino/`。
 3. 向上查找最近的受支持清单：`Cargo.toml`、`package.json`、`pyproject.toml`、`setup.py`、`go.mod`、`pom.xml`、`build.gradle` 或 `build.gradle.kts`。
 
-Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超时或输出异常时也允许已存在的 `.mino` 或清单成为确定性 fallback，但在没有任何文件系统证据时保留类型化 Git 失败。只有 `project init` 可以在以上规则均失败时使用调用方指定的目录。初始化会验证内嵌协议、创建缺失的 `.mino` 状态、安装或核验仓库 Skill，并诊断集成状态。除非显式提供 apply 参数，它不会修改 `AGENTS.md` 或 `.gitignore`；初始化本身不执行网络或 Git 修改。
+Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超时或输出异常时也允许已存在的 `.mino` 或清单成为确定性 fallback，但在没有任何文件系统证据时保留类型化 Git 失败。只有 `project init` 可以在以上规则均失败时使用调用方指定的目录。初始化会验证内嵌协议、创建缺失的 `.mino` 状态，并在分类 Skill、`AGENTS.md` 或 `.gitignore` 前恢复可证明安全的集成替换事务；除非显式提供 apply 参数，它不会发起新的 `AGENTS.md` 或 `.gitignore` 修改。初始化本身不执行网络或 Git 修改。
 
 旧计划导入复用同一套计划服务，但采用两阶段写入：先读取完整且有界的源文件，预览可映射字段并产生警告；随后创建 revision 1 的 Draft，再以派生 request ID 写入 revision 2。中断后的精确重试可以补完第二阶段，历史状态、审批和证据不会被当作可信事实。
 
@@ -65,6 +65,8 @@ Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超
 │   ├── standards.lock                   已选择标准与目录 generation
 │   ├── active.json                      按工作树保存的活动计划绑定
 │   ├── active.lock                      绑定写入锁
+│   ├── integration-transactions.lock    集成替换全局锁
+│   ├── integration-transactions/<hash>/ prepared/backed_up/published/cleaned 记录
 │   ├── git/
 │   │   ├── branch.lock                  分支操作锁
 │   │   ├── commit.lock                  任务提交操作锁
@@ -102,6 +104,7 @@ Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超
 | `.mino/standards.local.toml` | 用户审阅的可选输入；Mino 读取但不生成。 |
 | `.mino/standards.lock` | 标准选择锁；显式同步可以原子替换。 |
 | `.mino/active.json` | 工作树绑定；只通过 `mino git bind` 修改。 |
+| `.mino/integration-transactions/` | Skill 与 marker-owned 文件替换的规范恢复记录；只由 `project init` 恢复。 |
 | `.mino/git/branches/` | 分支意图与完成日志；禁止手工编辑。 |
 | `.mino/git/commits/` | 任务提交日志；禁止手工编辑。 |
 | `.mino/plans/` | 计划、历史、运行与证据的规范存储；禁止手工编辑。 |
@@ -111,6 +114,8 @@ Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超
 | `.gitignore` | 用户所有，只有精确的 Mino runtime marker 区域受管。 |
 
 受管 `.gitignore` 区块忽略 `/.mino/` 和 `/docs/plan/`。Skill 不被忽略，因为它需要像其他稳定仓库指令一样接受审阅和版本控制。
+
+集成文件替换在目标父目录保存摘要绑定的 temporary/backup，并在 `.mino/integration-transactions/<target-hash>/` 追加不可变的 `prepared -> backed_up -> published -> cleaned` phase record。每个 phase 都绑定 target、backup、temporary、原摘要和替换摘要。`project init` 在任何集成分类前持锁恢复：prepared 可以回滚到原文件，backed_up 可以恢复原文件或继续发布，published 只清理摘要匹配的残留，cleaned 只移除事务记录。任何未知路径、非连续 phase、非规范 JSON 或摘要外字节都会保留并报错。`project doctor` 只读报告 pending/corrupt，不执行恢复。
 
 ## 计划生命周期
 
