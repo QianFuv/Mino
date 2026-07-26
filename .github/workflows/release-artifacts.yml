@@ -49,6 +49,8 @@ jobs:
       - name: Fetch locked dependencies
         run: cargo fetch --locked
       - name: Validate canonical plugin contract
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
           cargo build --locked --bin mino
           cargo test --locked --test plugin_contract -- --test-threads=1
