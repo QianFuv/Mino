@@ -51,6 +51,8 @@ flowchart TD
 
 Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超时或输出异常时也允许已存在的 `.mino` 或清单成为确定性 fallback，但在没有任何文件系统证据时保留类型化 Git 失败。只有 `project init` 可以在以上规则均失败时使用调用方指定的目录。初始化会验证内嵌协议、创建缺失的 `.mino` 状态，并在分类 Skill、`AGENTS.md` 或 `.gitignore` 前恢复可证明安全的集成替换事务；除非显式提供 apply 参数，它不会发起新的 `AGENTS.md` 或 `.gitignore` 修改。初始化本身不执行网络或 Git 修改。
 
+项目扫描通过串行且按路径排序的 `ignore::WalkBuilder` 读取根目录和嵌套 `.gitignore`、`.git/info/exclude` 以及 Git 全局 exclude；hidden filter 被关闭以保留 `.github` 等配置，符号链接不会被跟随。默认预算为最大深度 64、最多访问 100,000 个普通文件、总内容读取 128 MiB、单文件读取 4 MiB；内容读取使用固定 64 KiB 缓冲。预算触发后返回确定性的部分证据，并在 `bytes_read`、`truncated` 和排序后的 `truncation_reasons` 中显式说明，不把部分结果表示为完整扫描。
+
 旧计划导入复用同一套计划服务，但采用两阶段写入：先读取完整且有界的源文件，预览可映射字段并产生警告；随后创建 revision 1 的 Draft，再以派生 request ID 写入 revision 2。中断后的精确重试可以补完第二阶段，历史状态、审批和证据不会被当作可信事实。
 
 ## 规范数据布局

@@ -65,6 +65,10 @@ Evidence 的 `records`/`blobs`、检查的 `runs`、monitor summary、active bin
 - fork 在创建目标前审计 source event/snapshot chain，任何缺失、损坏或 digest mismatch 都不会发布目标。
 - archive 只追加 typed record，不删除、移动或重写计划历史。
 
+### 项目扫描
+
+项目扫描把仓库 ignore 文件和全局 Git exclude 当作过滤输入，不进入已忽略目录，也不跟随符号链接。遍历顺序固定，深度、文件数、总读取字节和单文件读取字节均有正数预算；源码行数与 CI 证据只通过固定 64 KiB 缓冲读取。触发预算不会静默伪装成完整结果，而会返回稳定的截断原因。扫描器不是文件系统沙箱：未忽略且位于预算内的路径仍会被读取，调用方应把扫描根本身视为授权边界。
+
 ## 进程执行边界
 
 ### 单次检查

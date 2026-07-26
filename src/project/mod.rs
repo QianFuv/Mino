@@ -29,7 +29,10 @@ pub use migrate::{
     LegacyMigrationReport, LegacyProposedChange, LegacySourceSummary, analyze_legacy,
 };
 pub use root::{ProjectRoot, RootSource, discover, discover_for_init};
-pub use scan::{Language, LanguageScore, ProjectScan, ScanEvidence, WorkspaceScan, scan_root};
+pub use scan::{
+    Language, LanguageScore, ProjectScan, ScanEvidence, ScanLimits, WorkspaceScan, scan_root,
+    scan_root_with_limits,
+};
 
 use config::{create_file, map_managed_error, parse_managed_toml, serialize_toml};
 

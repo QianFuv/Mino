@@ -1,11 +1,13 @@
 //! Contract tests for ignore-aware workspace discovery and language scoring.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mino::project::{Language, ProjectScan, scan_root};
+use mino::ErrorCategory;
+use mino::project::{Language, ProjectScan, ScanLimits, scan_root, scan_root_with_limits};
 use serde_json::Value;
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -57,6 +59,40 @@ fn run_mino(arguments: &[&str]) -> Output {
         .expect("Mino binary should run")
 }
 
+fn run_mino_with_git_config(arguments: &[&str], git_config: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_mino"))
+        .args(arguments)
+        .env("GIT_CONFIG_GLOBAL", git_config)
+        .output()
+        .expect("Mino binary should run with an isolated global Git config")
+}
+
+fn write_repeated(path: &Path, byte: u8, byte_count: u64) {
+    let mut file = File::create(path).expect("bounded test file should be created");
+    let chunk = vec![byte; 64 * 1024].into_boxed_slice();
+    let mut remaining = byte_count;
+    while remaining != 0 {
+        let count = usize::try_from(remaining.min(chunk.len() as u64)).expect("chunk should fit");
+        file.write_all(&chunk[..count])
+            .expect("bounded test bytes should be written");
+        remaining = remaining.saturating_sub(count as u64);
+    }
+}
+
+fn limits(
+    max_depth: usize,
+    max_files: u64,
+    max_total_bytes: u64,
+    max_file_bytes: u64,
+) -> ScanLimits {
+    ScanLimits {
+        max_depth,
+        max_files,
+        max_total_bytes,
+        max_file_bytes,
+    }
+}
+
 fn language_score(scan: &ProjectScan, language: Language) -> &mino::project::LanguageScore {
     scan.languages
         .iter()
@@ -72,6 +108,9 @@ fn monorepo_rankings_match_documented_weights_and_are_stable() {
     assert_eq!(first.files_scanned, 13);
     assert_eq!(first.directories_excluded, 2);
     assert_eq!(first.symlinks_skipped, 0);
+    assert!(first.bytes_read > 0);
+    assert!(!first.truncated);
+    assert!(first.truncation_reasons.is_empty());
     assert_eq!(
         first
             .workspaces
@@ -203,6 +242,217 @@ fn project_scan_cli_returns_ordered_evidence_without_external_access() {
     assert_eq!(value["languages"][0]["language"], "rust");
     assert_eq!(value["languages"][0]["score_basis_points"], 7_500);
     assert_eq!(value["languages"][0]["evidence"][0]["code"], "manifest");
+    assert_eq!(value["truncated"], false);
+    assert!(value["bytes_read"].as_u64().is_some_and(|bytes| bytes > 0));
+    assert_eq!(value["truncation_reasons"], serde_json::json!([]));
+}
+
+#[test]
+fn root_nested_and_repository_excludes_remove_language_evidence() {
+    let project = TestProject::new("ignore-rules");
+    fs::write(project.path().join(".gitignore"), "custom-output/\n")
+        .expect("root ignore should be written");
+    fs::create_dir(project.path().join("custom-output"))
+        .expect("root ignored directory should be created");
+    fs::write(
+        project.path().join("custom-output/ignored.py"),
+        "print('ignored')\n",
+    )
+    .expect("root ignored source should be written");
+    fs::create_dir(project.path().join("nested")).expect("nested directory should be created");
+    fs::write(project.path().join("nested/.gitignore"), "ignored.ts\n")
+        .expect("nested ignore should be written");
+    fs::write(
+        project.path().join("nested/ignored.ts"),
+        "export const ignored = true;\n",
+    )
+    .expect("nested ignored source should be written");
+    fs::write(
+        project.path().join("nested/included.js"),
+        "export const included = true;\n",
+    )
+    .expect("included source should be written");
+    fs::create_dir_all(project.path().join(".git/info"))
+        .expect("Git exclude directory should be created");
+    fs::write(
+        project.path().join(".git/info/exclude"),
+        "repository-only.py\n",
+    )
+    .expect("repository exclude should be written");
+    fs::write(
+        project.path().join("repository-only.py"),
+        "print('repository ignored')\n",
+    )
+    .expect("repository ignored source should be written");
+
+    let scan = scan_root(project.path()).expect("ignore-aware project should scan");
+    assert_eq!(
+        language_score(&scan, Language::TypeScriptJavaScript).source_files,
+        1
+    );
+    assert!(
+        scan.languages
+            .iter()
+            .all(|score| score.language != Language::Python)
+    );
+}
+
+#[test]
+fn global_git_exclude_is_applied_by_the_cli_scan() {
+    let project = TestProject::new("global-ignore");
+    fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname='global-ignore'\nversion='0.1.0'\n",
+    )
+    .expect("manifest should be written");
+    fs::write(project.path().join("visible.rs"), "pub fn visible() {}\n")
+        .expect("visible source should be written");
+    fs::write(
+        project.path().join("global-only.py"),
+        "print('globally ignored')\n",
+    )
+    .expect("globally ignored source should be written");
+    let excludes = project.path().join("global-excludes");
+    fs::write(&excludes, "global-only.py\n").expect("global excludes should be written");
+    let config = project.path().join("isolated.gitconfig");
+    let excludes_path = excludes.to_string_lossy().replace('\\', "/");
+    fs::write(
+        &config,
+        format!("[core]\n\texcludesFile = \"{excludes_path}\"\n"),
+    )
+    .expect("isolated Git config should be written");
+    let root = project.path().to_str().expect("test path should be UTF-8");
+
+    let output = run_mino_with_git_config(
+        &[
+            "project",
+            "scan",
+            "--root",
+            root,
+            "--format",
+            "json",
+            "--no-input",
+        ],
+        &config,
+    );
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).expect("scan should return JSON");
+    assert!(
+        value["languages"]
+            .as_array()
+            .is_some_and(|languages| languages.iter().all(|item| item["language"] != "python"))
+    );
+}
+
+#[test]
+fn each_scan_budget_reports_deterministic_truncation() {
+    let depth_project = TestProject::new("depth-budget");
+    fs::write(depth_project.path().join("visible.rs"), "fn visible() {}\n")
+        .expect("visible source should be written");
+    fs::create_dir_all(depth_project.path().join("one/two"))
+        .expect("deep directory should be created");
+    fs::write(
+        depth_project.path().join("one/two/deep.rs"),
+        "fn deep() {}\n",
+    )
+    .expect("deep source should be written");
+    let depth = scan_root_with_limits(depth_project.path(), limits(2, 100, 1_000, 1_000))
+        .expect("depth-bounded scan should succeed");
+    assert_eq!(depth.truncation_reasons, vec!["depth_limit"]);
+    assert_eq!(language_score(&depth, Language::Rust).source_files, 1);
+
+    let file_project = TestProject::new("file-budget");
+    fs::write(file_project.path().join("a.rs"), "fn a() {}\n")
+        .expect("first source should be written");
+    fs::write(file_project.path().join("b.py"), "print('b')\n")
+        .expect("second source should be written");
+    fs::write(file_project.path().join("c.ts"), "export const c = 1;\n")
+        .expect("third source should be written");
+    let file_limits = limits(64, 2, 1_000, 1_000);
+    let first = scan_root_with_limits(file_project.path(), file_limits)
+        .expect("file-bounded scan should succeed");
+    let second = scan_root_with_limits(file_project.path(), file_limits)
+        .expect("repeated file-bounded scan should succeed");
+    assert_eq!(first, second);
+    assert_eq!(first.files_scanned, 2);
+    assert_eq!(first.truncation_reasons, vec!["file_limit"]);
+
+    let byte_project = TestProject::new("byte-budgets");
+    fs::write(byte_project.path().join("large.js"), "abcdefghij")
+        .expect("bounded source should be written");
+    let total = scan_root_with_limits(byte_project.path(), limits(64, 100, 4, 100))
+        .expect("total-byte-bounded scan should succeed");
+    assert_eq!(total.bytes_read, 4);
+    assert_eq!(total.truncation_reasons, vec!["total_byte_limit"]);
+    let per_file = scan_root_with_limits(byte_project.path(), limits(64, 100, 100, 4))
+        .expect("per-file-bounded scan should succeed");
+    assert_eq!(per_file.bytes_read, 4);
+    assert_eq!(per_file.truncation_reasons, vec!["per_file_byte_limit"]);
+    let combined = scan_root_with_limits(byte_project.path(), limits(64, 100, 3, 4))
+        .expect("combined-byte-bounded scan should succeed");
+    assert_eq!(combined.bytes_read, 3);
+    assert_eq!(
+        combined.truncation_reasons,
+        vec!["per_file_byte_limit", "total_byte_limit"]
+    );
+}
+
+#[test]
+fn zero_scan_limits_are_rejected() {
+    let project = TestProject::new("invalid-budget");
+    let error = scan_root_with_limits(project.path(), limits(0, 0, 0, 0))
+        .expect_err("zero limits should be rejected");
+    assert_eq!(error.category(), ErrorCategory::IncompleteOrValidation);
+    assert!(error.message().contains("max_depth"));
+    assert!(error.message().contains("max_file_bytes"));
+}
+
+#[test]
+fn default_per_file_budget_bounds_a_huge_single_line() {
+    const DEFAULT_MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+    let project = TestProject::new("single-line");
+    write_repeated(
+        &project.path().join("huge.js"),
+        b'x',
+        DEFAULT_MAX_FILE_BYTES + 1,
+    );
+    let scan = scan_root(project.path()).expect("huge single-line source should scan");
+    assert_eq!(scan.bytes_read, DEFAULT_MAX_FILE_BYTES);
+    assert_eq!(scan.truncation_reasons, vec!["per_file_byte_limit"]);
+    assert_eq!(
+        language_score(&scan, Language::TypeScriptJavaScript).source_lines,
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ignored_unreadable_directory_is_not_opened() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let project = TestProject::new("ignored-unreadable");
+    fs::write(project.path().join(".gitignore"), "private/\n")
+        .expect("ignore rule should be written");
+    fs::create_dir(project.path().join("private")).expect("ignored directory should be created");
+    fs::write(
+        project.path().join("private/ignored.py"),
+        "print('private')\n",
+    )
+    .expect("ignored source should be written");
+    fs::set_permissions(
+        project.path().join("private"),
+        fs::Permissions::from_mode(0o000),
+    )
+    .expect("ignored directory should become unreadable");
+    let result = scan_root(project.path());
+    fs::set_permissions(
+        project.path().join("private"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .expect("ignored directory permissions should be restored");
+    let scan = result.expect("ignored unreadable directory should not be opened");
+    assert!(scan.languages.is_empty());
 }
 
 #[cfg(unix)]

@@ -1,10 +1,13 @@
 //! Ignore-aware workspace discovery and evidence-based language scoring.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use ignore::WalkBuilder;
 use serde::Serialize;
 
 use crate::{ErrorCategory, MinoError};
@@ -16,7 +19,15 @@ const TOOL_CONFIG_WEIGHT: u16 = 700;
 const CI_WEIGHT: u16 = 500;
 const BUILD_SCRIPT_WEIGHT: u16 = 500;
 const SCORE_DENOMINATOR: u16 = 10_000;
-const MAX_CI_BYTES: u64 = 256 * 1024;
+const DEFAULT_MAX_DEPTH: usize = 64;
+const DEFAULT_MAX_FILES: u64 = 100_000;
+const DEFAULT_MAX_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+const DEFAULT_MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const READ_BUFFER_BYTES: usize = 64 * 1024;
+const DEPTH_LIMIT_REASON: &str = "depth_limit";
+const FILE_LIMIT_REASON: &str = "file_limit";
+const PER_FILE_BYTE_LIMIT_REASON: &str = "per_file_byte_limit";
+const TOTAL_BYTE_LIMIT_REASON: &str = "total_byte_limit";
 
 const EXCLUDED_DIRECTORIES: &[&str] = &[
     ".git",
@@ -115,14 +126,44 @@ pub struct ProjectScan {
     pub root: PathBuf,
     /// Number of regular non-generated files considered.
     pub files_scanned: u64,
-    /// Number of excluded directories.
+    /// Number of built-in generated or cache directories excluded.
     pub directories_excluded: u64,
     /// Number of skipped symbolic links.
     pub symlinks_skipped: u64,
+    /// Number of file-content bytes read for source and CI evidence.
+    pub bytes_read: u64,
+    /// Whether one or more configured scan budgets truncated the result.
+    pub truncated: bool,
+    /// Stable sorted codes for every budget that truncated the result.
+    pub truncation_reasons: Vec<String>,
     /// Workspace scans in ascending root order.
     pub workspaces: Vec<WorkspaceScan>,
     /// Aggregate stable descending project rankings.
     pub languages: Vec<LanguageScore>,
+}
+
+/// Positive resource limits applied to one project scan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScanLimits {
+    /// Maximum path depth below the scan root, with the root at depth zero.
+    pub max_depth: usize,
+    /// Maximum number of regular files visited before traversal stops.
+    pub max_files: u64,
+    /// Maximum aggregate bytes read from source and CI files.
+    pub max_total_bytes: u64,
+    /// Maximum bytes read from any one source or CI file.
+    pub max_file_bytes: u64,
+}
+
+impl Default for ScanLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: DEFAULT_MAX_DEPTH,
+            max_files: DEFAULT_MAX_FILES,
+            max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -130,6 +171,7 @@ struct FileFact {
     relative_path: PathBuf,
     language: Option<Language>,
     source_lines: u64,
+    ci_languages: BTreeSet<Language>,
 }
 
 #[derive(Default)]
@@ -137,6 +179,21 @@ struct TraversalFacts {
     files: Vec<FileFact>,
     directories_excluded: u64,
     symlinks_skipped: u64,
+    files_visited: u64,
+    bytes_read: u64,
+    truncation_reasons: BTreeSet<&'static str>,
+}
+
+#[derive(Default)]
+struct ContentFacts {
+    source_lines: u64,
+    ci_languages: BTreeSet<Language>,
+}
+
+#[derive(Default)]
+struct CiMatcher {
+    languages: BTreeSet<Language>,
+    tail: Vec<u8>,
 }
 
 /// Scans an explicitly selected root without running root discovery.
@@ -146,6 +203,18 @@ struct TraversalFacts {
 /// Returns an environment-unavailable error when the root or a traversed
 /// directory cannot be read.
 pub fn scan_root(root: &Path) -> Result<ProjectScan, MinoError> {
+    scan_root_with_limits(root, ScanLimits::default())
+}
+
+/// Scans an explicitly selected root with caller-provided positive limits.
+///
+/// # Errors
+///
+/// Returns an incomplete-or-validation error when any limit is zero, or an
+/// environment-unavailable error when the root or an included path cannot be
+/// read.
+pub fn scan_root_with_limits(root: &Path, limits: ScanLimits) -> Result<ProjectScan, MinoError> {
+    validate_scan_limits(limits)?;
     let root = root.canonicalize().map_err(|error| {
         MinoError::new(
             ErrorCategory::EnvironmentUnavailable,
@@ -158,11 +227,7 @@ pub fn scan_root(root: &Path) -> Result<ProjectScan, MinoError> {
             format!("Scan root {} is not a directory", root.display()),
         ));
     }
-    let mut traversal = TraversalFacts::default();
-    collect_files(&root, Path::new(""), &mut traversal)?;
-    traversal
-        .files
-        .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let traversal = collect_files(&root, limits)?;
     let workspace_roots = discover_workspace_roots(&traversal.files);
     let ci_files = traversal
         .files
@@ -179,62 +244,213 @@ pub fn scan_root(root: &Path) -> Result<ProjectScan, MinoError> {
             WorkspaceScan {
                 root: display_workspace_root(workspace_root),
                 manifests: workspace_manifests(workspace_root, files),
-                languages: score_languages(files, workspace_root, &ci_files, &root),
+                languages: score_languages(files, workspace_root, &ci_files),
             }
         })
         .collect::<Vec<_>>();
-    let languages = score_languages(&traversal.files, Path::new(""), &ci_files, &root);
+    let languages = score_languages(&traversal.files, Path::new(""), &ci_files);
+    let truncation_reasons = traversal
+        .truncation_reasons
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     Ok(ProjectScan {
         root,
         files_scanned: u64::try_from(traversal.files.len()).unwrap_or(u64::MAX),
         directories_excluded: traversal.directories_excluded,
         symlinks_skipped: traversal.symlinks_skipped,
+        bytes_read: traversal.bytes_read,
+        truncated: !truncation_reasons.is_empty(),
+        truncation_reasons,
         workspaces,
         languages,
     })
 }
 
-fn collect_files(
-    root: &Path,
-    relative_directory: &Path,
-    facts: &mut TraversalFacts,
-) -> Result<(), MinoError> {
-    let directory = root.join(relative_directory);
-    let entries = fs::read_dir(&directory).map_err(|error| scan_io_error(&directory, &error))?;
-    let mut entries = entries.collect::<Result<Vec<_>, _>>().map_err(|error| {
-        MinoError::new(
-            ErrorCategory::EnvironmentUnavailable,
-            format!("Failed to enumerate {}: {error}", directory.display()),
-        )
-    })?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in entries {
-        let relative_path = relative_directory.join(entry.file_name());
-        let metadata = fs::symlink_metadata(entry.path())
-            .map_err(|error| scan_io_error(&entry.path(), &error))?;
-        if metadata.file_type().is_symlink() {
+fn validate_scan_limits(limits: ScanLimits) -> Result<(), MinoError> {
+    let invalid = [
+        (
+            "max_depth",
+            u64::try_from(limits.max_depth).unwrap_or(u64::MAX),
+        ),
+        ("max_files", limits.max_files),
+        ("max_total_bytes", limits.max_total_bytes),
+        ("max_file_bytes", limits.max_file_bytes),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| (value == 0).then_some(name))
+    .collect::<Vec<_>>();
+    if invalid.is_empty() {
+        Ok(())
+    } else {
+        Err(MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            format!("Scan limits must be positive: {}", invalid.join(", ")),
+        ))
+    }
+}
+
+fn collect_files(root: &Path, limits: ScanLimits) -> Result<TraversalFacts, MinoError> {
+    let directories_excluded = Arc::new(AtomicU64::new(0));
+    let depth_truncated = Arc::new(AtomicBool::new(false));
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .standard_filters(true)
+        .hidden(false)
+        .parents(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .require_git(false)
+        .follow_links(false)
+        .current_dir(root)
+        .sort_by_file_path(Path::cmp);
+    let excluded_counter = Arc::clone(&directories_excluded);
+    let depth_flag = Arc::clone(&depth_truncated);
+    builder.filter_entry(move |entry| {
+        if entry.depth() == 0
+            || !entry
+                .file_type()
+                .is_some_and(|file_type| file_type.is_dir())
+        {
+            return true;
+        }
+        if is_excluded_directory(entry.file_name()) {
+            excluded_counter.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        if entry.depth() >= limits.max_depth {
+            depth_flag.store(true, Ordering::Relaxed);
+            return false;
+        }
+        true
+    });
+
+    let mut facts = TraversalFacts::default();
+    for entry in builder.build() {
+        let entry = entry.map_err(|error| scan_walk_error(root, &error))?;
+        if entry.depth() == 0 {
+            continue;
+        }
+        if entry.path_is_symlink() {
             facts.symlinks_skipped = facts.symlinks_skipped.saturating_add(1);
-        } else if metadata.is_dir() {
-            if is_excluded_directory(&entry.file_name()) {
-                facts.directories_excluded = facts.directories_excluded.saturating_add(1);
-            } else {
-                collect_files(root, &relative_path, facts)?;
+            continue;
+        }
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        if facts.files_visited >= limits.max_files {
+            facts.truncation_reasons.insert(FILE_LIMIT_REASON);
+            break;
+        }
+        facts.files_visited = facts.files_visited.saturating_add(1);
+        let relative_path = entry.path().strip_prefix(root).map_err(|error| {
+            MinoError::new(
+                ErrorCategory::EnvironmentUnavailable,
+                format!(
+                    "Failed to make scan path {} relative to {}: {error}",
+                    entry.path().display(),
+                    root.display()
+                ),
+            )
+        })?;
+        if is_generated_file(relative_path) {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| scan_walk_error(entry.path(), &error))?;
+        let language = source_language(relative_path);
+        let content = inspect_content(
+            entry.path(),
+            metadata.len(),
+            language.is_some(),
+            is_ci_file(relative_path),
+            &mut facts,
+            limits,
+        )?;
+        facts.files.push(FileFact {
+            relative_path: relative_path.to_path_buf(),
+            language,
+            source_lines: content.source_lines,
+            ci_languages: content.ci_languages,
+        });
+    }
+    facts.directories_excluded = directories_excluded.load(Ordering::Relaxed);
+    if depth_truncated.load(Ordering::Relaxed) {
+        facts.truncation_reasons.insert(DEPTH_LIMIT_REASON);
+    }
+    Ok(facts)
+}
+
+fn inspect_content(
+    path: &Path,
+    file_size: u64,
+    should_count_lines: bool,
+    should_match_ci: bool,
+    facts: &mut TraversalFacts,
+    limits: ScanLimits,
+) -> Result<ContentFacts, MinoError> {
+    if !should_count_lines && !should_match_ci {
+        return Ok(ContentFacts::default());
+    }
+    let remaining_total = limits.max_total_bytes.saturating_sub(facts.bytes_read);
+    if file_size > limits.max_file_bytes {
+        facts.truncation_reasons.insert(PER_FILE_BYTE_LIMIT_REASON);
+    }
+    let per_file_read_limit = file_size.min(limits.max_file_bytes);
+    if per_file_read_limit > remaining_total {
+        facts.truncation_reasons.insert(TOTAL_BYTE_LIMIT_REASON);
+    }
+    let read_limit = per_file_read_limit.min(remaining_total);
+    if read_limit == 0 {
+        return Ok(ContentFacts::default());
+    }
+
+    let mut file = File::open(path).map_err(|error| scan_io_error(path, &error))?;
+    let mut buffer = vec![0_u8; READ_BUFFER_BYTES].into_boxed_slice();
+    let mut remaining_file = read_limit;
+    let mut newline_count = 0_u64;
+    let mut last_byte = None;
+    let mut ci_matcher = CiMatcher::default();
+    while remaining_file != 0 {
+        let requested = usize::try_from(remaining_file.min(READ_BUFFER_BYTES as u64))
+            .unwrap_or(READ_BUFFER_BYTES);
+        let read = file
+            .read(&mut buffer[..requested])
+            .map_err(|error| scan_io_error(path, &error))?;
+        if read == 0 {
+            break;
+        }
+        let chunk = &buffer[..read];
+        facts.bytes_read = facts
+            .bytes_read
+            .saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        remaining_file = remaining_file.saturating_sub(u64::try_from(read).unwrap_or(u64::MAX));
+        if should_count_lines {
+            let mut chunk_newlines = 0_u64;
+            for byte in chunk {
+                chunk_newlines = chunk_newlines.saturating_add(u64::from(*byte == b'\n'));
             }
-        } else if metadata.is_file() && !is_generated_file(&relative_path) {
-            let language = source_language(&relative_path);
-            let source_lines = match language {
-                Some(_) => count_lines(&entry.path())
-                    .map_err(|error| scan_io_error(&entry.path(), &error))?,
-                None => 0,
-            };
-            facts.files.push(FileFact {
-                relative_path,
-                language,
-                source_lines,
-            });
+            newline_count = newline_count.saturating_add(chunk_newlines);
+            last_byte = chunk.last().copied();
+        }
+        if should_match_ci {
+            ci_matcher.observe(chunk);
         }
     }
-    Ok(())
+    let source_lines = if should_count_lines && last_byte.is_some() {
+        newline_count.saturating_add(u64::from(last_byte != Some(b'\n')))
+    } else {
+        0
+    };
+    Ok(ContentFacts {
+        source_lines,
+        ci_languages: ci_matcher.languages,
+    })
 }
 
 fn is_excluded_directory(name: &std::ffi::OsStr) -> bool {
@@ -263,19 +479,38 @@ fn source_language(path: &Path) -> Option<Language> {
     }
 }
 
-fn count_lines(path: &Path) -> Result<u64, std::io::Error> {
-    let mut reader = BufReader::new(File::open(path)?);
-    let mut buffer = Vec::new();
-    let mut count = 0_u64;
-    loop {
-        buffer.clear();
-        let bytes = reader.read_until(b'\n', &mut buffer)?;
-        if bytes == 0 {
-            break;
+impl CiMatcher {
+    fn observe(&mut self, chunk: &[u8]) {
+        const MAX_NEEDLE_BYTES: usize = 6;
+
+        let mut searchable = Vec::with_capacity(self.tail.len().saturating_add(chunk.len()));
+        searchable.extend_from_slice(&self.tail);
+        searchable.extend(chunk.iter().map(u8::to_ascii_lowercase));
+        for language in [
+            Language::Rust,
+            Language::TypeScriptJavaScript,
+            Language::Python,
+        ] {
+            if ci_needles(language).iter().any(|needle| {
+                searchable
+                    .windows(needle.len())
+                    .any(|window| window == *needle)
+            }) {
+                self.languages.insert(language);
+            }
         }
-        count = count.saturating_add(1);
+        let tail_start = searchable.len().saturating_sub(MAX_NEEDLE_BYTES - 1);
+        self.tail.clear();
+        self.tail.extend_from_slice(&searchable[tail_start..]);
     }
-    Ok(count)
+}
+
+const fn ci_needles(language: Language) -> &'static [&'static [u8]] {
+    match language {
+        Language::Rust => &[b"cargo", b"rustup"],
+        Language::TypeScriptJavaScript => &[b"node", b"npm", b"pnpm", b"yarn", b"bun"],
+        Language::Python => &[b"python", b"pip", b"pytest", b"ruff", b"uv"],
+    }
 }
 
 fn discover_workspace_roots(files: &[FileFact]) -> Vec<PathBuf> {
@@ -335,7 +570,6 @@ fn score_languages(
     files: &[impl std::borrow::Borrow<FileFact>],
     scope_root: &Path,
     ci_files: &[&FileFact],
-    absolute_root: &Path,
 ) -> Vec<LanguageScore> {
     let total_source_lines = files
         .iter()
@@ -347,7 +581,6 @@ fn score_languages(
             files,
             scope_root,
             ci_files,
-            absolute_root,
             total_source_lines,
         ),
         score_language(
@@ -355,7 +588,6 @@ fn score_languages(
             files,
             scope_root,
             ci_files,
-            absolute_root,
             total_source_lines,
         ),
         score_language(
@@ -363,7 +595,6 @@ fn score_languages(
             files,
             scope_root,
             ci_files,
-            absolute_root,
             total_source_lines,
         ),
     ]
@@ -384,7 +615,6 @@ fn score_language(
     files: &[impl std::borrow::Borrow<FileFact>],
     scope_root: &Path,
     ci_files: &[&FileFact],
-    absolute_root: &Path,
     total_source_lines: u64,
 ) -> LanguageScore {
     let source_files = files
@@ -436,7 +666,7 @@ fn score_language(
         TOOL_CONFIG_WEIGHT,
         |path| is_tool_config(language, path),
     );
-    if let Some(path) = ci_evidence(language, ci_files, absolute_root) {
+    if let Some(path) = ci_evidence(language, ci_files) {
         evidence.push(ScanEvidence {
             code: "ci".to_owned(),
             weight_basis_points: CI_WEIGHT,
@@ -566,29 +796,21 @@ fn is_ci_file(path: &Path) -> bool {
             })
 }
 
-fn ci_evidence(language: Language, ci_files: &[&FileFact], root: &Path) -> Option<PathBuf> {
-    let needles: &[&str] = match language {
-        Language::Rust => &["cargo", "rustup"],
-        Language::TypeScriptJavaScript => &["node", "npm", "pnpm", "yarn", "bun"],
-        Language::Python => &["python", "pip", "pytest", "ruff", "uv"],
-    };
-    ci_files.iter().find_map(|fact| {
-        let path = root.join(&fact.relative_path);
-        let mut file = File::open(path).ok()?;
-        let mut contents = String::new();
-        file.by_ref()
-            .take(MAX_CI_BYTES)
-            .read_to_string(&mut contents)
-            .ok()?;
-        let contents = contents.to_ascii_lowercase();
-        needles
-            .iter()
-            .any(|needle| contents.contains(needle))
-            .then(|| fact.relative_path.clone())
-    })
+fn ci_evidence(language: Language, ci_files: &[&FileFact]) -> Option<PathBuf> {
+    ci_files
+        .iter()
+        .find(|fact| fact.ci_languages.contains(&language))
+        .map(|fact| fact.relative_path.clone())
 }
 
 fn scan_io_error(path: &Path, error: &std::io::Error) -> MinoError {
+    MinoError::new(
+        ErrorCategory::EnvironmentUnavailable,
+        format!("Failed to scan {}: {error}", path.display()),
+    )
+}
+
+fn scan_walk_error(path: &Path, error: &ignore::Error) -> MinoError {
     MinoError::new(
         ErrorCategory::EnvironmentUnavailable,
         format!("Failed to scan {}: {error}", path.display()),

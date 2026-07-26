@@ -34,13 +34,15 @@
 | `mino project init` | 项目本地文件 | 创建缺失的 `.mino` 状态，在分类前恢复摘要可证明的集成替换，并安装或验证 Skill；新的受管区块修改必须显式选择应用。 |
 | `mino project show` | 无 | 返回配置、锁和 doctor findings。 |
 | `mino project doctor` | 无 | 诊断协议锁、事务、投影、Skill 和受管区块。 |
-| `mino project scan` | 无 | 生成尊重 ignore 规则的工作区与语言证据。 |
+| `mino project scan` | 无 | 生成尊重根/嵌套 `.gitignore`、repository/global exclude 和资源预算的工作区与语言证据。 |
 | `mino project migrate legacy` | 无 | 分析旧 AGENTS、模板和执行文档，返回映射建议，不改源文件。 |
 | `mino project import legacy` | 新 Draft | 读取一个旧计划，把受支持的 authored fields 写入独立 Draft，并报告全部忽略项和警告。 |
 | `mino protocol status` | 无 | 校验内嵌资源摘要及项目 protocol lock 兼容性。 |
 | `mino protocol migrate` | 存在注册 transform 时修改计划 | 要求目标、revision 和 request ID；当前版本只实现 already-current no-op。 |
 
 `project init --apply-agents-block` 与 `--apply-gitignore-block` 只发起各自 marker-owned 区域的新修改。已存在的 `.mino/integration-transactions/**` 会先按摘要恢复，无需重复 apply flag；无法证明安全的残留会阻止 init 并保留现场。`project doctor` 只报告 pending/corrupt transaction，写入范围仍为“无”。旧计划导入要求项目没有活动计划和同名计划；成功结果仍为 `complete: false`，并明确给出 `draft_review_required: true`、`source_preserved: true`、`historical_execution_trusted: false`。历史 lifecycle、approval、check、commit 和 evidence 结果不会进入新聚合。
+
+`project scan` 的 `files_scanned` 统计进入证据模型的普通非生成文件，`bytes_read` 统计源码与 CI 证据实际读取的内容字节。`truncated` 为 true 时，`truncation_reasons` 是以下稳定代码的排序集合：`depth_limit`、`file_limit`、`per_file_byte_limit`、`total_byte_limit`。截断结果仍保持确定性，但只代表预算内的部分仓库证据。
 
 ### Draft 编写、校验与批准
 
