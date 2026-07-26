@@ -6,15 +6,12 @@ Markdown projections, ordered execution, immutable evidence, and explicit
 approval boundaries. It is not a template generator and does not contain an
 LLM.
 
-The current package is `mino 0.1.0`. It contains the stable v0.1 lifecycle plus
-the v0.2 local Git, review, and protected-amendment increments: worktree-aware plan binding,
-explicitly approved branch creation, exact plan-scoped task commits, classified
-review feedback, rework, final acceptance, typed Minor/Material plan changes,
-conservative legacy-plan import, and explicit source-bound standards-conflict
-decisions, historical plan forks, semantic plan diffs, and approval-bound
-non-destructive archive state. Finite foreground check monitoring and optional
-advisory pre/post commit hooks are also available. External scheduler execution,
-team catalogs, and plugin distribution remain deferred.
+The current package is `mino 0.1.0`. It implements the complete v0.3 design
+milestone: the stable v0.1 lifecycle; v0.2 local Git, review, amendment, import,
+and conflict handling; and the v0.3 plan-variant, advisory-hook, bounded-monitor,
+scheduler-neutral handoff, team-catalog, and native Codex-plugin increments.
+The v0.3 label describes the product-design milestone, not a `0.3.0` crate or
+plugin version. No artifact is uploaded, published, or installed automatically.
 
 ## What v0.1 provides
 
@@ -94,6 +91,21 @@ environment, trigger/expiry/retry budget, outcome policies, and safe result
 destination. Emission is read-only: it does not contact a scheduler or network
 and does not write Mino state. Creating or updating an external scheduled task
 always requires separate explicit authorization.
+
+The v0.3 team-catalog increment adds `standards catalog init`, `validate`, and
+`build`. Maintainers author bounded data-only TOML packages under a DNS-like
+namespace, then produce a canonical static tree that the existing explicit
+`standards sync --all` path consumes without a second protocol. Catalog output
+is reproducible, digest-addressed, and replaced only when the existing output
+is itself a verified Mino catalog.
+
+The v0.3 distribution increment adds a canonical standalone plugin source and a
+maintainer-only Rust xtask that assembles one native Mino binary with the exact
+Skill, launcher metadata, protocol, standards, licenses, artifact manifest, and
+checksums. Stored ZIP entries have stable paths, timestamps, and modes. Native
+smoke probes run from the extracted archive in an isolated home without PATH
+mutation or network access. The repository workflow validates five native
+targets but deliberately contains no upload or release step.
 
 ## Requirements and installation
 
@@ -188,6 +200,9 @@ and read context again. Stop whenever `approval_required` is true. Never edit
 - [CLI and JSON contract](docs/command-contract.md)
 - [Protocol and legacy migration](docs/migration.md)
 - [Security and operational boundaries](docs/security.md)
+- [Team standards catalogs](docs/team-catalog.md)
+- [Native plugin distribution](docs/distribution.md)
+- [Complete v0.3 milestone and upgrade guide](docs/v0-3.md)
 
 Use `mino <group> --help` for current argument details. The command inventory
 and stable machine contracts are also checked by the test suite.

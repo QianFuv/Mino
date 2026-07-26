@@ -451,10 +451,71 @@ fn protocol_manifest_and_document_links_are_current() {
     for relative in [
         "docs/architecture.md",
         "docs/command-contract.md",
+        "docs/distribution.md",
         "docs/migration.md",
         "docs/security.md",
+        "docs/team-catalog.md",
+        "docs/v0-3.md",
     ] {
         assert!(readme.contains(relative));
         assert!(repository_path(relative).is_file());
+    }
+}
+
+#[test]
+fn v0_3_guides_cover_operations_trust_recovery_and_explicit_non_goals() {
+    let catalog = read("docs/team-catalog.md");
+    for marker in [
+        "mino standards catalog init",
+        "mino standards catalog validate",
+        "mino standards catalog build",
+        "mino standards sync --all",
+        "catalog-manifest.json",
+        "HTTPS",
+        "Trust and recovery",
+        "Deliberate non-goals",
+    ] {
+        assert!(
+            catalog.contains(marker),
+            "catalog guide is missing {marker}"
+        );
+    }
+
+    let distribution = read("docs/distribution.md");
+    for marker in [
+        "cargo run --release --locked --bin xtask -- package-plugin",
+        "mino.plugin-artifact-manifest/v1",
+        "SHA256SUMS",
+        "x86_64-pc-windows-msvc",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "Isolated smoke and installation boundary",
+        "Upgrade, rollback, and publication",
+        "Deliberate non-goals",
+    ] {
+        assert!(
+            distribution.contains(marker),
+            "distribution guide is missing {marker}"
+        );
+    }
+
+    let release = read("docs/v0-3.md");
+    for marker in [
+        "No LLM execution",
+        "No daemon",
+        "No cloud control plane",
+        "No built-in scheduler",
+        "No auto-update",
+        "arbitrary plugin runtime",
+        "No Git push, merge, rebase, reset, amend, force-push",
+        "No plan merge",
+        "Upgrade from earlier milestones",
+        "Release verification",
+    ] {
+        assert!(
+            release.contains(marker),
+            "release guide is missing {marker}"
+        );
     }
 }
