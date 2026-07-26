@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::command::{GitCommandOutput, run_read_only};
+use super::command::{GitCommandOutput, run_probe, run_read_only};
 use super::porcelain::{GitStatusEntry, GitStatusKind, parse_porcelain_v2};
 use super::{GitError, GitErrorKind};
 
@@ -22,6 +22,22 @@ pub enum GitHeadState {
     Detached,
     /// A bare repository has no worktree status surface.
     Bare,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum GitRootProbe {
+    Found(PathBuf),
+    NotRepository,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum GitReadinessProbe {
+    NotRepository,
+    Repository {
+        is_clean: bool,
+        branch: Option<String>,
+        base_commit: Option<String>,
+    },
 }
 
 /// Complete read-only Git facts for one supplied path.
@@ -98,7 +114,11 @@ impl GitAdapter {
         let inspected_path = canonical_directory(&self.start)?;
         let inside = run_read_only(&inspected_path, ["rev-parse", "--is-inside-work-tree"])?;
         if !inside.success {
-            return Ok(not_repository(inspected_path));
+            return if is_not_repository(&inside) {
+                Ok(not_repository(inspected_path))
+            } else {
+                Err(failed_command(&inside, "Git worktree probe"))
+            };
         }
         let inside_value = output_text(&inside, "Git worktree probe")?;
         match inside_value.as_str() {
@@ -106,6 +126,72 @@ impl GitAdapter {
             "false" => inspect_bare_or_non_repository(inspected_path),
             _ => Err(invalid("Git returned an invalid worktree probe value")),
         }
+    }
+
+    pub(crate) fn probe_readiness(&self) -> Result<GitReadinessProbe, GitError> {
+        let root = canonical_directory(&self.start)?;
+        let inside = run_probe(&root, ["rev-parse", "--is-inside-work-tree"])?;
+        if !inside.success {
+            return if is_not_repository(&inside) {
+                Ok(GitReadinessProbe::NotRepository)
+            } else {
+                Err(failed_command(&inside, "Git worktree probe"))
+            };
+        }
+        if output_text(&inside, "Git worktree probe")? != "true" {
+            return Ok(GitReadinessProbe::NotRepository);
+        }
+        let status = run_probe(
+            &root,
+            [
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--no-renames",
+            ],
+        )?;
+        require_success(&status, "Git readiness status")?;
+        let branch_output = run_probe(&root, ["branch", "--show-current"])?;
+        require_success(&branch_output, "Git branch probe")?;
+        let branch = optional_output_text(&branch_output, "Git branch probe")?;
+        let head_output = run_probe(&root, ["rev-parse", "--short", "HEAD"])?;
+        let base_commit = if head_output.success {
+            Some(output_text(&head_output, "Git HEAD probe")?)
+        } else if branch.is_some() {
+            None
+        } else {
+            return Err(failed_command(&head_output, "Git HEAD probe"));
+        };
+        Ok(GitReadinessProbe::Repository {
+            is_clean: status.stdout.is_empty(),
+            branch,
+            base_commit,
+        })
+    }
+}
+
+pub(crate) fn probe_root(start: &Path) -> Result<GitRootProbe, GitError> {
+    let start = canonical_directory(start)?;
+    let output = run_probe(&start, ["rev-parse", "--show-toplevel"])?;
+    if !output.success {
+        return if is_not_repository(&output) {
+            Ok(GitRootProbe::NotRepository)
+        } else {
+            Err(failed_command(&output, "Git root probe"))
+        };
+    }
+    let path = PathBuf::from(output_text(&output, "Git root probe")?);
+    let canonical = path.canonicalize().map_err(|error| {
+        GitError::new(
+            GitErrorKind::Unavailable,
+            format!("Failed to resolve Git root {}: {error}", path.display()),
+        )
+    })?;
+    if canonical.is_dir() {
+        Ok(GitRootProbe::Found(canonical))
+    } else {
+        Err(invalid("Git root probe did not return a directory"))
     }
 }
 
@@ -339,6 +425,32 @@ fn output_text(output: &GitCommandOutput, operation: &str) -> Result<String, Git
     } else {
         Ok(value.to_owned())
     }
+}
+
+fn optional_output_text(
+    output: &GitCommandOutput,
+    operation: &str,
+) -> Result<Option<String>, GitError> {
+    if output.stdout.is_empty() {
+        return Ok(None);
+    }
+    output_text(output, operation).map(Some)
+}
+
+fn is_not_repository(output: &GitCommandOutput) -> bool {
+    output.exit_code == Some(128)
+        && String::from_utf8_lossy(&output.stderr).contains("not a git repository")
+}
+
+fn failed_command(output: &GitCommandOutput, operation: &str) -> GitError {
+    GitError::new(
+        GitErrorKind::Unavailable,
+        format!(
+            "{operation} failed with exit {:?}: {}",
+            output.exit_code,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    )
 }
 
 fn invalid(message: impl Into<String>) -> GitError {

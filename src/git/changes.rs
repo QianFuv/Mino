@@ -3,7 +3,9 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::path::{Component, Path};
-use std::process::Command;
+
+use super::command::{GitCommandOutput, run_probe, run_read_only};
+use super::{GitError, GitErrorKind};
 
 /// Stable categories for changed-file inspection failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -121,42 +123,43 @@ impl GitChangeSet {
 /// Returns an error when Git cannot be launched or emits malformed porcelain
 /// output. A directory outside Git is a successful non-repository result.
 pub fn inspect_changes(root: &Path) -> Result<GitChangeSet, GitChangeError> {
-    let probe = Command::new("git")
-        .args([
-            "-C",
-            &root.to_string_lossy(),
-            "rev-parse",
-            "--is-inside-work-tree",
-        ])
-        .output()
-        .map_err(|error| unavailable(root, &error))?;
-    if !probe.status.success() || probe.stdout != b"true\n" && probe.stdout != b"true\r\n" {
+    let probe = run_probe(root, ["rev-parse", "--is-inside-work-tree"])
+        .map_err(|error| map_git_error(&error))?;
+    if !probe.success {
+        if !is_not_repository(&probe) {
+            return Err(command_failed(root, &probe, "Git worktree probe"));
+        }
         return Ok(GitChangeSet {
             is_repository: false,
             files: Vec::new(),
         });
     }
-    let output = Command::new("git")
-        .args([
-            "-C",
-            &root.to_string_lossy(),
+    if probe.stdout != b"true\n" && probe.stdout != b"true\r\n" {
+        return if probe.stdout == b"false\n" || probe.stdout == b"false\r\n" {
+            Ok(GitChangeSet {
+                is_repository: false,
+                files: Vec::new(),
+            })
+        } else {
+            Err(GitChangeError::new(
+                GitChangeErrorKind::InvalidOutput,
+                "Git returned an invalid worktree probe value",
+            ))
+        };
+    }
+    let output = run_read_only(
+        root,
+        [
             "status",
             "--porcelain=v1",
             "-z",
             "--untracked-files=all",
             "--no-renames",
-        ])
-        .output()
-        .map_err(|error| unavailable(root, &error))?;
-    if !output.status.success() {
-        return Err(GitChangeError::new(
-            GitChangeErrorKind::Unavailable,
-            format!(
-                "Git status failed for {}: {}",
-                root.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        ));
+        ],
+    )
+    .map_err(|error| map_git_error(&error))?;
+    if !output.success {
+        return Err(command_failed(root, &output, "Git status"));
     }
     let mut files = output
         .stdout
@@ -265,12 +268,28 @@ fn matches_segment(pattern: &[u8], path: &[u8]) -> bool {
     }
 }
 
-fn unavailable(root: &Path, error: &std::io::Error) -> GitChangeError {
+fn map_git_error(error: &GitError) -> GitChangeError {
+    let kind = if error.kind() == GitErrorKind::InvalidOutput {
+        GitChangeErrorKind::InvalidOutput
+    } else {
+        GitChangeErrorKind::Unavailable
+    };
+    GitChangeError::new(kind, error.to_string())
+}
+
+fn command_failed(root: &Path, output: &GitCommandOutput, operation: &str) -> GitChangeError {
     GitChangeError::new(
         GitChangeErrorKind::Unavailable,
         format!(
-            "Failed to inspect Git changes at {}: {error}",
-            root.display()
+            "{operation} failed for {} with exit {:?}: {}",
+            root.display(),
+            output.exit_code,
+            String::from_utf8_lossy(&output.stderr).trim()
         ),
     )
+}
+
+fn is_not_repository(output: &GitCommandOutput) -> bool {
+    output.exit_code == Some(128)
+        && String::from_utf8_lossy(&output.stderr).contains("not a git repository")
 }

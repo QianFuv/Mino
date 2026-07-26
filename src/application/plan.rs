@@ -1,7 +1,6 @@
 //! Revision-checked plan authoring over the recoverable store and managed projection.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Serialize;
 
@@ -11,7 +10,7 @@ use crate::domain::{
     GitReadiness, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId, StandardSelection, TaskId,
     Timestamp, VerificationCheck,
 };
-use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter};
+use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitReadinessProbe};
 use crate::managed_fs::{
     ManagedEntryKind, ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs,
 };
@@ -916,8 +915,8 @@ fn ascii_slug(name: &str) -> Result<String, MinoError> {
 }
 
 pub(crate) fn detect_git_readiness(root: &Path) -> (GitReadiness, Option<String>) {
-    if !git_success(root, &["rev-parse", "--is-inside-work-tree"]) {
-        return (
+    match GitAdapter::new(root).probe_readiness() {
+        Ok(GitReadinessProbe::NotRepository) => (
             GitReadiness::detected(
                 "Missing",
                 "Not Applicable",
@@ -927,49 +926,42 @@ pub(crate) fn detect_git_readiness(root: &Path) -> (GitReadiness, Option<String>
                 false,
             ),
             None,
-        );
-    }
-    let branch = git_text(root, &["branch", "--show-current"]).filter(|value| !value.is_empty());
-    let base_commit = git_text(root, &["rev-parse", "--short", "HEAD"]);
-    let status = git_text(root, &["status", "--short"]);
-    let is_clean = status.as_deref().is_some_and(str::is_empty);
-    let working_tree = if is_clean { "Clean" } else { "Dirty" };
-    let base_status = if is_clean {
-        "Clean: git status --short returned empty".to_owned()
-    } else {
-        "Dirty: git status --short returned changes".to_owned()
-    };
-    (
-        GitReadiness::detected(
-            "Present",
-            working_tree,
-            branch.clone(),
-            base_commit,
-            base_status,
-            is_clean,
         ),
-        branch,
-    )
-}
-
-fn git_success(root: &Path, arguments: &[&str]) -> bool {
-    Command::new("git")
-        .args(arguments)
-        .current_dir(root)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .is_ok_and(|output| output.status.success())
-}
-
-fn git_text(root: &Path, arguments: &[&str]) -> Option<String> {
-    Command::new("git")
-        .args(arguments)
-        .current_dir(root)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        Ok(GitReadinessProbe::Repository {
+            is_clean,
+            branch,
+            base_commit,
+        }) => {
+            let working_tree = if is_clean { "Clean" } else { "Dirty" };
+            let base_status = if is_clean {
+                "Clean: git status --short returned empty".to_owned()
+            } else {
+                "Dirty: git status --short returned changes".to_owned()
+            };
+            (
+                GitReadiness::detected(
+                    "Present",
+                    working_tree,
+                    branch.clone(),
+                    base_commit,
+                    base_status,
+                    is_clean,
+                ),
+                branch,
+            )
+        }
+        Err(error) => (
+            GitReadiness::detected(
+                "Unknown",
+                "Unknown",
+                None,
+                None,
+                format!("Git readiness probe failed: {error}"),
+                false,
+            ),
+            None,
+        ),
+    }
 }
 
 pub(crate) fn projection_managed_path(plan: &Plan) -> Result<ManagedPath, MinoError> {

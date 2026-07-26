@@ -115,7 +115,9 @@ loopback HTTP 只存在于 library test policy，CLI 不会选择它。Evidence 
 
 ## Git 与其他外部副作用
 
-Git adapter 不经过 shell，禁用 terminal prompt，限制输出，并严格解析 machine-readable 结果。只读 root、repository、worktree、HEAD、index 与 status probe 还会禁用可选 Git locks。
+Git adapter 不经过 shell，禁用 terminal prompt，限制输出，并严格解析 machine-readable 结果。所有生产 Git 调用只通过同一个 command adapter：它先清空父进程环境，再仅恢复 `PATH`、`PATHEXT`、`SYSTEMROOT`、`WINDIR`、`HOME`、`USERPROFILE`、`TMP`、`TEMP` 和 `TMPDIR`，并固定 `LC_ALL=C` 与 `GIT_TERMINAL_PROMPT=0`。因此 `GIT_DIR`、`GIT_WORK_TREE`、替代 index/object database 和 `GIT_CONFIG_*` 注入不会改变 Mino 选定的仓库身份。只读 root、repository、worktree、HEAD、index 与 status probe 还会设置 `GIT_OPTIONAL_LOCKS=0`。
+
+普通 Git 操作最多运行五分钟并捕获 16 MiB 合并输出；项目发现与计划 Git readiness 使用更窄的五秒、64 KiB profile。两种 profile 都关闭 stdin，并在 timeout、输出超限或 capture failure 时终止进程树。非 Git 仓库是显式结果；探测不可用、超时或输出异常是类型化失败，计划创建会将 readiness 记录为 `Unknown` 并禁用 Git Flow，而不会错误记录为 `Missing`。
 
 ### 只读检查与绑定
 

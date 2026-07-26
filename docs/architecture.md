@@ -45,11 +45,11 @@ flowchart TD
 
 读取型命令按以下顺序寻找项目根：
 
-1. 运行禁用终端提示的 `git rev-parse --show-toplevel`。
+1. 通过五秒、64 KiB 的统一 Git probe profile 运行 `git rev-parse --show-toplevel`。
 2. 向上查找最近的 `.mino/`。
 3. 向上查找最近的受支持清单：`Cargo.toml`、`package.json`、`pyproject.toml`、`setup.py`、`go.mod`、`pom.xml`、`build.gradle` 或 `build.gradle.kts`。
 
-只有 `project init` 可以在以上规则均失败时使用调用方指定的目录。初始化会验证内嵌协议、创建缺失的 `.mino` 状态、安装或核验仓库 Skill，并诊断集成状态。除非显式提供 apply 参数，它不会修改 `AGENTS.md` 或 `.gitignore`；初始化本身不执行网络或 Git 修改。
+Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超时或输出异常时也允许已存在的 `.mino` 或清单成为确定性 fallback，但在没有任何文件系统证据时保留类型化 Git 失败。只有 `project init` 可以在以上规则均失败时使用调用方指定的目录。初始化会验证内嵌协议、创建缺失的 `.mino` 状态、安装或核验仓库 Skill，并诊断集成状态。除非显式提供 apply 参数，它不会修改 `AGENTS.md` 或 `.gitignore`；初始化本身不执行网络或 Git 修改。
 
 旧计划导入复用同一套计划服务，但采用两阶段写入：先读取完整且有界的源文件，预览可映射字段并产生警告；随后创建 revision 1 的 Draft，再以派生 request ID 写入 revision 2。中断后的精确重试可以补完第二阶段，历史状态、审批和证据不会被当作可信事实。
 
@@ -187,7 +187,7 @@ Markdown 投影包含 plan ID、revision、状态哈希和 renderer version。�
 
 ## 工作树与 Git 边界
 
-`mino git inspect` 直接执行窄范围 Git 命令，解析 NUL 分隔的 porcelain v2，并显式报告普通、unborn、detached、bare、linked worktree 和非仓库状态。
+`mino git inspect` 通过唯一的生产 Git command adapter 执行窄范围命令，解析 NUL 分隔的 porcelain v2，并显式报告普通、unborn、detached、bare、linked worktree 和非仓库状态。项目发现、计划 readiness、File Map 检查、分支、提交与 hooks 共用该入口；其他生产模块不直接构造 Git 子进程。adapter 清空环境后恢复跨平台基础 allowlist，并按普通操作或短 probe profile 施加 stdin、timeout、合并输出与进程树边界。
 
 `mino git bind` 以 canonical common directory 和 worktree root 为键保存活动计划。分支绑定允许该分支向前移动；detached 绑定要求完全相同的 HEAD。切换分支或 HEAD 后会变为 `stale_branch` 或 `stale_head`，其他工作树的绑定为 `foreign_worktree`。一旦 `active.json` 存在，就不再跨工作树回退选择计划。
 

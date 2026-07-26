@@ -2,10 +2,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Serialize;
 
+use crate::git::{GitRootProbe, probe_root};
 use crate::{ErrorCategory, MinoError};
 
 const AUTHORITATIVE_MARKERS: &[&str] = &[
@@ -76,12 +76,16 @@ pub fn discover_for_init(start: &Path) -> Result<ProjectRoot, MinoError> {
 
 fn discover_inner(start: &Path, allow_fallback: bool) -> Result<ProjectRoot, MinoError> {
     let normalized_start = normalize_start(start)?;
-    if let Some(path) = discover_git_root(&normalized_start) {
-        return Ok(ProjectRoot {
-            path,
-            source: RootSource::Git,
-        });
-    }
+    let git_error = match discover_git_root(&normalized_start) {
+        Ok(Some(path)) => {
+            return Ok(ProjectRoot {
+                path,
+                source: RootSource::Git,
+            });
+        }
+        Ok(None) => None,
+        Err(error) => Some(error),
+    };
     for ancestor in normalized_start.ancestors() {
         if has_mino_marker(ancestor)? {
             return Ok(ProjectRoot {
@@ -104,6 +108,8 @@ fn discover_inner(start: &Path, allow_fallback: bool) -> Result<ProjectRoot, Min
             path: normalized_start,
             source: RootSource::InitializationFallback,
         })
+    } else if let Some(error) = git_error {
+        Err(error)
     } else {
         Err(MinoError::new(
             ErrorCategory::EnvironmentUnavailable,
@@ -160,18 +166,14 @@ fn normalize_start(start: &Path) -> Result<PathBuf, MinoError> {
     }
 }
 
-fn discover_git_root(start: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(start)
-        .args(["rev-parse", "--show-toplevel"])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+fn discover_git_root(start: &Path) -> Result<Option<PathBuf>, MinoError> {
+    match probe_root(start).map_err(|error| {
+        MinoError::new(
+            ErrorCategory::EnvironmentUnavailable,
+            format!("Failed to probe Git project root: {error}"),
+        )
+    })? {
+        GitRootProbe::Found(path) => Ok(Some(path)),
+        GitRootProbe::NotRepository => Ok(None),
     }
-    let path = String::from_utf8(output.stdout).ok()?;
-    let path = PathBuf::from(path.trim());
-    path.canonicalize().ok().filter(|path| path.is_dir())
 }

@@ -1,6 +1,7 @@
 //! Bounded no-shell process execution and recoverable result journaling.
 
 pub(crate) mod group;
+pub(crate) mod probe;
 mod process;
 mod redaction;
 
