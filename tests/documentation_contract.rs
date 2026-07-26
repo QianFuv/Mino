@@ -109,9 +109,13 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     (&["exec", "criterion", "--help"], &["pass", "help"]),
     (
         &["git", "--help"],
-        &["inspect", "bind", "branch", "commit", "help"],
+        &["inspect", "bind", "branch", "commit", "hook", "help"],
     ),
     (&["git", "branch", "--help"], &["propose", "create", "help"]),
+    (
+        &["git", "hook", "--help"],
+        &["propose", "status", "install", "run", "help"],
+    ),
     (
         &["review", "--help"],
         &["record", "rework", "resolve", "accept", "help"],
@@ -138,6 +142,10 @@ const LEAF_COMMANDS: &[&str] = &[
     "git branch create",
     "git branch propose",
     "git commit",
+    "git hook install",
+    "git hook propose",
+    "git hook run",
+    "git hook status",
     "git inspect",
     "plan apply",
     "plan amend apply",
@@ -312,6 +320,7 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             .collect::<Vec<_>>(),
         [
             "git.branch.create",
+            "git.hook.install",
             "plan.amend.approve",
             "plan.approve",
             "plan.archive",
@@ -335,6 +344,10 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
         "mino.plan-review/v1",
         "mino.check-run/v1",
         "mino.plan-diff/v1",
+        "mino.git-hook-status/v1",
+        "mino.git-hook-proposal/v1",
+        "mino.git-hook-install/v1",
+        "mino.git-hook-runtime/v1",
     ] {
         assert!(commands.contains(schema), "missing schema {schema}");
     }

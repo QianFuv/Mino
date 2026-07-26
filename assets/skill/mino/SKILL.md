@@ -1,6 +1,6 @@
 ---
 name: mino
-description: Create, fork, compare, validate, execute, resume, update, amend, archive, review, rework, and audit durable implementation plans through the Mino CLI. Use when a user explicitly requests a formal plan, work requires durable planning, plan alternatives must be compared, an existing Mino plan must be resumed or updated, verification evidence must be recorded, review or rework must be handled, or plan-scoped Git Flow must be followed.
+description: Create, fork, compare, validate, execute, resume, update, amend, archive, review, rework, audit, and optionally integrate advisory Git hooks for durable implementation plans through the Mino CLI. Use when a user explicitly requests a formal plan, work requires durable planning, plan alternatives must be compared, an existing Mino plan must be resumed or updated, verification evidence must be recorded, review or rework must be handled, or plan-scoped Git Flow must be followed.
 ---
 
 <!-- mino-managed-skill:v1 -->
@@ -55,6 +55,16 @@ return to the required workflow and follow the CLI's canonical next actions.
   exact returned `git.commit` argv under current Approved Git Flow consent.
   Never substitute manual staging, commit, cleanup, or destructive Git commands.
 - Never use bundled protocol Markdown as a fallback workflow.
+
+## Advisory hooks
+
+Treat repository hooks as optional reminders, never as hidden plan transitions.
+Use `git hook propose` or `status` first. Before `git hook install`, read
+[approval-boundaries.md](references/approval-boundaries.md), show the current
+proposal hash and every ownership conflict, and obtain an explicit approval
+reference. Never overwrite or compose a user hook automatically; present the
+returned manual snippet instead. `git hook run` is read-only and its advice does
+not prove approval, verification, commit eligibility, or completion.
 
 ## Plan alternatives
 

@@ -4,6 +4,7 @@ mod branch;
 mod changes;
 mod command;
 mod commit;
+mod hooks;
 mod inspect;
 mod intent;
 mod policy;
@@ -24,6 +25,12 @@ pub use commit::{
     GitCommitObject, GitMutationResult, ensure_no_clean_filters, inspect_commit, run_task_commit,
     stage_commit_paths, write_index_tree,
 };
+pub use hooks::{
+    GIT_HOOK_PROPOSAL_KIND, GIT_HOOK_RUNTIME_KIND, GIT_HOOK_STATUS_KIND, GitHookDiagnostic,
+    GitHookName, GitHookProposal, GitHookRuntimeReport, GitHookState, GitHookStatus,
+    GitHookStatusReport,
+};
+pub(crate) use hooks::{hook_proposal, hook_status, install_hooks, observe_hook};
 pub use inspect::{GitAdapter, GitFacts, GitHeadState};
 pub use intent::{
     CommitFileSnapshot, CommitFileSnapshotKind, GitCommitCompletion, GitCommitCompletionInput,

@@ -28,6 +28,17 @@ an auditable reference. A prior plan approval, a successful fork, or a diff does
 not authorize archive. Archive must preserve the lifecycle status, canonical
 state, snapshots, events, and projection; never delete or rename those bytes.
 
+## Advisory hook installation
+
+`git.hook.install` is an approval boundary for one exact current proposal hash.
+Show both hook paths, ownership states, actual/template digests, blockers, and
+manual integration snippets before asking. Obtain an auditable external
+reference, then pass both values unchanged. Plan approval, Git Flow consent, a
+prior hook install, or an unchanged repository is not a substitute. Never
+install when Mino reports a user hook, symbolic link, unsupported path, or
+custom `core.hooksPath`; preserve those bytes and let the user integrate the
+returned snippet manually.
+
 ## Standards conflicts
 
 Show every current candidate with its source, digest, source class, and numeric

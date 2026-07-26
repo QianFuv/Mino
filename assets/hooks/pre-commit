@@ -1,0 +1,6 @@
+#!/bin/sh
+# mino-managed-hook:v1
+if command -v mino >/dev/null 2>&1; then
+  mino git hook run --hook pre-commit --format human --no-input || true
+fi
+exit 0

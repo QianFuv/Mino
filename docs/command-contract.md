@@ -67,6 +67,10 @@ for an exact two-phase retry.
 | `mino git branch propose` | No | Derive `mino/<plan-id>`, validate it with Git, and report clean/base/source/existing-ref blockers without writing Git or Mino state. |
 | `mino git branch create` | Local branch + Mino journal/binding | Require `--plan <id> --approval-ref <ref>`; optional `--branch` must exactly equal the proposal. Recheck the clean worktree, captured branch/detached mode, and base HEAD before creating and switching. |
 | `mino git commit` | Exact index paths + one local commit + evidence/plan/journal | Require `--plan <id> --task <id>`. Execute only the first Done task with a pending required gate under current plan approval and Approved Git Flow consent, exact same-worktree binding/branch/parent, compatible evidence, and changed paths inside both File Map and Commit Scope. |
+| `mino git hook propose` | No | Inspect default pre/post commit paths, ownership markers, template/actual digests, custom hook configuration, and return one stable proposal hash. |
+| `mino git hook status` | No | Return the same bounded ownership/content facts without installing or invoking a hook. |
+| `mino git hook install` | Hook files only, approval boundary | Require the current `--proposal-hash` and non-empty `--approval-ref`; install/repair only absent or Mino-owned default hooks, then verify exact bytes. |
+| `mino git hook run` | No | Require `--hook pre-commit|post-commit`; observe staged/HEAD and active-binding facts with read-only Git commands and emit diagnostics/next actions. |
 
 Binding status is one of `missing`, `current`, `foreign_worktree`,
 `stale_branch`, `stale_head`, or `not_repository`. Once an active binding file
@@ -97,6 +101,21 @@ gate, then publishes `completion.json`. A hook/Git failure leaves exact staged
 state visible and blocks the plan; after `exec resume`, an exact retry recovers
 the staged or already-created commit without duplicating it. Mino never invokes
 `--no-verify` or automatically resets/unstages a failed attempt.
+
+Repository hooks are optional advisory integrations. `git hook propose` binds
+the canonical worktree/common-directory identity, both target paths, current
+ownership classes, conflict digests, and embedded template digests. Safe
+Absent, Current, and Mino-Owned-Drifted states share an idempotent install class;
+a user hook or custom `core.hooksPath` changes/refuses the proposal. `git hook
+install` is a separate approval boundary and never treats plan approval or Git
+Flow consent as a substitute. It preserves user hooks byte-for-byte and returns
+the exact manual snippet instead of composing or overwriting them.
+
+The installed `pre-commit` and `post-commit` scripts carry the exact
+`mino-managed-hook:v1` marker, invoke only `mino git hook run`, tolerate an
+unavailable/refusing Mino, and exit successfully. Runtime inspection disables
+optional Git locks, reads staged/HEAD and binding facts, and never invokes a Git
+mutation or writes plan, event, evidence, binding, or hook state.
 
 ### Plan authoring and approval
 
@@ -299,6 +318,10 @@ overwriting the common keys.
 | `mino.plan-review/v1` | Revision-bound `plan review` payload |
 | `mino.check-run/v1` | Persisted check lease/result `schema_version` |
 | `mino.plan-diff/v1` | Read-only semantic `plan diff` payload under `diff_kind` |
+| `mino.git-hook-status/v1` | Read-only `git hook status` and proposal status payload |
+| `mino.git-hook-proposal/v1` | Hash-bound `git hook propose` payload |
+| `mino.git-hook-install/v1` | Approval-bound `git hook install` result |
+| `mino.git-hook-runtime/v1` | Read-only `git hook run` observation |
 
 The plan aggregate also carries numeric `schema_version: 1`; the protocol lock
 binds protocol and renderer versions separately.

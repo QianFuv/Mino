@@ -59,6 +59,31 @@ the gate. On a hook/Git failure, preserve the staged state, use the returned
 `exec resume` action, and retry the exact commit argv. Never reset, unstage,
 delete journals, use `--no-verify`, or create a replacement commit manually.
 
+## Advisory repository hooks
+
+Inspect the two optional default hooks without mutation:
+
+```text
+mino git hook propose --format json --no-input
+mino git hook status --format json --no-input
+```
+
+Present every hook state, actual/template digest, blocker, manual integration
+snippet, and the exact proposal hash. User-owned hooks, symbolic links,
+unsupported file kinds, and custom `core.hooksPath` are never overwritten.
+Before installation, stop for explicit approval of the current hash, then run:
+
+```text
+mino git hook install --proposal-hash <sha256> --approval-ref <ref> --format json --no-input
+```
+
+Hook installation is independent of plan approval and Git Flow consent. Exact
+retries are idempotent; ownership/config/template changes require a new
+proposal. Installed pre/post commit hooks invoke `git hook run`, tolerate errors,
+and remain advisory. Runtime may emit diagnostics and read-only next actions,
+but it never writes Git, plan, event, evidence, binding, or hook state and must
+not be treated as workflow completion.
+
 ## Standards conflicts
 
 When validation or Agent context reports a standards conflict, run the returned

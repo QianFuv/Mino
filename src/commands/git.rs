@@ -2,13 +2,15 @@
 
 use std::path::Path;
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 
 use crate::application::git_binding::GitBindingService;
 use crate::application::git_branch::GitBranchService;
 use crate::application::git_commit::GitCommitService;
+use crate::application::git_hooks::GitHookService;
 use crate::commands::CommandResponse;
 use crate::domain::{PlanId, TaskId};
+use crate::git::GitHookName;
 use crate::{ErrorCategory, MinoError};
 
 #[derive(Debug, Subcommand)]
@@ -21,6 +23,8 @@ pub(crate) enum GitAction {
     Branch(BranchArguments),
     /// Create or recover one approved task-level commit.
     Commit(CommitArguments),
+    /// Inspect, install, or invoke optional advisory repository hooks.
+    Hook(HookArguments),
 }
 
 #[derive(Debug, Args)]
@@ -84,6 +88,56 @@ pub(crate) struct CommitArguments {
     task: String,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct HookArguments {
+    #[command(subcommand)]
+    action: GitHookAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum GitHookAction {
+    /// Return the hash-bound installation proposal without mutation.
+    Propose,
+    /// Return current hook ownership and content status without mutation.
+    Status,
+    /// Install or repair only Mino-owned hooks after explicit approval.
+    Install(HookInstallArguments),
+    /// Emit advisory staged/commit observations without mutation.
+    Run(HookRunArguments),
+}
+
+#[derive(Debug, Args)]
+struct HookInstallArguments {
+    /// Exact current digest returned by `git hook propose`.
+    #[arg(long)]
+    proposal_hash: String,
+    /// Auditable external reference for explicit hook installation approval.
+    #[arg(long)]
+    approval_ref: String,
+}
+
+#[derive(Debug, Args)]
+struct HookRunArguments {
+    /// Advisory Git hook being invoked.
+    #[arg(long, value_enum)]
+    hook: HookNameArgument,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum HookNameArgument {
+    PreCommit,
+    PostCommit,
+}
+
+impl From<HookNameArgument> for GitHookName {
+    fn from(value: HookNameArgument) -> Self {
+        match value {
+            HookNameArgument::PreCommit => Self::PreCommit,
+            HookNameArgument::PostCommit => Self::PostCommit,
+        }
+    }
+}
+
 pub(crate) fn execute(start: &Path, action: GitAction) -> Result<CommandResponse, MinoError> {
     let service = GitBindingService::discover(start)?;
     let (message, payload) = match action {
@@ -113,6 +167,7 @@ pub(crate) fn execute(start: &Path, action: GitAction) -> Result<CommandResponse
                 &parse_task_id(&arguments.task)?,
             )?),
         ),
+        GitAction::Hook(arguments) => return execute_hook(start, arguments.action),
     };
     let payload = payload.map_err(|error| {
         MinoError::new(
@@ -126,6 +181,57 @@ pub(crate) fn execute(start: &Path, action: GitAction) -> Result<CommandResponse
         payload,
         missing: Vec::new(),
         next_actions: Vec::new(),
+    })
+}
+
+fn execute_hook(start: &Path, action: GitHookAction) -> Result<CommandResponse, MinoError> {
+    let service = GitHookService::discover(start)?;
+    let (message, payload, next_actions) = match action {
+        GitHookAction::Propose => (
+            "Advisory Git hook proposal generated without mutation.".to_owned(),
+            serde_json::to_value(service.propose()?),
+            Vec::new(),
+        ),
+        GitHookAction::Status => (
+            "Advisory Git hook status inspected without mutation.".to_owned(),
+            serde_json::to_value(service.status()?),
+            Vec::new(),
+        ),
+        GitHookAction::Install(arguments) => (
+            "Approved advisory Git hooks installed and verified.".to_owned(),
+            serde_json::to_value(
+                service.install(&arguments.proposal_hash, &arguments.approval_ref)?,
+            ),
+            Vec::new(),
+        ),
+        GitHookAction::Run(arguments) => {
+            let report = service.run(arguments.hook.into())?;
+            let message = format!(
+                "Advisory {} observation: {}",
+                report.hook.as_str(),
+                report
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+            let next_actions = report.next_actions.clone();
+            (message, serde_json::to_value(report), next_actions)
+        }
+    };
+    let payload = payload.map_err(|error| {
+        MinoError::new(
+            ErrorCategory::EnvironmentUnavailable,
+            format!("Failed to serialize Git hook result: {error}"),
+        )
+    })?;
+    Ok(CommandResponse {
+        message,
+        complete: true,
+        payload,
+        missing: Vec::new(),
+        next_actions,
     })
 }
 

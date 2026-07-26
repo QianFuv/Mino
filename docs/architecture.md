@@ -224,6 +224,30 @@ HEAD advanced before evidence, plan, or completion publication, retry inspects
 the existing commit and completes those records without creating another
 commit. A completed journal replays without Git or plan mutation.
 
+## Optional advisory repository hooks
+
+`mino git hook propose` and `status` inspect the canonical shared Git directory,
+the default `hooks/pre-commit` and `hooks/post-commit` paths, any configured
+`core.hooksPath`, ownership markers, and bounded file digests. The proposal hash
+binds repository identity, target paths, ownership classes, conflict bytes, and
+embedded template digests. Absent/current/Mino-owned-drifted paths form one
+idempotent install class; user-owned, symbolic-link, non-file, or custom-path
+states are non-installable and expose manual snippets.
+
+`mino git hook install` is a separate approval boundary. After matching the
+current proposal hash and external approval reference, it writes only the two
+default hook files, repairs only marker-owned bytes, and verifies the result.
+The installed LF shell templates are compatible with Git for Windows and Unix
+Git, tolerate a missing/refusing Mino, and always remain advisory.
+The tracked `.gitattributes` rule fixes only `assets/hooks/*` to `eol=lf`, so
+template digests and shebang bytes survive Windows checkouts.
+
+Hook invocation routes to `mino git hook run --hook pre-commit|post-commit`.
+Runtime uses the existing read-only Git adapter with optional locks disabled and
+the read-only active-binding resolver. It emits staged/HEAD observations,
+binding diagnostics, and optional next commands; it does not load/mutate plans,
+write events/evidence/bindings, stage files, create commits, or update hooks.
+
 ## Plan and task lifecycle
 
 ```mermaid

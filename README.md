@@ -13,7 +13,8 @@ review feedback, rework, final acceptance, typed Minor/Material plan changes,
 conservative legacy-plan import, and explicit source-bound standards-conflict
 decisions, historical plan forks, semantic plan diffs, and approval-bound
 non-destructive archive state. Scheduled observation, team catalogs, and
-plugin distribution remain deferred.
+plugin distribution remain deferred. Optional advisory pre/post commit hooks
+are also available with explicit installation approval.
 
 ## What v0.1 provides
 
@@ -69,6 +70,14 @@ Semantic diff is read-only and compares normalized authored fields. Archive
 requires an explicit selection reference and deactivates a plan without
 deleting it or rewriting its lifecycle status. Plan forks are not Git branches,
 and Mino intentionally provides no plan merge command.
+
+The v0.3 hook increment adds `git hook propose`, `status`, approval-gated
+`install`, and read-only `run`. Mino installs only absent or marker-owned
+default pre/post commit hooks after a current proposal hash and approval
+reference. User hooks, symbolic links, and custom `core.hooksPath` settings are
+preserved with manual integration guidance. Hook runtime observes staged/HEAD
+and binding facts through read-only Git commands, emits advice, always remains
+optional, and never mutates Git or Mino state.
 
 ## Requirements and installation
 
@@ -145,6 +154,9 @@ and read context again. Stop whenever `approval_required` is true. Never edit
   legacy source.
 - Plan diff never mutates either input. Plan fork verifies source history before
   publishing a target, and archive preserves every prior snapshot and event.
+- Advisory hooks require an explicit hash-bound install approval. Runtime hooks
+  are reminders only: their templates tolerate an unavailable/refusing Mino and
+  never stage, commit, or change plan/evidence state.
 
 ## Documentation
 

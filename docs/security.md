@@ -25,6 +25,11 @@ requires a non-empty reason and approval reference; plan approval, clean checks,
 or creation of an alternative cannot infer that the original should be
 deactivated.
 
+Advisory hook installation is also a separate declaration. `git hook install`
+must match the current proposal hash and carry a non-empty external approval
+reference. Plan approval, Git Flow consent, and an earlier hook proposal are not
+installation authority by themselves.
+
 Standards-conflict resolution is a separate auditable declaration.
 `standards conflict resolve` must select a displayed current candidate and
 carry both a rationale and external decision reference. A precedence default,
@@ -51,6 +56,10 @@ change after approval cannot bypass refresh and a renewed explicit decision.
 - `.mino/git/commits/**` contains immutable content snapshots, staged-tree
   identities, and terminal task-commit results. Do not edit these records or use
   them as permission for a broader commit.
+- Default `.git/hooks/pre-commit` and `.git/hooks/post-commit` are managed only
+  after hash-bound approval and only when absent or marked Mino-owned. User
+  hooks, symbolic links, non-files, oversized hooks, and custom
+  `core.hooksPath` configurations are preserved and require manual integration.
 - `docs/plan/*.md` is a digest-checked projection. Manual changes cause drift
   and are preserved rather than overwritten.
 - Plan transactions, snapshots, events, run journals, evidence records, and
@@ -177,6 +186,12 @@ authorization. It creates only a separate Mino Draft. Mino does not provide a
 plan merge command; alternatives are compared with read-only `plan diff`, then
 the user's unselected plan may be archived through its explicit boundary.
 
+Advisory hook installation writes only the two inspected default hook paths; it
+does not run `git config`, stage, commit, switch, or alter refs. The hook scripts
+invoke only read-only `git hook run`, tolerate errors, and exit successfully.
+Runtime uses Git status/config/identity reads with optional locks disabled and
+does not write any Mino plan, event, evidence, active binding, or hook file.
+
 Active-plan selection requires the canonical common-directory and worktree to
 match. Branch bindings require the same branch; detached bindings require the
 same exact HEAD. Stale and foreign bindings expose no active plan, preventing a
@@ -197,6 +212,8 @@ Agent consumers must use JSON/no-input mode and inspect `approval_required`,
 - `approval_required: true` or exit 4.
 - `git.branch.create`, unless the user explicitly approved that exact proposal
   and supplied the recorded approval reference.
+- `git.hook.install`, unless the user explicitly approved the exact current
+  proposal hash and supplied an auditable reference.
 - `review.accept`, unless the user explicitly accepted the fully resolved
   current Review revision and supplied an auditable reference.
 - `plan.amend.approve`, unless the user explicitly approved the exact pending
@@ -223,7 +240,8 @@ Never approve on the user's behalf, infer authorization from conversational
 tone, copy the protocol template as a fallback, or fabricate plan/evidence
 state when Mino is unavailable. There is no hidden Git mutation path: local
 branch creation is exposed only as `git branch create`, exact task commits only
-as `git commit`, and `git bind` is the declared Git-adjacent Mino-state write.
+as `git commit`, hook-file installation only as approval-bound `git hook
+install`, and `git bind` is the declared Git-adjacent Mino-state write.
 There is no arbitrary status setter. Review-to-Done is exposed only as
 `review accept`; task rework is exposed only as a classified recorded review
 item followed by `review rework` and `review resolve`. Plan deactivation is

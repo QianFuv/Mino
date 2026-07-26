@@ -16,6 +16,8 @@ pub mod git_binding;
 pub mod git_branch;
 /// Recoverable plan-scoped Git task-commit service.
 pub mod git_commit;
+/// Approval-bound advisory hook installation and read-only runtime service.
+pub mod git_hooks;
 /// Plan authoring and read-side application service.
 pub mod plan;
 /// Historical plan forks, semantic comparisons, and archive operations.
