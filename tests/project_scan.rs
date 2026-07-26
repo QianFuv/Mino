@@ -59,12 +59,19 @@ fn run_mino(arguments: &[&str]) -> Output {
         .expect("Mino binary should run")
 }
 
-fn run_mino_with_git_config(arguments: &[&str], git_config: &Path) -> Output {
+fn run_mino_with_isolated_git_home(arguments: &[&str], home: &Path, config_home: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mino"))
         .args(arguments)
-        .env("GIT_CONFIG_GLOBAL", git_config)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("XDG_CONFIG_HOME", config_home)
+        .env_remove("GIT_CONFIG_GLOBAL")
+        .env(
+            "GIT_CONFIG_SYSTEM",
+            config_home.join("missing-system-config"),
+        )
         .output()
-        .expect("Mino binary should run with an isolated global Git config")
+        .expect("Mino binary should run with an isolated Git home")
 }
 
 fn write_repeated(path: &Path, byte: u8, byte_count: u64) {
@@ -312,18 +319,16 @@ fn global_git_exclude_is_applied_by_the_cli_scan() {
         "print('globally ignored')\n",
     )
     .expect("globally ignored source should be written");
-    let excludes = project.path().join("global-excludes");
-    fs::write(&excludes, "global-only.py\n").expect("global excludes should be written");
-    let config = project.path().join("isolated.gitconfig");
-    let excludes_path = excludes.to_string_lossy().replace('\\', "/");
-    fs::write(
-        &config,
-        format!("[core]\n\texcludesFile = \"{excludes_path}\"\n"),
-    )
-    .expect("isolated Git config should be written");
+    let home = project.path().join("isolated-home");
+    fs::create_dir(&home).expect("isolated home should be created");
+    let config_home = project.path().join("isolated-config");
+    fs::create_dir_all(config_home.join("git"))
+        .expect("global Git ignore directory should be created");
+    fs::write(config_home.join("git/ignore"), "global-only.py\n")
+        .expect("global Git ignore should be written");
     let root = project.path().to_str().expect("test path should be UTF-8");
 
-    let output = run_mino_with_git_config(
+    let output = run_mino_with_isolated_git_home(
         &[
             "project",
             "scan",
@@ -333,7 +338,8 @@ fn global_git_exclude_is_applied_by_the_cli_scan() {
             "json",
             "--no-input",
         ],
-        &config,
+        &home,
+        &config_home,
     );
     assert!(output.status.success());
     let value: Value = serde_json::from_slice(&output.stdout).expect("scan should return JSON");
