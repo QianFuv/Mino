@@ -1,0 +1,61 @@
+name: Native plugin artifact validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/release-artifacts.yml"
+      - "assets/skill/mino/**"
+      - "plugins/mino/**"
+      - "src/distribution/**"
+      - "src/bin/xtask.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "LICENSE-*"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: target/release/mino.exe
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            binary: target/release/mino
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: target/release/mino
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: target/release/mino
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            binary: target/release/mino
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust 1.96.1
+        run: rustup toolchain install 1.96.1 --profile minimal
+      - name: Select Rust 1.96.1
+        run: rustup default 1.96.1
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+      - name: Validate canonical plugin contract
+        run: cargo test --locked --test plugin_contract -- --test-threads=1
+      - name: Build native Mino binary
+        run: cargo build --release --locked --bin mino
+      - name: Assemble and smoke native artifact
+        run: >-
+          cargo run --release --locked --bin xtask -- package-plugin
+          --repository .
+          --binary "${{ matrix.binary }}"
+          --target "${{ matrix.target }}"
+          --output dist

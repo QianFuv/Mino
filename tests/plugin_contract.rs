@@ -1,12 +1,16 @@
 //! Contract tests for the canonical Mino Codex plugin source and compatibility metadata.
 
-use std::fs;
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mino::ErrorCategory;
 use mino::distribution::{
-    MINO_PLUGIN_CONTRACT_KIND, validate_mino_plugin_source, validate_plugin_source,
+    MINO_PLUGIN_CONTRACT_KIND, PluginPackageRequest, host_target, package_plugin,
+    validate_mino_plugin_source, validate_plugin_artifact_directory, validate_plugin_source,
 };
 use serde_json::Value;
 
@@ -94,6 +98,38 @@ fn assert_launcher_drift(label: &str, mutate: impl FnOnce(&mut Value)) {
     let error = validate_plugin_source(&repository_root(), &plugin)
         .expect_err("launcher drift should fail validation");
     assert_eq!(error.category(), ErrorCategory::DriftDetected);
+}
+
+fn native_binary() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_mino"))
+}
+
+fn binary_name(target: &str) -> &'static str {
+    if target == "x86_64-pc-windows-msvc" {
+        "mino.exe"
+    } else {
+        "mino"
+    }
+}
+
+fn snapshot_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fs::read_dir(root)
+        .expect("artifact directory should be readable")
+        .map(|entry| {
+            let entry = entry.expect("artifact entry should be readable");
+            let path = entry.path();
+            assert!(
+                entry
+                    .file_type()
+                    .expect("artifact entry should inspect")
+                    .is_file()
+            );
+            (
+                PathBuf::from(entry.file_name()),
+                fs::read(path).expect("artifact file should be readable"),
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -216,4 +252,205 @@ fn canonical_source_is_offline_binary_free_and_documents_exact_resolution() {
     let readme = fs::read_to_string(canonical_plugin().join("README.md"))
         .expect("plugin README should be readable");
     assert!(readme.contains("does not publish, install, update, or"));
+}
+
+#[test]
+fn native_artifacts_are_byte_reproducible_reusable_and_strictly_verified() {
+    let temporary = TestDirectory::new("native-artifact");
+    let target = host_target().expect("current host should be supported");
+    let first_output = temporary.path.join("first");
+    let second_output = temporary.path.join("second");
+    let first = package_plugin(&PluginPackageRequest::new(
+        repository_root(),
+        native_binary(),
+        target,
+        &first_output,
+    ))
+    .expect("first native artifact should package");
+    let second = package_plugin(&PluginPackageRequest::new(
+        repository_root(),
+        native_binary(),
+        target,
+        &second_output,
+    ))
+    .expect("second native artifact should package");
+    assert!(!first.reused);
+    assert!(!second.reused);
+    assert_eq!(first.archive_digest, second.archive_digest);
+    assert_eq!(first.manifest_digest, second.manifest_digest);
+    assert_eq!(
+        snapshot_files(&first.output_directory),
+        snapshot_files(&second.output_directory)
+    );
+    let manifest = validate_plugin_artifact_directory(&first.output_directory)
+        .expect("complete native artifact should validate");
+    assert_eq!(manifest.target, target);
+    assert_eq!(manifest.files.len(), 10);
+    assert_eq!(
+        manifest
+            .files
+            .iter()
+            .filter(|file| file.mode == 0o755)
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>(),
+        vec![format!("mino/bin/{}", binary_name(target))]
+    );
+    let reused = package_plugin(&PluginPackageRequest::new(
+        repository_root(),
+        native_binary(),
+        target,
+        &first_output,
+    ))
+    .expect("identical artifact should be reused");
+    assert!(reused.reused);
+    assert_eq!(reused.archive_digest, first.archive_digest);
+
+    let mut archive = OpenOptions::new()
+        .append(true)
+        .open(&second.archive_path)
+        .expect("archive should open for corruption");
+    archive
+        .write_all(b"corrupt")
+        .expect("archive corruption should be injected");
+    let error = validate_plugin_artifact_directory(&second.output_directory)
+        .expect_err("corrupt archive should fail validation");
+    assert_eq!(error.category(), ErrorCategory::DriftDetected);
+}
+
+#[test]
+fn missing_wrong_platform_or_incompatible_binaries_emit_no_artifact() {
+    let temporary = TestDirectory::new("binary-failures");
+    let target = host_target().expect("current host should be supported");
+    let wrong_target = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+    ]
+    .into_iter()
+    .find(|candidate| *candidate != target)
+    .expect("another target should exist");
+    let wrong_target_output = temporary.path.join("wrong-target-output");
+    let wrong_target_error = package_plugin(&PluginPackageRequest::new(
+        repository_root(),
+        native_binary(),
+        wrong_target,
+        &wrong_target_output,
+    ))
+    .expect_err("wrong-platform packaging should fail");
+    assert_eq!(
+        wrong_target_error.category(),
+        ErrorCategory::EnvironmentUnavailable
+    );
+    assert_eq!(
+        wrong_target_error.exit_code(),
+        std::process::ExitCode::from(7)
+    );
+    assert!(!wrong_target_output.exists());
+
+    let missing_output = temporary.path.join("missing-output");
+    let missing_binary = temporary.path.join(binary_name(target));
+    let missing_error = package_plugin(&PluginPackageRequest::new(
+        repository_root(),
+        &missing_binary,
+        target,
+        &missing_output,
+    ))
+    .expect_err("missing binary should fail");
+    assert_eq!(
+        missing_error.category(),
+        ErrorCategory::EnvironmentUnavailable
+    );
+    assert!(!missing_output.exists());
+
+    let incompatible_directory = temporary.path.join("incompatible");
+    fs::create_dir(&incompatible_directory).expect("incompatible directory should be created");
+    let incompatible_binary = incompatible_directory.join(binary_name(target));
+    fs::write(&incompatible_binary, b"not a native executable")
+        .expect("incompatible binary should be written");
+    let incompatible_output = temporary.path.join("incompatible-output");
+    let incompatible_error = package_plugin(&PluginPackageRequest::new(
+        repository_root(),
+        &incompatible_binary,
+        target,
+        &incompatible_output,
+    ))
+    .expect_err("incompatible binary should fail smoke");
+    assert_eq!(
+        incompatible_error.category(),
+        ErrorCategory::EnvironmentUnavailable
+    );
+    assert!(!incompatible_output.exists());
+}
+
+#[test]
+fn xtask_packages_the_current_host_without_installing_or_publishing() {
+    let temporary = TestDirectory::new("xtask");
+    let target = host_target().expect("current host should be supported");
+    let output = temporary.path.join("dist");
+    let result = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("package-plugin")
+        .arg("--repository")
+        .arg(repository_root())
+        .arg("--binary")
+        .arg(native_binary())
+        .arg("--target")
+        .arg(target)
+        .arg("--output")
+        .arg(&output)
+        .stdin(Stdio::null())
+        .output()
+        .expect("xtask should run");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.stderr.is_empty());
+    let report: Value =
+        serde_json::from_slice(&result.stdout).expect("xtask report should be JSON");
+    assert_eq!(report["kind"], "mino.plugin-artifact-manifest/v1");
+    assert_eq!(report["target"], target);
+    assert_eq!(report["reused"], false);
+    validate_plugin_artifact_directory(&output.join(target))
+        .expect("xtask artifact should validate");
+}
+
+#[test]
+fn native_workflow_covers_every_target_and_has_no_upload_or_publish_step() {
+    let workflow =
+        fs::read_to_string(repository_root().join(".github/workflows/release-artifacts.yml"))
+            .expect("native artifact workflow should be readable");
+    for required in [
+        "windows-latest",
+        "ubuntu-24.04",
+        "ubuntu-24.04-arm",
+        "macos-15-intel",
+        "macos-15",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "cargo run --release --locked --bin xtask -- package-plugin",
+        "permissions:\n  contents: read",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "workflow is missing {required}"
+        );
+    }
+    for forbidden in [
+        "actions/upload-artifact",
+        "cargo publish",
+        "gh release",
+        "secrets.",
+        "plugin marketplace",
+    ] {
+        assert!(
+            !workflow.contains(forbidden),
+            "workflow contains forbidden text {forbidden}"
+        );
+    }
 }
