@@ -11,7 +11,13 @@ pub use apply::{
     CommandSource, ResolvedCheck, ResolvedCheckStatus, StandardsApplication, SystemToolProbe,
     ToolProbe, apply_recommendation,
 };
-pub use catalog::{CheckTemplate, EmbeddedCatalog, RuleLevel, StandardRule, StandardsPackage};
+pub use catalog::{
+    CheckTemplate, EmbeddedCatalog, RuleLevel, StandardRule, StandardsPackage,
+    TEAM_CATALOG_MANIFEST_KIND, TEAM_CATALOG_SOURCE_VERSION, TeamCatalogBuildReport,
+    TeamCatalogFileReport, TeamCatalogInitReport, TeamCatalogPackageReport,
+    TeamCatalogValidationReport, build_team_catalog, build_team_catalog_with_policy,
+    initialize_team_catalog, validate_team_catalog, validate_team_catalog_with_policy,
+};
 pub use conflict::{
     AssessedStandardConflict, DetectedStandardsConflicts, LocalStandardsSource,
     StandardConflictStatus, StandardsConflictAssessment, assess_standard_conflicts,

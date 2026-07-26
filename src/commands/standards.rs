@@ -44,8 +44,47 @@ pub(crate) enum StandardsAction {
         #[arg(long)]
         all: bool,
     },
+    /// Initialize, validate, or build a static team standards catalog.
+    Catalog(CatalogArguments),
     /// Inspect, refresh, or explicitly resolve plan-scoped rule conflicts.
     Conflict(ConflictArguments),
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct CatalogArguments {
+    #[command(subcommand)]
+    action: CatalogAction,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum CatalogAction {
+    /// Atomically create a valid example source tree.
+    Init {
+        /// New source-tree path whose parent already exists.
+        #[arg(long)]
+        source: PathBuf,
+        /// Lowercase DNS-like namespace for every team package.
+        #[arg(long)]
+        namespace: String,
+        /// HTTPS base URL where the built tree will be hosted.
+        #[arg(long)]
+        base_url: String,
+    },
+    /// Validate and report canonical identities without writing.
+    Validate {
+        /// Existing team-catalog source-tree path.
+        #[arg(long)]
+        source: PathBuf,
+    },
+    /// Atomically produce a static hostable catalog tree.
+    Build {
+        /// Existing team-catalog source-tree path.
+        #[arg(long)]
+        source: PathBuf,
+        /// Generated output path whose parent already exists.
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, Args)]
@@ -158,7 +197,29 @@ pub(crate) fn execute(start: &Path, action: StandardsAction) -> Result<CommandRe
                 crate::standards::synchronize_all(start)?,
             )
         }
+        StandardsAction::Catalog(arguments) => execute_catalog(arguments.action),
         StandardsAction::Conflict(arguments) => execute_conflict(start, arguments.action),
+    }
+}
+
+fn execute_catalog(action: CatalogAction) -> Result<CommandResponse, MinoError> {
+    match action {
+        CatalogAction::Init {
+            source,
+            namespace,
+            base_url,
+        } => response(
+            "Team standards catalog source initialized.",
+            crate::standards::initialize_team_catalog(&source, &namespace, &base_url)?,
+        ),
+        CatalogAction::Validate { source } => response(
+            "Team standards catalog source validated.",
+            crate::standards::validate_team_catalog(&source)?,
+        ),
+        CatalogAction::Build { source, output } => response(
+            "Team standards catalog built.",
+            crate::standards::build_team_catalog(&source, &output)?,
+        ),
     }
 }
 

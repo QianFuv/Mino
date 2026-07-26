@@ -1,0 +1,5 @@
+[[checks]]
+id = "example.com.common.documentation"
+argv = ["cargo", "test", "--test", "documentation_contract"]
+tool = "cargo"
+required = true

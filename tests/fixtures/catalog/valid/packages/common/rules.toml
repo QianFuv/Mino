@@ -1,0 +1,9 @@
+[[rules]]
+id = "example.com.common.scope"
+level = "required"
+text = "Keep changes within the declared task scope."
+
+[[rules]]
+id = "example.com.common.review"
+level = "recommended"
+text = "Record review evidence before completion."

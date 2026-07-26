@@ -1,0 +1,11 @@
+[[checks]]
+id = "example.com.rust.clippy"
+argv = ["cargo", "clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
+tool = "cargo"
+required = true
+
+[[checks]]
+id = "example.com.rust.format"
+argv = ["cargo", "fmt", "--all", "--", "--check"]
+tool = "cargo"
+required = true

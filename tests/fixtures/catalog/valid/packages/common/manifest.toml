@@ -1,0 +1,4 @@
+package_id = "example.com.common"
+display_name = "Example Common"
+version = "1.0.0"
+languages = []

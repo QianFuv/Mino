@@ -208,6 +208,9 @@ Follow-Up is Deferred and never changes task order or a Git gate.
 | `mino standards recommend` | No | Recommend Common plus applicable language packages, optionally for File Map paths. |
 | `mino standards apply` | No | Resolve exact packages/rules/checks; v0.1 requires `--recommended --seed-verification`. |
 | `mino standards sync` | Cache/lock | Explicitly fetch and activate a digest-verified catalog; v0.1 requires `--all`. |
+| `mino standards catalog init` | Source tree | Atomically create a valid inert example source under an explicit DNS-like namespace and HTTPS base URL; never overwrite an existing path. |
+| `mino standards catalog validate` | No | Bound and validate source paths, SemVer, namespace ownership, TOML data, sizes, and deterministic canonical identities without writing. |
+| `mino standards catalog build` | Static output | Stage and verify canonical `catalog.toml`, package documents, and `catalog-manifest.json`, then atomically publish; replace only a previously verified Mino catalog output. |
 | `mino standards conflict list` | No | Show every conflicting candidate, source class, precedence, source digest, and current decision status. |
 | `mino standards conflict refresh` | Plan | Snapshot the exact live candidate set without selecting a value; source changes clear stale decisions. |
 | `mino standards conflict resolve` | Plan, approval boundary | Select one current candidate with rationale and an auditable decision reference. |
@@ -218,7 +221,10 @@ precedence is user requirement, repository rule or local declaration, project
 configuration, language package, then Common. A unique highest-precedence
 candidate is displayed as a default, never applied as an implicit merge or
 decision. Validation remains blocked until every exact current conflict has an
-explicit decision.
+explicit decision. Team catalog authoring is offline and data-only. Built
+`catalog.toml` files retain the v0.1 sync schema; package, file-size, and tree
+identities are recorded in the supplemental `mino.team-catalog-manifest/v1`
+document without adding executable payloads or remote scripts.
 
 ### Agent API
 

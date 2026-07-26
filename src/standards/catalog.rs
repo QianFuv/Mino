@@ -1,5 +1,9 @@
 //! Embedded inert standards package parsing, validation, and digesting.
 
+mod build;
+mod source;
+mod validate;
+
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
@@ -7,6 +11,16 @@ use serde::{Deserialize, Serialize};
 use crate::project::Language;
 use crate::store::sha256_digest;
 use crate::{ErrorCategory, MinoError};
+
+pub use build::{
+    build_team_catalog, build_team_catalog_with_policy, initialize_team_catalog,
+    validate_team_catalog, validate_team_catalog_with_policy,
+};
+pub use source::{
+    TEAM_CATALOG_MANIFEST_KIND, TEAM_CATALOG_SOURCE_VERSION, TeamCatalogBuildReport,
+    TeamCatalogFileReport, TeamCatalogInitReport, TeamCatalogPackageReport,
+    TeamCatalogValidationReport,
+};
 
 /// Requirement level assigned to an inert standards rule.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -56,13 +70,13 @@ struct PackageManifest {
     languages: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RulesDocument {
     rules: Vec<StandardRule>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChecksDocument {
     checks: Vec<CheckTemplate>,
@@ -209,7 +223,7 @@ pub(crate) fn parse_package_documents(
             "Standards package {expected_id} has an invalid ID, display name, or version"
         )));
     }
-    let languages = manifest
+    let mut languages = manifest
         .languages
         .iter()
         .map(|language| parse_language(language))
@@ -219,6 +233,7 @@ pub(crate) fn parse_package_documents(
             "Standards package {expected_id} contains duplicate languages"
         )));
     }
+    languages.sort();
     rules.rules.sort_by(|left, right| left.id.cmp(&right.id));
     checks.checks.sort_by(|left, right| left.id.cmp(&right.id));
     if rules.rules.is_empty()
@@ -321,6 +336,62 @@ pub(crate) fn validate_package_set(packages: &[StandardsPackage]) -> Result<(), 
 
 fn normalize_lf(source: &str) -> String {
     source.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+pub(super) struct CanonicalPackageDocuments {
+    pub(super) manifest: Vec<u8>,
+    pub(super) rules: Vec<u8>,
+    pub(super) checks: Vec<u8>,
+}
+
+pub(super) fn canonical_package_documents(
+    package: &StandardsPackage,
+) -> Result<CanonicalPackageDocuments, MinoError> {
+    let manifest = PackageManifest {
+        package_id: package.package_id.clone(),
+        display_name: package.display_name.clone(),
+        version: package.version.clone(),
+        languages: package
+            .languages
+            .iter()
+            .copied()
+            .map(language_id)
+            .map(str::to_owned)
+            .collect(),
+    };
+    let rules = RulesDocument {
+        rules: package.rules.clone(),
+    };
+    let checks = ChecksDocument {
+        checks: package.checks.clone(),
+    };
+    Ok(CanonicalPackageDocuments {
+        manifest: serialize_document(&manifest)?,
+        rules: serialize_document(&rules)?,
+        checks: serialize_document(&checks)?,
+    })
+}
+
+fn serialize_document<T: Serialize>(document: &T) -> Result<Vec<u8>, MinoError> {
+    let mut rendered = toml::to_string_pretty(document).map_err(|error| {
+        MinoError::new(
+            ErrorCategory::EnvironmentUnavailable,
+            format!("Failed to serialize a canonical standards document: {error}"),
+        )
+    })?;
+    rendered = normalize_lf(&rendered);
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    Ok(rendered.into_bytes())
+}
+
+const fn language_id(language: Language) -> &'static str {
+    match language {
+        Language::Rust => "rust",
+        Language::TypeScriptJavaScript => "typescript-javascript",
+        Language::Python => "python",
+    }
 }
 
 fn catalog_error(message: impl Into<String>) -> MinoError {

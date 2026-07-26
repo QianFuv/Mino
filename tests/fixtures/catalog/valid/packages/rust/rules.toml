@@ -1,0 +1,9 @@
+[[rules]]
+id = "example.com.rust.format"
+level = "required"
+text = "Format every changed Rust target."
+
+[[rules]]
+id = "example.com.rust.lint"
+level = "required"
+text = "Treat Clippy warnings as errors."

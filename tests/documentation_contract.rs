@@ -80,7 +80,19 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     ),
     (
         &["standards", "--help"],
-        &["detect", "recommend", "apply", "sync", "conflict", "help"],
+        &[
+            "detect",
+            "recommend",
+            "apply",
+            "sync",
+            "catalog",
+            "conflict",
+            "help",
+        ],
+    ),
+    (
+        &["standards", "catalog", "--help"],
+        &["init", "validate", "build", "help"],
     ),
     (
         &["standards", "conflict", "--help"],
@@ -190,6 +202,9 @@ const LEAF_COMMANDS: &[&str] = &[
     "review resolve",
     "review rework",
     "standards apply",
+    "standards catalog build",
+    "standards catalog init",
+    "standards catalog validate",
     "standards conflict list",
     "standards conflict refresh",
     "standards conflict resolve",

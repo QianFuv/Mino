@@ -1,0 +1,3 @@
+source_version = 1
+namespace = "example.com"
+base_url = "https://standards.example.test/mino"

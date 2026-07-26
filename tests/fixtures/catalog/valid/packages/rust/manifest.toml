@@ -1,0 +1,4 @@
+package_id = "example.com.rust"
+display_name = "Example Rust"
+version = "2.1.0-beta.1"
+languages = ["rust"]

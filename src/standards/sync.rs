@@ -775,7 +775,7 @@ fn digest_segment(digest: &str) -> Result<&str, MinoError> {
     }
 }
 
-fn validate_url(url: &str, source_policy: SourcePolicy) -> Result<(), MinoError> {
+pub(super) fn validate_url(url: &str, source_policy: SourcePolicy) -> Result<(), MinoError> {
     if let Some(remainder) = url.strip_prefix("https://")
         && !remainder.is_empty()
         && !url.chars().any(char::is_whitespace)
@@ -834,8 +834,9 @@ fn is_safe_package_id(value: &str) -> bool {
             .bytes()
             .next_back()
             .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && !value.contains("..")
         && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
         })
 }
 
