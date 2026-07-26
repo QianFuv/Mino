@@ -890,6 +890,19 @@ fn establish_git_baseline(project: &Path) {
             .expect("git init should run"),
         "git init",
     );
+    for (key, value) in [
+        ("user.name", "Mino E2E"),
+        ("user.email", "mino-e2e@example.invalid"),
+    ] {
+        assert_successful_process(
+            &Command::new("git")
+                .args(["config", key, value])
+                .current_dir(project)
+                .output()
+                .expect("git config should run"),
+            "git config",
+        );
+    }
     assert_successful_process(
         &Command::new("git")
             .args([
@@ -908,16 +921,7 @@ fn establish_git_baseline(project: &Path) {
     );
     assert_successful_process(
         &Command::new("git")
-            .args([
-                "-c",
-                "user.name=Mino E2E",
-                "-c",
-                "user.email=mino-e2e@example.invalid",
-                "commit",
-                "--quiet",
-                "-m",
-                "chore: establish e2e baseline",
-            ])
+            .args(["commit", "--quiet", "-m", "chore: establish e2e baseline"])
             .current_dir(project)
             .output()
             .expect("git commit should run"),
