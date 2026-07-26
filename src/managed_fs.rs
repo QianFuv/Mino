@@ -448,21 +448,50 @@ impl ProjectFs {
     }
 
     pub(crate) fn sync_directory(&self, path: Option<&ManagedPath>) -> Result<(), ManagedFsError> {
-        let directory = match path {
-            Some(path) => self.open_directory(path)?,
-            None => self
-                .directory
-                .try_clone()
-                .map_err(|error| io_error("clone project root", &self.root, &error))?,
-        };
+        let display = path.map_or_else(|| self.root.clone(), |path| self.display_path(path));
         #[cfg(unix)]
-        let result = sync_open_directory(directory);
+        {
+            if let Some(path) = path {
+                self.require_directory(path)?;
+            }
+            let relative = path.map_or_else(|| Path::new("."), ManagedPath::as_path);
+            let directory = self
+                .directory
+                .open(relative)
+                .map(cap_std::fs::File::into_std)
+                .map_err(|error| {
+                    io_error(
+                        "open managed directory for synchronization",
+                        &display,
+                        &error,
+                    )
+                })?;
+            let metadata = directory.metadata().map_err(|error| {
+                io_error(
+                    "inspect managed directory for synchronization",
+                    &display,
+                    &error,
+                )
+            })?;
+            if !metadata.is_dir() {
+                return Err(unsafe_component(&display, "non-directory"));
+            }
+            directory
+                .sync_all()
+                .map_err(|error| io_error("synchronize managed directory", &display, &error))
+        }
         #[cfg(not(unix))]
-        let result = sync_open_directory(&directory);
-        result.map_err(|error| {
-            let display = path.map_or_else(|| self.root.clone(), |path| self.display_path(path));
-            io_error("synchronize managed directory", &display, &error)
-        })
+        {
+            let directory = match path {
+                Some(path) => self.open_directory(path)?,
+                None => self
+                    .directory
+                    .try_clone()
+                    .map_err(|error| io_error("clone project root", &self.root, &error))?,
+            };
+            sync_open_directory(&directory)
+                .map_err(|error| io_error("synchronize managed directory", &display, &error))
+        }
     }
 
     pub(crate) fn sync_parent(&self, path: &ManagedPath) -> Result<(), ManagedFsError> {
@@ -619,12 +648,69 @@ fn io_error(action: &str, path: &Path, error: &std::io::Error) -> ManagedFsError
     )
 }
 
-#[cfg(unix)]
-fn sync_open_directory(directory: Dir) -> std::io::Result<()> {
-    directory.into_std_file().sync_all()
-}
-
 #[cfg(not(unix))]
 fn sync_open_directory(directory: &Dir) -> std::io::Result<()> {
     directory.dir_metadata().map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{ManagedPath, ProjectFs};
+
+    static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+    struct TestRoot {
+        path: PathBuf,
+    }
+
+    impl TestRoot {
+        fn new() -> Self {
+            let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "mino-managed-fs-sync-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).expect("temporary project root should be created");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let temporary_root = std::env::temp_dir();
+            if self.path.starts_with(&temporary_root)
+                && self
+                    .path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("mino-managed-fs-sync-"))
+            {
+                let _ = fs::remove_dir_all(&self.path);
+            }
+        }
+    }
+
+    #[test]
+    fn project_and_managed_directories_can_be_synchronized() {
+        let root = TestRoot::new();
+        let filesystem = ProjectFs::open(root.path()).expect("project filesystem should open");
+        let managed = ManagedPath::new(".mino").expect("managed path should be valid");
+        filesystem
+            .ensure_directory(&managed)
+            .expect("managed directory should be created");
+
+        filesystem
+            .sync_directory(None)
+            .expect("project root should synchronize");
+        filesystem
+            .sync_directory(Some(&managed))
+            .expect("managed directory should synchronize");
+    }
 }
