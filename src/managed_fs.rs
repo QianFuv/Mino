@@ -698,6 +698,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "requires host filesystem support")]
     fn project_and_managed_directories_can_be_synchronized() {
         let root = TestRoot::new();
         let filesystem = ProjectFs::open(root.path()).expect("project filesystem should open");
