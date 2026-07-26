@@ -142,6 +142,8 @@ artifact path 必须留在项目内。修正证据会创建带 `supersedes` 的�
 | `mino exec resume` | 计划 | 恢复到记录的 Ready 或 In Progress 状态。 |
 | `mino exec finish` | 计划 | 在所有任务、必需 commit gate 和全局检查完成后转入 Review。 |
 
+相同 request ID 的 `exec check run` 可以安全精确重试。已有 terminal result 时返回 replay；原调用仍持有 run owner lock 时返回 exit 3 `revision_conflict`，消息标识 AlreadyRunning，并且不新增 evidence 或 plan revision；只有 owner lock 已释放且 lease 没有 result 时才恢复一次 `Interrupted` 终态。
+
 monitor 参数范围如下：
 
 - `--max-attempts 1..=100`

@@ -4,7 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use mino::ErrorCategory;
 use mino::application::execution::{CheckExecutionDisposition, ExecutionService};
@@ -85,12 +86,31 @@ fn compile_helper(root: &Path) -> PathBuf {
     fs::write(
         &source,
         r#"use std::env;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
 
 fn main() {
     let mut arguments = env::args().skip(1);
     let mode = arguments.next().expect("mode is required");
+    if mode == "block-mark" {
+        let marker = PathBuf::from(arguments.next().expect("marker is required"));
+        let mut file = OpenOptions::new().create(true).append(true).open(&marker).expect("marker should open");
+        file.write_all(b"executed\n").expect("marker should write");
+        fs::write(marker.with_extension("ready"), b"ready").expect("ready marker should write");
+        let release = marker.with_extension("release");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !release.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        if !release.exists() {
+            std::process::exit(11);
+        }
+        println!("planned success");
+        return;
+    }
     if mode.contains("mark") {
         let marker = arguments.next().expect("marker is required");
         let mut file = OpenOptions::new().create(true).append(true).open(marker).expect("marker should open");
@@ -474,6 +494,101 @@ fn successful_check_is_evidenced_once_and_replayed_without_process_execution() {
 }
 
 #[test]
+fn concurrent_exact_retry_keeps_the_running_plan_and_persists_one_passed_result() {
+    let marker = std::env::temp_dir().join(format!(
+        "mino-execution-concurrent-{}-{}",
+        std::process::id(),
+        NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+    ));
+    let ready = marker.with_extension("ready");
+    let release = marker.with_extension("release");
+    let project = TestProject::new("concurrent", "block-mark", Some(&marker));
+    let limits = CheckRunLimits::new(Duration::from_secs(10), 1024 * 1024)
+        .expect("concurrent limits should be valid");
+    let service = ExecutionService::discover_with_limits(project.path(), limits)
+        .expect("service should discover");
+    let started = service
+        .start_task(
+            mutation(
+                project.base_revision,
+                60,
+                start_command(project.base_revision, 60, "T1"),
+                42,
+            ),
+            task_id("T1"),
+        )
+        .expect("task should start");
+    let request = mutation(
+        started.revision,
+        61,
+        check_command(started.revision, 61),
+        43,
+    );
+    let winner_service = service.clone();
+    let winner_request = request.clone();
+    let winner =
+        thread::spawn(move || winner_service.run_check(&winner_request, &check_id("TASK-CHECK")));
+    if !wait_for_path(&ready, Duration::from_secs(3)) {
+        fs::write(&release, b"release").expect("blocked check should be released");
+        let _ = winner.join();
+        panic!("blocking check did not signal readiness");
+    }
+
+    let retry = service.run_check(&request, &check_id("TASK-CHECK"));
+    assert_live_retry_state(&project, &request, started.revision + 1);
+
+    fs::write(&release, b"release").expect("blocked check should be released");
+    let completed = winner
+        .join()
+        .expect("winner thread should join")
+        .expect("winner should complete");
+    let retry = retry.expect_err("live retry should report a revision conflict");
+    assert_eq!(retry.category(), ErrorCategory::RevisionConflict);
+    assert!(retry.message().contains("already running"));
+    assert!(completed.is_success());
+    assert_eq!(completed.disposition(), CheckExecutionDisposition::Executed);
+    assert_eq!(completed.evidence().id().as_str(), "E0001");
+    let final_plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("completed plan should load");
+    assert_eq!(final_plan.revision(), started.revision + 2);
+    assert_eq!(
+        final_plan
+            .task(&task_id("T1"))
+            .expect("task should exist")
+            .verification_checks()[0]
+            .status(),
+        CheckStatus::Passed
+    );
+    assert_eq!(
+        fs::read_to_string(&marker).expect("execution marker should exist"),
+        "executed\n"
+    );
+    assert_eq!(
+        EvidenceStore::new(project.path())
+            .list(&plan_id())
+            .expect("evidence should list")
+            .len(),
+        1
+    );
+    let replay = service
+        .run_check(&request, &check_id("TASK-CHECK"))
+        .expect("completed check should replay");
+    assert_eq!(replay.disposition(), CheckExecutionDisposition::Replayed);
+    assert_eq!(replay.evidence().id().as_str(), "E0001");
+    assert_eq!(
+        EvidenceStore::new(project.path())
+            .list(&plan_id())
+            .expect("evidence should list")
+            .len(),
+        1
+    );
+    for path in [&marker, &ready, &release] {
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[test]
 fn failed_cli_check_returns_exit_six_after_persisting_terminal_evidence() {
     let marker = std::env::temp_dir().join(format!(
         "mino-execution-failure-marker-{}-{}",
@@ -684,6 +799,54 @@ fn run_mino(project: &TestProject, arguments: &[&str]) -> Output {
         .stdin(Stdio::null())
         .output()
         .expect("Mino binary should run")
+}
+
+fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    path.exists()
+}
+
+fn assert_live_retry_state(
+    project: &TestProject,
+    request: &PlanMutationRequest,
+    running_revision: u64,
+) {
+    let running_plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("running plan should load");
+    assert_eq!(running_plan.revision(), running_revision);
+    assert_eq!(
+        running_plan
+            .task(&task_id("T1"))
+            .expect("task should exist")
+            .verification_checks()[0]
+            .status(),
+        CheckStatus::Running
+    );
+    assert!(
+        EvidenceStore::new(project.path())
+            .list(&plan_id())
+            .expect("evidence should list")
+            .is_empty()
+    );
+    let journal_directory = PathBuf::from(".mino")
+        .join("plans")
+        .join(plan_id().as_str())
+        .join("runs");
+    let journal =
+        CheckRunJournal::new(project.path(), &journal_directory).expect("run journal should open");
+    assert!(
+        journal
+            .result(&phase_request_id(&request.request_id, "run"))
+            .expect("run journal should inspect")
+            .is_none()
+    );
 }
 
 #[test]

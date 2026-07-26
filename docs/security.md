@@ -71,7 +71,9 @@ Evidence 的 `records`/`blobs`、检查的 `runs`、monitor summary、active bin
 
 默认限制为五分钟和 1 MiB 合并 stdout/stderr；领域构造器允许的绝对上限为一小时和 16 MiB。超时、输出超限或 capture failure 时，Mino 使用 process group 或 Windows job object 终止 descendant processes。
 
-spawn failure、unexpected exit、timeout、output limit、capture failure 与 interruption 都会形成持久终态。exit 6 不是“没有证据”：失败 evidence 会保留供审计，只是不能证明检查通过。
+每个 run request 先以项目内 `owner.lock` 取得跨进程唯一所有权，锁从 lease 发布前持续到 terminal result 及其父目录完成同步。相同 request ID 的实时重试若发现锁仍被持有，会得到可重试的 AlreadyRunning/revision conflict，且不会写 `Interrupted`、evidence 或计划终态。只有取得已释放的锁后仍看到 lease 且没有 result，才能把旧运行恢复为 `Interrupted`；该结果的后续重试只 replay。
+
+spawn failure、unexpected exit、timeout、output limit、capture failure 与经 owner-lock 证明的 interruption 都会形成持久终态。exit 6 不是“没有证据”：失败 evidence 会保留供审计，只是不能证明检查通过。
 
 ### 有限监控
 

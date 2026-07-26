@@ -16,6 +16,8 @@ pub use redaction::{RedactionRule, Redactor};
 pub enum RunnerErrorKind {
     /// The requested command, path, policy, or limit is invalid.
     InvalidRequest,
+    /// Another live invocation owns the same exact check request.
+    AlreadyRunning,
     /// A filesystem or process operation failed.
     Io,
     /// Persisted JSON could not be encoded or decoded.

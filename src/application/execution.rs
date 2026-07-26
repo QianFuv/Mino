@@ -530,7 +530,9 @@ fn map_domain_error(error: &crate::domain::DomainError) -> MinoError {
 fn map_runner_error(error: &RunnerError) -> MinoError {
     let category = match error.kind() {
         RunnerErrorKind::InvalidRequest => ErrorCategory::IncompleteOrValidation,
-        RunnerErrorKind::JournalConflict => ErrorCategory::RevisionConflict,
+        RunnerErrorKind::AlreadyRunning | RunnerErrorKind::JournalConflict => {
+            ErrorCategory::RevisionConflict
+        }
         RunnerErrorKind::CorruptJournal => ErrorCategory::DriftDetected,
         RunnerErrorKind::Io | RunnerErrorKind::Serialization | RunnerErrorKind::CaptureFailed => {
             ErrorCategory::EnvironmentUnavailable

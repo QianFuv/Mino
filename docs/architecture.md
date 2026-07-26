@@ -82,7 +82,7 @@ Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超
 │       ├── snapshots/<revision>.json    不可变 revision 快照
 │       ├── store.lock                   有界计划锁
 │       ├── transaction/                 尚待恢复的预备事务
-│       ├── runs/<request-id>/            检查 lease 与结果
+│       ├── runs/<request-id>/            owner.lock、检查 lease 与结果
 │       ├── monitors/<request-id>/summary.json
 │       └── evidence/
 │           ├── index.jsonl              不可变证据索引
@@ -179,7 +179,7 @@ Markdown 投影包含 plan ID、revision、状态哈希和 renderer version。�
 2. 以精确 argv、有限环境、超时和输出上限启动进程，保存运行结果并创建不可变证据。
 3. 把证据 ID 和终态检查状态附加到新的计划 revision。
 
-中断的 lease 会被恢复为不可变的 interrupted 结果，而不是再次启动一个无法判定是否重复的进程。失败证据会保留用于审计，但不能证明验收通过；被 supersede 或被修订标记为 stale 的证据也不能满足当前门槛。
+每个派生 run request ID 使用跨进程 `owner.lock`。owner 从发布 lease 前一直持有锁到 terminal result 完成文件与父目录同步；实时精确重试看到锁被占用时立即返回可重试的 AlreadyRunning，不写 result、evidence 或 plan 终态。只有调用方成功取得空闲 owner lock，并在锁内再次确认 lease 存在而 result 缺失，才能证明旧 owner 已退出并恢复不可变的 interrupted 结果。失败证据会保留用于审计，但不能证明验收通过；被 supersede 或被修订标记为 stale 的证据也不能满足当前门槛。
 
 `exec check monitor` 复用同一检查流程，在前台执行有限重试。最大次数、间隔和总 deadline 一起决定每次进程预算；取消文件、deadline、通过或尝试耗尽都会产生 request-hash-bound 的 `mino.monitor/v1` 终态摘要。精确重试先读取摘要，不再睡眠或启动进程。
 

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -210,6 +210,26 @@ fn runner_fixture_process() {
         "replay" => {
             write_marker();
             println!("executed once");
+        }
+        "blocking" => {
+            let ready = PathBuf::from(
+                std::env::var_os("MINO_RUNNER_READY")
+                    .expect("blocking fixture ready path should be supplied"),
+            );
+            let release = PathBuf::from(
+                std::env::var_os("MINO_RUNNER_RELEASE")
+                    .expect("blocking fixture release path should be supplied"),
+            );
+            fs::write(&ready, b"ready").expect("blocking fixture should signal readiness");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !release.exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if !release.exists() {
+                std::process::exit(11);
+            }
+            write_marker();
+            println!("released once");
         }
         "child" => {
             let mut grandchild =
@@ -430,6 +450,92 @@ fn request_retries_replay_and_incomplete_leases_close_once() {
 }
 
 #[test]
+fn concurrent_exact_retry_reports_already_running_without_interrupting_the_owner() {
+    let project = TestProject::new("concurrent");
+    let marker = project.path().join("execution-count");
+    let ready = project.path().join("process-ready");
+    let release = project.path().join("process-release");
+    let journal = CheckRunJournal::new(project.path(), Path::new(".mino/runs"))
+        .expect("journal should be valid");
+    let runner = ProcessRunner::default();
+    let redactor = redactor();
+    let environment = fixture_environment("blocking", Some(&marker))
+        .with_variable("MINO_RUNNER_READY", ready.to_string_lossy())
+        .expect("ready path should be valid")
+        .with_variable("MINO_RUNNER_RELEASE", release.to_string_lossy())
+        .expect("release path should be valid");
+    let run_lease = lease(
+        32,
+        &fixture_check(),
+        limits(10_000, 8_192),
+        &environment,
+        &redactor,
+    );
+    let winner_root = project.path().to_path_buf();
+    let winner_journal = journal.clone();
+    let winner_lease = run_lease.clone();
+    let winner_environment = environment.clone();
+    let winner_redactor = redactor.clone();
+    let winner = thread::spawn(move || {
+        runner.run_journaled(
+            &winner_root,
+            &winner_journal,
+            winner_lease,
+            &winner_environment,
+            &winner_redactor,
+        )
+    });
+
+    if !wait_for_path(&ready, Duration::from_secs(3)) {
+        fs::write(&release, b"release").expect("blocked fixture should be released");
+        let _ = winner.join();
+        panic!("blocking fixture did not signal readiness");
+    }
+    let retry = runner
+        .run_journaled(
+            project.path(),
+            &journal,
+            run_lease.clone(),
+            &environment,
+            &redactor,
+        )
+        .expect_err("live exact retry must not recover interruption");
+    assert_eq!(retry.kind(), RunnerErrorKind::AlreadyRunning);
+    assert!(journal.result(run_lease.request_id()).unwrap().is_none());
+    let request_directory = project
+        .path()
+        .join(".mino/runs")
+        .join(run_lease.request_id().as_str());
+    assert!(request_directory.join("owner.lock").is_file());
+    assert!(request_directory.join("lease.json").is_file());
+    assert!(!request_directory.join("result.json").exists());
+
+    fs::write(&release, b"release").expect("blocked fixture should be released");
+    let completed = winner
+        .join()
+        .expect("winner thread should join")
+        .expect("winner should persist its result");
+    assert_eq!(completed.disposition(), RunDisposition::Executed);
+    assert_eq!(completed.result().outcome(), CheckRunOutcome::Passed);
+    assert_eq!(
+        fs::read_to_string(&marker).expect("execution marker should exist"),
+        "x"
+    );
+    assert_eq!(
+        journal
+            .result(run_lease.request_id())
+            .expect("terminal result should load")
+            .expect("terminal result should exist")
+            .outcome(),
+        CheckRunOutcome::Passed
+    );
+    let replay = runner
+        .run_journaled(project.path(), &journal, run_lease, &environment, &redactor)
+        .expect("completed result should replay");
+    assert_eq!(replay.disposition(), RunDisposition::Replayed);
+}
+
+#[test]
 fn runner_rejects_shells_traversal_and_conflicting_retries() {
     let project = TestProject::new("policy");
     let runner = ProcessRunner::default();
@@ -525,4 +631,15 @@ fn write_marker() {
         .open(marker)
         .and_then(|mut file| file.write_all(b"x"))
         .expect("marker should be written");
+}
+
+fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    path.exists()
 }

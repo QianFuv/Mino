@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use fs4::{FileExt, TryLockError};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -311,6 +312,43 @@ impl CheckRunJournal {
             .join("result.json")
             .expect("static result file name should form a managed path")
     }
+
+    fn owner_path(&self, request_id: &RequestId) -> ManagedPath {
+        self.request_directory(request_id)
+            .join("owner.lock")
+            .expect("static owner lock name should form a managed path")
+    }
+
+    fn try_acquire_owner(
+        &self,
+        request_id: &RequestId,
+    ) -> Result<Option<CheckRunOwner>, RunnerError> {
+        let path = self.owner_path(request_id);
+        let file = self
+            .filesystem
+            .open_lock_file(&path)
+            .map_err(managed_error)?;
+        match FileExt::try_lock(&file) {
+            Ok(()) => Ok(Some(CheckRunOwner { file })),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(error)) => Err(io_error(
+                "lock check-run owner",
+                &self.filesystem.display_path(&path),
+                &error,
+            )),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CheckRunOwner {
+    file: std::fs::File,
+}
+
+impl Drop for CheckRunOwner {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 /// Direct process runner with finite polling, time, and output bounds.
@@ -373,6 +411,14 @@ impl ProcessRunner {
         redactor: &Redactor,
     ) -> Result<JournaledRun, RunnerError> {
         let working_directory = validate_invocation(project_root, &lease, environment, redactor)?;
+        let _owner = journal
+            .try_acquire_owner(lease.request_id())?
+            .ok_or_else(|| {
+                RunnerError::new(
+                    RunnerErrorKind::AlreadyRunning,
+                    format!("Check request {} is already running", lease.request_id()),
+                )
+            })?;
         let is_new = journal.begin(&lease)?;
         if let Some(result) = journal.result(lease.request_id())? {
             if result.lease() != &lease {
