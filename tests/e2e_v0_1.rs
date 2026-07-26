@@ -153,6 +153,16 @@ fn installed_binary_completes_the_v0_1_lifecycle_without_source_leakage() {
     assert_eq!(git_status(source_root), source_status);
 }
 
+#[test]
+fn catalog_package_digest_normalizes_line_endings() {
+    let lf = package_digest("manifest\n", "rules\n", "checks\n");
+    let crlf = package_digest("manifest\r\n", "rules\r\n", "checks\r\n");
+    let cr = package_digest("manifest\r", "rules\r", "checks\r");
+
+    assert_eq!(lf, crlf);
+    assert_eq!(lf, cr);
+}
+
 fn install_binary(workspace: &TestWorkspace, source_root: &Path) -> PathBuf {
     if let Some(configured) = env::var_os("MINO_E2E_BINARY") {
         let binary = PathBuf::from(configured);
@@ -971,9 +981,10 @@ fn package_digest(manifest: &str, rules: &str, checks: &str) -> String {
         ("rules.toml", rules),
         ("checks.toml", checks),
     ] {
+        let normalized_source = source.replace("\r\n", "\n").replace('\r', "\n");
         input.extend_from_slice(name.as_bytes());
         input.push(0);
-        input.extend_from_slice(source.as_bytes());
+        input.extend_from_slice(normalized_source.as_bytes());
         input.push(0);
     }
     sha256_digest(&input)
