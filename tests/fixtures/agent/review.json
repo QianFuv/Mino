@@ -10,7 +10,7 @@
     "status": "Review",
     "active_task": null
   },
-  "allowed_actions": ["plan.show"],
+  "allowed_actions": ["plan.show", "review.record"],
   "blocked_actions": [
     {
       "action": "review.accept",

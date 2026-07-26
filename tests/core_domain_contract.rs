@@ -2,8 +2,8 @@
 
 use mino::domain::{
     AcceptanceCriterion, CheckId, CommitGate, CriterionId, DomainError, DomainErrorKind, Event,
-    Evidence, EvidenceId, GitFlowConsent, Plan, PlanId, PlanStatus, RequestId, Task, TaskId,
-    TaskStatus, Timestamp, VerificationCheck,
+    Evidence, EvidenceId, GitFlowConsent, Plan, PlanId, PlanStatus, RequestId,
+    ReviewClassification, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
 };
 use schemars::schema_for;
 use serde_json::{Value, json};
@@ -369,8 +369,12 @@ fn plan_lifecycle_requires_approval_and_preserves_legal_order() {
     plan.finish_execution(timestamp(13))
         .expect("completed plan should enter review");
     assert_eq!(plan.status(), PlanStatus::Review);
-    plan.accept_review(timestamp(14))
-        .expect("reviewed plan should complete");
+    plan.accept_review(
+        "reviewer".to_owned(),
+        "chat:acceptance".to_owned(),
+        timestamp(14),
+    )
+    .expect("reviewed plan should complete");
     assert_eq!(plan.status(), PlanStatus::Done);
     plan.validate_invariants()
         .expect("completed plan should satisfy invariants");
@@ -455,7 +459,16 @@ fn blocked_execution_resumes_and_review_rework_reopens_a_task() {
     satisfy_global(&mut plan, 4, 13);
     plan.finish_execution(timestamp(14))
         .expect("plan should enter review");
-    plan.begin_rework(&first_id, timestamp(15))
+    let review_id = plan
+        .record_review(
+            "reviewer".to_owned(),
+            "Re-run acceptance evidence".to_owned(),
+            ReviewClassification::AcceptanceDefect,
+            Some(first_id.clone()),
+            timestamp(15),
+        )
+        .expect("acceptance defect should be recorded");
+    plan.begin_review_rework(&review_id, None, timestamp(16))
         .expect("review should reopen the task");
     assert_eq!(plan.status(), PlanStatus::InProgress);
     assert_eq!(
@@ -463,14 +476,14 @@ fn blocked_execution_resumes_and_review_rework_reopens_a_task() {
         Some(TaskStatus::Ready)
     );
 
-    plan.start_task(&first_id, timestamp(16))
+    plan.start_task(&first_id, timestamp(17))
         .expect("rework task should start");
     let reused_evidence_error = plan
         .record_task_criterion_pass(
             &first_id,
             &criterion_id("T1-A1"),
             evidence_id("E0001"),
-            timestamp(17),
+            timestamp(18),
         )
         .expect_err("rework must not reuse prior evidence");
     assert_eq!(
@@ -478,24 +491,30 @@ fn blocked_execution_resumes_and_review_rework_reopens_a_task() {
         DomainErrorKind::InvariantViolation
     );
     let stale_evidence_error = plan
-        .complete_task(&first_id, timestamp(17))
+        .complete_task(&first_id, timestamp(18))
         .expect_err("rework should require fresh passing state");
     assert_eq!(
         stale_evidence_error.kind(),
         DomainErrorKind::InvariantViolation
     );
-    satisfy_task(&mut plan, &first_id, 5, 18);
-    plan.complete_task(&first_id, timestamp(20))
+    satisfy_task(&mut plan, &first_id, 5, 19);
+    plan.complete_task(&first_id, timestamp(21))
         .expect("rework task should complete");
     let global_error = plan
-        .finish_execution(timestamp(21))
+        .finish_execution(timestamp(22))
         .expect_err("rework should require global verification again");
     assert_eq!(global_error.kind(), DomainErrorKind::InvariantViolation);
-    satisfy_global(&mut plan, 7, 22);
-    plan.finish_execution(timestamp(23))
+    satisfy_global(&mut plan, 7, 23);
+    plan.finish_execution(timestamp(24))
         .expect("reworked plan should return to review");
-    plan.accept_review(timestamp(23))
-        .expect("reworked plan should be accepted");
+    plan.resolve_review(&review_id, timestamp(25))
+        .expect("completed rework should resolve its review item");
+    plan.accept_review(
+        "reviewer".to_owned(),
+        "chat:rework-accepted".to_owned(),
+        timestamp(26),
+    )
+    .expect("reworked plan should be accepted");
     plan.validate_invariants()
         .expect("reworked plan should satisfy invariants");
 }
@@ -566,8 +585,12 @@ fn transition_matrix_rejects_commands_outside_their_legal_states() {
     assert_invalid_transition(draft.start_task(&first_id, timestamp(1)));
     assert_invalid_transition(draft.complete_task(&first_id, timestamp(1)));
     assert_invalid_transition(draft.finish_execution(timestamp(1)));
-    assert_invalid_transition(draft.begin_rework(&first_id, timestamp(1)));
-    assert_invalid_transition(draft.accept_review(timestamp(1)));
+    assert_invalid_transition(draft.begin_review_rework("REV-1", None, timestamp(1)));
+    assert_invalid_transition(draft.accept_review(
+        "reviewer".to_owned(),
+        "chat:accept".to_owned(),
+        timestamp(1),
+    ));
     assert_invalid_transition(draft.block("not executable", timestamp(1)));
     assert_invalid_transition(draft.resume(timestamp(1)));
 
@@ -575,15 +598,23 @@ fn transition_matrix_rejects_commands_outside_their_legal_states() {
     assert_invalid_transition(plan.finalize(timestamp(8)));
     assert_invalid_transition(plan.complete_task(&first_id, timestamp(8)));
     assert_invalid_transition(plan.finish_execution(timestamp(8)));
-    assert_invalid_transition(plan.begin_rework(&first_id, timestamp(8)));
-    assert_invalid_transition(plan.accept_review(timestamp(8)));
+    assert_invalid_transition(plan.begin_review_rework("REV-1", None, timestamp(8)));
+    assert_invalid_transition(plan.accept_review(
+        "reviewer".to_owned(),
+        "chat:accept".to_owned(),
+        timestamp(8),
+    ));
     assert_invalid_transition(plan.resume(timestamp(8)));
 
     plan.start_task(&first_id, timestamp(8))
         .expect("first task should start");
     assert_invalid_transition(plan.finalize(timestamp(9)));
-    assert_invalid_transition(plan.begin_rework(&first_id, timestamp(9)));
-    assert_invalid_transition(plan.accept_review(timestamp(9)));
+    assert_invalid_transition(plan.begin_review_rework("REV-1", None, timestamp(9)));
+    assert_invalid_transition(plan.accept_review(
+        "reviewer".to_owned(),
+        "chat:accept".to_owned(),
+        timestamp(9),
+    ));
     assert_invalid_transition(plan.resume(timestamp(9)));
     satisfy_task(&mut plan, &first_id, 1, 10);
     plan.complete_task(&first_id, timestamp(12))
@@ -604,14 +635,22 @@ fn transition_matrix_rejects_commands_outside_their_legal_states() {
     assert_invalid_transition(plan.finish_execution(timestamp(21)));
     assert_invalid_transition(plan.block("too late", timestamp(21)));
     assert_invalid_transition(plan.resume(timestamp(21)));
-    plan.accept_review(timestamp(22))
-        .expect("review should be accepted");
+    plan.accept_review(
+        "reviewer".to_owned(),
+        "chat:accept".to_owned(),
+        timestamp(22),
+    )
+    .expect("review should be accepted");
 
     assert_invalid_transition(plan.start_task(&first_id, timestamp(23)));
     assert_invalid_transition(plan.complete_task(&first_id, timestamp(23)));
     assert_invalid_transition(plan.finish_execution(timestamp(23)));
-    assert_invalid_transition(plan.begin_rework(&first_id, timestamp(23)));
-    assert_invalid_transition(plan.accept_review(timestamp(23)));
+    assert_invalid_transition(plan.begin_review_rework("REV-1", None, timestamp(23)));
+    assert_invalid_transition(plan.accept_review(
+        "reviewer".to_owned(),
+        "chat:accept".to_owned(),
+        timestamp(23),
+    ));
     assert_invalid_transition(plan.block("complete", timestamp(23)));
     assert_invalid_transition(plan.resume(timestamp(23)));
 }

@@ -6,10 +6,11 @@ Markdown projections, ordered execution, immutable evidence, and explicit
 approval boundaries. It is not a template generator and does not contain an
 LLM.
 
-The current package is `mino 0.1.0`. It contains the stable v0.1 lifecycle from
-project initialization through `Review` plus the v0.2 local Git increment:
-worktree-aware plan binding, explicitly approved branch creation, and exact
-plan-scoped task commits. Review acceptance/rework, plan variants, scheduled
+The current package is `mino 0.1.0`. It contains the stable v0.1 lifecycle plus
+the v0.2 local Git and review increments: worktree-aware plan binding,
+explicitly approved branch creation, exact plan-scoped task commits, classified
+review feedback, rework, and final acceptance. Protected plan amendments,
+legacy import, standards-conflict resolution, plan variants, scheduled
 observation, team catalogs, and plugin distribution remain deferred.
 
 ## What v0.1 provides
@@ -33,6 +34,12 @@ active-plan binding, recoverable branch intents, and task commits constrained by
 Approved Git Flow consent, File Map, Commit Scope, exact message, evidence, and
 an empty initial index. It does not expose push, merge, rebase, reset, amend,
 force-push, tags, branch deletion, or worktree creation/deletion.
+
+The v0.2 review increment adds `review record`, `rework`, `resolve`, and
+approval-gated `accept`. Acceptance defects rerun existing task evidence,
+in-scope changes reserve monotonic `R<n>` tasks with full execution and Git
+gates, follow-ups remain outside task order, and material changes block pending
+a protected amendment.
 
 ## Requirements and installation
 

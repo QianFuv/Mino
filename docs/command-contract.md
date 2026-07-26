@@ -1,7 +1,8 @@
 # Mino command and JSON contract
 
 This document is the authoritative implemented CLI inventory. The v0.1 plan
-protocol remains stable while explicitly labeled v0.2 Git surfaces are added.
+protocol remains stable while explicitly labeled v0.2 Git and review surfaces
+are added.
 `mino --help` remains the source for individual argument spelling and value
 choices.
 
@@ -115,7 +116,25 @@ the staged or already-created commit without duplicating it. Mino never invokes
 
 Direct authored changes are legal only in Draft. Ready plans require explicit
 approval before execution. The approval is an auditable declaration, not a
-cryptographic signature. v0.1 stops at Review; there is no `review` command.
+cryptographic signature.
+
+### Review and rework
+
+| Command | Mutation | Contract |
+|---|---:|---|
+| `mino review record` | Yes | Record exactly one Acceptance Defect, In-Scope Rework, Material Change, or Follow-Up item. Task classifications require a completed `--task`; other classifications reject one. |
+| `mino review rework` | Yes | Reopen an Acceptance Defect task for evidence-only execution, or materialize the reserved `R<n>` task from one strict complete YAML definition. |
+| `mino review resolve` | Yes | Resolve an In Progress rework item only after all current task, commit, global-check, evidence, and deviation gates pass. |
+| `mino review accept` | Yes, approval boundary | Require `--approval-ref`, all feedback resolved/deferred, and all live evidence valid; append an Accepted record and transition Review to Done. |
+
+Review item IDs are contiguous `REV-n` values. In-Scope Rework reserves a
+monotonic `R<n>` task ID at record time; an invalid or rejected task definition
+never releases that ID. An R task enters implementation order only when its
+dependencies are Done and its steps, File Map, criteria, checks, and required
+Git commit gate are complete. Acceptance Defect retains the prior committed
+gate, requires fresh evidence, and refuses changed files. Material Change moves
+the plan to a Review-owned Blocked state; `exec resume` cannot bypass it.
+Follow-Up is Deferred and never changes task order or a Git gate.
 
 ### Standards
 
@@ -255,7 +274,6 @@ Git Flow consent is `Pending`, `Approved`, or `Disabled`.
 Active binding states are `missing`, `current`, `foreign_worktree`,
 `stale_branch`, `stale_head`, and `not_repository`.
 
-Only transitions exposed by the command inventory are implemented promises. In
-particular, Review-to-Done and review rework are not current CLI operations.
+Only transitions exposed by the command inventory are implemented promises.
 No command accepts an arbitrary status value: every status change is a named
 semantic transition with state-specific preconditions.

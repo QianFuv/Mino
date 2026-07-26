@@ -179,9 +179,9 @@ Plan \+ state hash -\> UTF-8 Markdown<br>Existing bytes \+ prior rendering -\> g
 
 ## Review Feedback
 
-| ID | Reviewer | Feedback | Classification | Action | Task | Status | Recorded At |
-|---|---|---|---|---|---|---|---|
-| REV-1 | reviewer | Projection contract accepted | Accepted | Record acceptance | T1 | Resolved | 2026-07-25T12:08:00Z |
+| ID | Reviewer | Feedback | Classification | Action | Task | Origin Task | Status | Recorded At | Approval Reference |
+|---|---|---|---|---|---|---|---|---|---|
+| REV-1 | reviewer | Projection contract accepted | Accepted | Record acceptance | T1 | N/A | Resolved | 2026-07-25T12:08:00Z | N/A |
 
 ## Follow-Ups
 

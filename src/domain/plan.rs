@@ -11,8 +11,8 @@ use super::{
     DraftContextInput, DraftCriterionInput, DraftDecisionInput, DraftEdgeCaseInput, DraftFileInput,
     DraftMetadataInput, DraftPlanInput, DraftScopeInput, DraftTaskInput, DraftVerificationInput,
     EvidenceId, ExecutionState, FileMapEntry, GitFlowConsent, PlanDraftSeed, PlanId, PlanStatus,
-    ProtocolVersion, ReviewClassification, ReviewStatus, SchemaVersion, Task, TaskId, TaskStatus,
-    Timestamp, VerificationCheck,
+    ProtocolVersion, ReviewClassification, ReviewItem, ReviewStatus, SchemaVersion, Task, TaskId,
+    TaskStatus, Timestamp, VerificationCheck,
 };
 
 /// Human and repository metadata associated with a plan.
@@ -474,20 +474,6 @@ impl Approval {
     }
 }
 
-/// A classified review request or acceptance record.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewItem {
-    id: String,
-    reviewer: String,
-    feedback: String,
-    classification: ReviewClassification,
-    action: String,
-    linked_task: Option<TaskId>,
-    status: ReviewStatus,
-    recorded_at: Timestamp,
-}
-
 /// Provenance for a plan created from another plan revision.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -808,6 +794,35 @@ impl Plan {
     #[must_use]
     pub fn approvals(&self) -> &[Approval] {
         &self.approvals
+    }
+
+    /// Returns classified review records in monotonic identifier order.
+    #[must_use]
+    pub fn review_items(&self) -> &[ReviewItem] {
+        &self.review_items
+    }
+
+    /// Returns one review record by its stable identifier.
+    #[must_use]
+    pub fn review_item(&self, review_id: &str) -> Option<&ReviewItem> {
+        self.review_items.iter().find(|item| item.id() == review_id)
+    }
+
+    /// Returns deferred follow-up descriptions outside the implementation order.
+    #[must_use]
+    pub fn follow_ups(&self) -> &[String] {
+        &self.follow_ups
+    }
+
+    /// Returns whether a material review request owns the plan's blocked state.
+    #[must_use]
+    pub fn is_blocked_for_material_review(&self) -> bool {
+        self.status == PlanStatus::Blocked
+            && self.resume_status == Some(PlanStatus::Review)
+            && self.review_items.iter().any(|item| {
+                item.classification() == ReviewClassification::MaterialChange
+                    && item.status() == ReviewStatus::Blocked
+            })
     }
 
     /// Returns whether the current revision has a recorded plan approval.
@@ -1996,7 +2011,7 @@ impl Plan {
     /// Returns an error when the plan is not Blocked or lacks a legal resume state.
     pub fn resume(&mut self, updated_at: Timestamp) -> Result<(), DomainError> {
         self.require_status(PlanStatus::Blocked, "resume")?;
-        let resume_status = self.resume_status.take().ok_or_else(|| {
+        let resume_status = self.resume_status.ok_or_else(|| {
             DomainError::new(
                 DomainErrorKind::InvariantViolation,
                 "Blocked plan has no resume status",
@@ -2018,6 +2033,7 @@ impl Plan {
             task.resume()?;
         }
         self.status = resume_status;
+        self.resume_status = None;
         self.blocker = None;
         self.record_revision(next_revision, updated_at);
         Ok(())
@@ -2065,38 +2081,267 @@ impl Plan {
         Ok(())
     }
 
-    /// Reopens a completed task for review rework and returns the plan to In Progress.
+    /// Returns the next monotonic review-item identifier without reserving it.
     ///
     /// # Errors
     ///
-    /// Returns an error unless the plan is in Review and the task is Done.
-    pub fn begin_rework(
+    /// Returns an invariant error when the identifier counter overflows.
+    pub fn next_review_item_id(&self) -> Result<String, DomainError> {
+        let number = self.review_items.len().checked_add(1).ok_or_else(|| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Review item count overflowed",
+            )
+        })?;
+        Ok(format!("REV-{number}"))
+    }
+
+    /// Records one classified review request and its protocol-selected action.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan is in Review and the classification has
+    /// the required completed task target, or no target for a non-task request.
+    pub fn record_review(
         &mut self,
-        task_id: &TaskId,
+        reviewer: String,
+        feedback: String,
+        classification: ReviewClassification,
+        task_id: Option<TaskId>,
+        updated_at: Timestamp,
+    ) -> Result<String, DomainError> {
+        self.require_status(PlanStatus::Review, "record review feedback")?;
+        let review_id = self.next_review_item_id()?;
+        let feedback_for_state = feedback.clone();
+        let item = match classification {
+            ReviewClassification::AcceptanceDefect => {
+                let task_id = self.completed_review_target(task_id, classification)?;
+                ReviewItem::acceptance_defect(
+                    review_id.clone(),
+                    reviewer,
+                    feedback,
+                    task_id,
+                    updated_at.clone(),
+                )?
+            }
+            ReviewClassification::InScopeRework => {
+                let origin_task = self.completed_review_target(task_id, classification)?;
+                let reserved_task = self.next_rework_task_id()?;
+                ReviewItem::in_scope_rework(
+                    review_id.clone(),
+                    reviewer,
+                    feedback,
+                    origin_task,
+                    reserved_task,
+                    updated_at.clone(),
+                )?
+            }
+            ReviewClassification::MaterialChange => {
+                Self::reject_unexpected_review_target(task_id.as_ref(), classification)?;
+                ReviewItem::material_change(
+                    review_id.clone(),
+                    reviewer,
+                    feedback.clone(),
+                    updated_at.clone(),
+                )?
+            }
+            ReviewClassification::FollowUp => {
+                Self::reject_unexpected_review_target(task_id.as_ref(), classification)?;
+                ReviewItem::follow_up(
+                    review_id.clone(),
+                    reviewer,
+                    feedback.clone(),
+                    updated_at.clone(),
+                )?
+            }
+            ReviewClassification::Accepted => {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvalidTransition,
+                    "Use final review acceptance instead of recording Accepted feedback",
+                ));
+            }
+        };
+        let next_revision = self.next_revision()?;
+        if classification == ReviewClassification::FollowUp {
+            self.follow_ups.push(feedback_for_state.clone());
+        }
+        self.review_items.push(item);
+        if classification == ReviewClassification::MaterialChange {
+            self.resume_status = Some(PlanStatus::Review);
+            self.status = PlanStatus::Blocked;
+            self.blocker = Some(feedback_for_state);
+        }
+        self.record_revision(next_revision, updated_at);
+        self.validate_invariants()?;
+        Ok(review_id)
+    }
+
+    /// Starts a recorded acceptance rerun or materializes a reserved rework task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan is in Review, the review item is open,
+    /// and its optional task definition is complete and classification-compatible.
+    pub fn begin_review_rework(
+        &mut self,
+        review_id: &str,
+        task_input: Option<DraftTaskInput>,
         updated_at: Timestamp,
     ) -> Result<(), DomainError> {
         self.require_status(PlanStatus::Review, "begin review rework")?;
+        let item_index = self.review_item_index(review_id)?;
+        if self.review_items[item_index].status() != ReviewStatus::Open {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Review item {review_id} is not Open"),
+            ));
+        }
+        let classification = self.review_items[item_index].classification();
+        let linked_task = self.review_items[item_index].linked_task().cloned();
+        let origin_task = self.review_items[item_index].origin_task().cloned();
         let next_revision = self.next_revision()?;
-        self.task_mut(task_id)?.reopen_for_rework()?;
+        match classification {
+            ReviewClassification::AcceptanceDefect => {
+                if task_input.is_some() {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "Acceptance-defect rework cannot add or replace a task definition",
+                    ));
+                }
+                let task_id = linked_task.ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Review item {review_id} has no task target"),
+                    )
+                })?;
+                self.task_mut(&task_id)?.reopen_for_rework()?;
+            }
+            ReviewClassification::InScopeRework => {
+                let task_id = linked_task.ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Review item {review_id} has no reserved task"),
+                    )
+                })?;
+                let origin_task = origin_task.ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Review item {review_id} has no origin task"),
+                    )
+                })?;
+                let input = task_input.ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "In-scope rework requires one complete task definition",
+                    )
+                })?;
+                self.append_review_task(task_id, &origin_task, input)?;
+            }
+            ReviewClassification::MaterialChange
+            | ReviewClassification::FollowUp
+            | ReviewClassification::Accepted => {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvalidTransition,
+                    format!("Review item {review_id} does not permit rework"),
+                ));
+            }
+        }
+        self.review_items[item_index].begin_rework()?;
         for check in &mut self.global_verification {
             check.reset_for_rework();
         }
         self.status = PlanStatus::InProgress;
         self.record_revision(next_revision, updated_at);
-        Ok(())
+        self.validate_invariants()
     }
 
-    /// Accepts a reviewed plan and moves it to Done.
+    /// Resolves a completed review rework item after execution returns to Review.
     ///
     /// # Errors
     ///
-    /// Returns an error unless the plan is in Review.
-    pub fn accept_review(&mut self, updated_at: Timestamp) -> Result<(), DomainError> {
-        self.require_status(PlanStatus::Review, "accept review")?;
+    /// Returns an error unless the linked task and its required commit are complete.
+    pub fn resolve_review(
+        &mut self,
+        review_id: &str,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.require_status(PlanStatus::Review, "resolve review rework")?;
+        let item_index = self.review_item_index(review_id)?;
+        let task_id = self.review_items[item_index]
+            .linked_task()
+            .cloned()
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvalidTransition,
+                    format!("Review item {review_id} has no rework task"),
+                )
+            })?;
+        let task = self.task(&task_id).ok_or_else(|| {
+            DomainError::new(
+                DomainErrorKind::TaskNotFound,
+                format!("Review task {task_id} does not exist"),
+            )
+        })?;
+        if task.status() != TaskStatus::Done
+            || task
+                .commit_gate()
+                .is_some_and(|gate| gate.is_required() && gate.status() != CommitStatus::Committed)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Review task {task_id} is not complete and committed"),
+            ));
+        }
         let next_revision = self.next_revision()?;
+        self.review_items[item_index].resolve()?;
+        self.record_revision(next_revision, updated_at);
+        self.validate_invariants()
+    }
+
+    /// Records explicit final acceptance and moves a fully resolved Review to Done.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless every feedback, task, commit, and global check gate
+    /// is resolved and the reviewer plus approval reference are non-empty.
+    pub fn accept_review(
+        &mut self,
+        reviewer: String,
+        approval_reference: String,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.require_status(PlanStatus::Review, "accept review")?;
+        if self.review_items.iter().any(|item| {
+            matches!(
+                item.status(),
+                ReviewStatus::Open | ReviewStatus::InProgress | ReviewStatus::Blocked
+            )
+        }) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Every blocking review item must be resolved before acceptance",
+            ));
+        }
+        if self.tasks.iter().any(|task| {
+            task.status() != TaskStatus::Done
+                || task.commit_gate().is_some_and(|gate| {
+                    gate.is_required() && gate.status() != CommitStatus::Committed
+                })
+        }) || !self.global_verification_is_satisfied()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Review acceptance requires complete tasks, commits, and global checks",
+            ));
+        }
+        let review_id = self.next_review_item_id()?;
+        let acceptance =
+            ReviewItem::accepted(review_id, reviewer, approval_reference, updated_at.clone())?;
+        let next_revision = self.next_revision()?;
+        self.review_items.push(acceptance);
         self.status = PlanStatus::Done;
         self.record_revision(next_revision, updated_at);
-        Ok(())
+        self.validate_invariants()
     }
 
     /// Validates structural and lifecycle invariants after deserialization or mutation.
@@ -2110,6 +2355,7 @@ impl Plan {
         self.validate_lifecycle()?;
         self.validate_approval_state()?;
         self.validate_global_verification()?;
+        self.validate_review_state()?;
         self.validate_execution_state()?;
         Ok(())
     }
@@ -2341,9 +2587,19 @@ impl Plan {
                         "A plan blocked from In Progress requires one blocked execution task",
                     ));
                 }
-                Some(
-                    PlanStatus::Draft | PlanStatus::Blocked | PlanStatus::Review | PlanStatus::Done,
-                ) => {
+                Some(PlanStatus::Review)
+                    if self
+                        .tasks
+                        .iter()
+                        .any(|task| task.status() != TaskStatus::Done)
+                        || !self.is_blocked_for_material_review() =>
+                {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "A plan blocked from Review requires completed tasks and material feedback",
+                    ));
+                }
+                Some(PlanStatus::Draft | PlanStatus::Blocked | PlanStatus::Done) => {
                     return Err(DomainError::new(
                         DomainErrorKind::InvariantViolation,
                         "Blocked plan has an invalid resume status",
@@ -2399,7 +2655,10 @@ impl Plan {
             ));
         }
         if self.status == PlanStatus::Blocked
-            && self.resume_status == Some(PlanStatus::InProgress)
+            && matches!(
+                self.resume_status,
+                Some(PlanStatus::InProgress | PlanStatus::Review)
+            )
             && !self
                 .approvals
                 .iter()
@@ -2407,7 +2666,7 @@ impl Plan {
         {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
-                "A plan blocked from In Progress requires a plan approval",
+                "A plan blocked from execution or Review requires a plan approval",
             ));
         }
         Ok(())
@@ -2464,6 +2723,263 @@ impl Plan {
         Ok(())
     }
 
+    fn completed_review_target(
+        &self,
+        task_id: Option<TaskId>,
+        classification: ReviewClassification,
+    ) -> Result<TaskId, DomainError> {
+        let task_id = task_id.ok_or_else(|| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("{classification:?} review feedback requires a task target"),
+            )
+        })?;
+        let task = self.task(&task_id).ok_or_else(|| {
+            DomainError::new(
+                DomainErrorKind::TaskNotFound,
+                format!("Task {task_id} does not exist"),
+            )
+        })?;
+        if task.status() != TaskStatus::Done {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Review target {task_id} must be Done"),
+            ));
+        }
+        Ok(task_id)
+    }
+
+    fn reject_unexpected_review_target(
+        task_id: Option<&TaskId>,
+        classification: ReviewClassification,
+    ) -> Result<(), DomainError> {
+        if task_id.is_some() {
+            Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("{classification:?} review feedback cannot target a task"),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn next_rework_task_id(&self) -> Result<TaskId, DomainError> {
+        let highest_task = self
+            .tasks
+            .iter()
+            .filter_map(|task| rework_task_number(task.id()))
+            .chain(
+                self.review_items
+                    .iter()
+                    .filter_map(|item| item.linked_task().and_then(rework_task_number)),
+            )
+            .max()
+            .unwrap_or(0);
+        let number = highest_task.checked_add(1).ok_or_else(|| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Review rework task counter overflowed",
+            )
+        })?;
+        TaskId::parse(format!("R{number}"))
+    }
+
+    fn review_item_index(&self, review_id: &str) -> Result<usize, DomainError> {
+        self.review_items
+            .iter()
+            .position(|item| item.id() == review_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Review item {review_id} does not exist"),
+                )
+            })
+    }
+
+    fn append_review_task(
+        &mut self,
+        task_id: TaskId,
+        origin_task: &TaskId,
+        input: DraftTaskInput,
+    ) -> Result<(), DomainError> {
+        if self.task(&task_id).is_some() {
+            return Err(DomainError::new(
+                DomainErrorKind::DuplicateTask,
+                format!("Review task {task_id} already exists"),
+            ));
+        }
+        let mut task = Task::from_draft(&task_id, input)?;
+        if !task.dependencies().contains(origin_task) {
+            return Err(DomainError::new(
+                DomainErrorKind::UnmetDependencies,
+                format!("Review task {task_id} must depend on origin task {origin_task}"),
+            ));
+        }
+        for dependency in task.dependencies() {
+            let dependency_task = self.task(dependency).ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::TaskNotFound,
+                    format!("Review task {task_id} depends on missing task {dependency}"),
+                )
+            })?;
+            if dependency_task.status() != TaskStatus::Done {
+                return Err(DomainError::new(
+                    DomainErrorKind::UnmetDependencies,
+                    format!("Review task dependency {dependency} is not Done"),
+                ));
+            }
+        }
+        if self.git_readiness.git_flow_enabled
+            && task.commit_gate().is_none_or(|gate| !gate.is_required())
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Git Flow review task {task_id} requires a commit gate"),
+            ));
+        }
+        if task.verification_checks().iter().any(|check| {
+            self.global_verification
+                .iter()
+                .any(|existing| existing.id() == check.id())
+                || self.tasks.iter().any(|existing_task| {
+                    existing_task
+                        .verification_checks()
+                        .iter()
+                        .any(|existing| existing.id() == check.id())
+                })
+        }) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Review task {task_id} contains a duplicate check identifier"),
+            ));
+        }
+        task.mark_ready()?;
+        self.approach
+            .file_map
+            .extend(task.file_map().iter().cloned());
+        self.task_order.push(task_id);
+        self.tasks.push(task);
+        Ok(())
+    }
+
+    fn validate_review_state(&self) -> Result<(), DomainError> {
+        let mut reserved_tasks = BTreeSet::new();
+        for (index, item) in self.review_items.iter().enumerate() {
+            item.validate()?;
+            let expected_number = index.checked_add(1).ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Review item count overflowed",
+                )
+            })?;
+            if item.id() != format!("REV-{expected_number}") {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Review item identifiers must be monotonic and contiguous",
+                ));
+            }
+            self.validate_review_relationship(item, &mut reserved_tasks)?;
+        }
+        if self.review_items.iter().any(|item| {
+            item.classification() == ReviewClassification::MaterialChange
+                && item.status() == ReviewStatus::Blocked
+        }) && !self.is_blocked_for_material_review()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Blocked material review feedback must own the plan Blocked state",
+            ));
+        }
+        if self.status == PlanStatus::Done
+            && self.review_items.iter().any(|item| {
+                matches!(
+                    item.status(),
+                    ReviewStatus::Open | ReviewStatus::InProgress | ReviewStatus::Blocked
+                )
+            })
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Done plans cannot retain unresolved review feedback",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_review_relationship(
+        &self,
+        item: &ReviewItem,
+        reserved_tasks: &mut BTreeSet<TaskId>,
+    ) -> Result<(), DomainError> {
+        match item.classification() {
+            ReviewClassification::AcceptanceDefect => {
+                let task_id = item.linked_task().ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Review item {} has no task", item.id()),
+                    )
+                })?;
+                let task = self.task(task_id).ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::TaskNotFound,
+                        format!("Review item {} targets missing task {task_id}", item.id()),
+                    )
+                })?;
+                if matches!(item.status(), ReviewStatus::Open | ReviewStatus::Resolved)
+                    && task.status() != TaskStatus::Done
+                {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!(
+                            "Review item {} requires task {task_id} to be Done",
+                            item.id()
+                        ),
+                    ));
+                }
+            }
+            ReviewClassification::InScopeRework => {
+                let task_id = item.linked_task().ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Review item {} has no reserved task", item.id()),
+                    )
+                })?;
+                if !reserved_tasks.insert(task_id.clone()) {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Review task identifier {task_id} is reserved more than once"),
+                    ));
+                }
+                let task_exists = self.task(task_id).is_some();
+                if (item.status() == ReviewStatus::Open && task_exists)
+                    || (matches!(
+                        item.status(),
+                        ReviewStatus::InProgress | ReviewStatus::Resolved
+                    ) && !task_exists)
+                {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Review item {} and task {task_id} disagree", item.id()),
+                    ));
+                }
+            }
+            ReviewClassification::FollowUp => {
+                if !self
+                    .follow_ups
+                    .iter()
+                    .any(|follow_up| follow_up == item.feedback())
+                {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Review follow-up {} is missing", item.id()),
+                    ));
+                }
+            }
+            ReviewClassification::MaterialChange | ReviewClassification::Accepted => {}
+        }
+        Ok(())
+    }
+
     fn global_verification_is_satisfied(&self) -> bool {
         !self.global_verification.is_empty()
             && self.global_verification.iter().all(|check| {
@@ -2516,6 +3032,13 @@ impl Plan {
         self.revision = revision;
         self.metadata.updated_at = updated_at;
     }
+}
+
+fn rework_task_number(task_id: &TaskId) -> Option<u64> {
+    task_id
+        .as_str()
+        .strip_prefix('R')
+        .and_then(|number| number.parse().ok())
 }
 
 fn context_from_input(input: DraftContextInput) -> ContextReference {

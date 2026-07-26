@@ -12,6 +12,10 @@ Plan approval is an auditable user declaration. It is not cryptographic proof,
 identity verification, or permission for arbitrary filesystem, network, Git,
 deployment, or messaging operations.
 
+Final review acceptance is a separate auditable declaration. `review accept`
+requires an explicit approval reference and cannot infer acceptance from clean
+checks, resolved feedback, or an earlier plan approval.
+
 ## Filesystem boundaries
 
 - Project roots are canonicalized and discovered deterministically. Managed
@@ -152,6 +156,8 @@ Agent consumers must use JSON/no-input mode and inspect `approval_required`,
 - `approval_required: true` or exit 4.
 - `git.branch.create`, unless the user explicitly approved that exact proposal
   and supplied the recorded approval reference.
+- `review.accept`, unless the user explicitly accepted the fully resolved
+  current Review revision and supplied an auditable reference.
 - An approval, exception, or Git operation not already covered by explicit user
   and repository policy. A returned `git.commit` action is covered only by the
   current plan's Approved Git Flow gate; branch creation still needs its own
@@ -160,14 +166,17 @@ Agent consumers must use JSON/no-input mode and inspect `approval_required`,
   ownership.
 - A material change outside the approved plan outcome, File Map, criteria, or
   commit scope.
-- Review in v0.1, because acceptance/rework commands are not implemented.
+- Material review feedback, because it requires a protected amendment and
+  cannot be resumed through the generic execution command.
 
 Never approve on the user's behalf, infer authorization from conversational
 tone, copy the protocol template as a fallback, or fabricate plan/evidence
 state when Mino is unavailable. There is no hidden Git mutation path: local
 branch creation is exposed only as `git branch create`, exact task commits only
 as `git commit`, and `git bind` is the declared Git-adjacent Mino-state write.
-There is no arbitrary status setter.
+There is no arbitrary status setter. Review-to-Done is exposed only as
+`review accept`; task rework is exposed only as a classified recorded review
+item followed by `review rework` and `review resolve`.
 
 ## Recovery guidance
 

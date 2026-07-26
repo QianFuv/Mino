@@ -9,7 +9,7 @@ use crate::application::plan::{
 };
 use crate::domain::{
     CURRENT_PROTOCOL_REVISION, CURRENT_PROTOCOL_VERSION, CheckId, CheckStatus, Plan, PlanId,
-    PlanStatus, TaskId, TaskStatus,
+    PlanStatus, ReviewClassification, ReviewStatus, TaskId, TaskStatus,
 };
 use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitHeadState};
 use crate::validation::validate_plan;
@@ -69,6 +69,10 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("project.show", false, false),
     ("protocol.migrate", true, false),
     ("protocol.status", false, false),
+    ("review.accept", true, true),
+    ("review.record", true, false),
+    ("review.resolve", true, false),
+    ("review.rework", true, false),
     ("standards.apply", false, false),
     ("standards.detect", false, false),
     ("standards.recommend", false, false),
@@ -401,6 +405,9 @@ fn guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
         PlanStatus::Draft => draft_guidance(root, plan),
         PlanStatus::Ready => Ok(ready_guidance(plan)),
         PlanStatus::InProgress => Ok(in_progress_guidance(plan)),
+        PlanStatus::Blocked if plan.is_blocked_for_material_review() => {
+            Ok(material_review_blocked_guidance())
+        }
         PlanStatus::Blocked => Ok(Guidance {
             allowed_actions: action_ids(&["exec.resume"]),
             blocked_actions: vec![blocked(
@@ -410,8 +417,39 @@ fn guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
             approval_required: false,
             next_actions: vec![resume_action(plan)],
         }),
-        PlanStatus::Review => Ok(Guidance {
+        PlanStatus::Review => Ok(review_guidance(plan)),
+        PlanStatus::Done => Ok(Guidance {
             allowed_actions: action_ids(&["plan.show"]),
+            blocked_actions: vec![blocked("exec.start", "The plan is already Done")],
+            approval_required: false,
+            next_actions: Vec::new(),
+        }),
+    }
+}
+
+fn material_review_blocked_guidance() -> Guidance {
+    Guidance {
+        allowed_actions: action_ids(&["plan.show"]),
+        blocked_actions: vec![
+            blocked(
+                "exec.resume",
+                "Material review feedback requires an explicitly approved protected amendment",
+            ),
+            blocked("review.accept", "Material review feedback remains blocked"),
+        ],
+        approval_required: true,
+        next_actions: Vec::new(),
+    }
+}
+
+fn review_guidance(plan: &Plan) -> Guidance {
+    let unresolved = plan
+        .review_items()
+        .iter()
+        .find(|item| matches!(item.status(), ReviewStatus::Open | ReviewStatus::InProgress));
+    let Some(item) = unresolved else {
+        return Guidance {
+            allowed_actions: action_ids(&["plan.show", "review.record"]),
             blocked_actions: vec![
                 blocked(
                     "review.accept",
@@ -424,13 +462,48 @@ fn guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
             ],
             approval_required: true,
             next_actions: Vec::new(),
-        }),
-        PlanStatus::Done => Ok(Guidance {
-            allowed_actions: action_ids(&["plan.show"]),
-            blocked_actions: vec![blocked("exec.start", "The plan is already Done")],
-            approval_required: false,
-            next_actions: Vec::new(),
-        }),
+        };
+    };
+    let mut allowed_actions = action_ids(&["plan.show", "review.record"]);
+    let next_actions = match item.status() {
+        ReviewStatus::Open => {
+            allowed_actions.push("review.rework".to_owned());
+            if item.classification() == ReviewClassification::AcceptanceDefect {
+                vec![review_item_action(
+                    plan,
+                    "review.rework",
+                    "rework",
+                    item.id(),
+                )]
+            } else {
+                Vec::new()
+            }
+        }
+        ReviewStatus::InProgress => {
+            allowed_actions.push("review.resolve".to_owned());
+            vec![review_item_action(
+                plan,
+                "review.resolve",
+                "resolve",
+                item.id(),
+            )]
+        }
+        ReviewStatus::Resolved | ReviewStatus::Blocked | ReviewStatus::Deferred => Vec::new(),
+    };
+    Guidance {
+        allowed_actions,
+        blocked_actions: vec![
+            blocked(
+                "review.accept",
+                "Every blocking review item must be resolved before acceptance",
+            ),
+            blocked(
+                "exec.start",
+                "Review rework has not been selected or resolved",
+            ),
+        ],
+        approval_required: false,
+        next_actions,
     }
 }
 
@@ -657,6 +730,15 @@ fn complete_action(plan: &Plan, task_id: &TaskId) -> NextAction {
 
 fn finish_action(plan: &Plan) -> NextAction {
     mutation_action(plan, "exec.finish", &["exec", "finish"], Vec::new())
+}
+
+fn review_item_action(plan: &Plan, id: &str, command: &str, review_id: &str) -> NextAction {
+    mutation_action(
+        plan,
+        id,
+        &["review", command],
+        vec!["--review".to_owned(), review_id.to_owned()],
+    )
 }
 
 fn commit_action(plan: &Plan, task_id: &TaskId) -> NextAction {

@@ -22,9 +22,15 @@ behalf.
 
 Read fresh Agent context before review. Record reviewer feedback through a
 supported semantic command when advertised. Keep accepted items immutable.
-For rework, resume only through a canonical returned action and preserve the
-revision and evidence history. If v0.1 reports Review with no supported rework
-action, stop; do not edit plan state directly.
+For rework, use only a canonical returned action and preserve the revision and
+evidence history. Acceptance Defect permits an evidence-only rerun; changed
+files require In-Scope Rework. An In-Scope R task must use its reserved ID and
+complete execution/Git definition. Material Change requires a protected
+amendment and cannot use `exec resume`.
+
+`review.accept` is an approval boundary. Never invoke it from clean checks or a
+prior plan approval. Stop, obtain explicit acceptance for the fully resolved
+current Review, and pass the user's auditable reference.
 
 ## Plan-scoped Git Flow
 

@@ -84,6 +84,21 @@ Use `evidence add` only for supplemental files or observations that are not a
 planned check. Never mark a criterion or task complete without the evidence
 references required by the current plan.
 
+## Review and rework
+
+In Review, use `review record` only for exact user feedback and select the
+minimum matching classification. Acceptance Defect and In-Scope Rework require
+the completed origin task. Start only a returned Acceptance Defect rework argv;
+for In-Scope Rework, supply a strict complete YAML task for the already-reserved
+`R<n>` identifier, including dependencies, steps, File Map, criteria, checks,
+and the required Git gate. After execution returns to Review, use the returned
+`review resolve` action so Mino revalidates current evidence.
+
+Follow-Up never enters implementation order. Material Change blocks pending a
+protected amendment and must not be passed to `exec resume`. `review accept` is
+a separate approval boundary: stop, obtain explicit acceptance of the current
+resolved Review, and pass its auditable `--approval-ref`.
+
 ## Result handling
 
 - `ok: true` means the command completed; `complete: false` still means more

@@ -8,8 +8,8 @@ use crate::application::plan::{
 };
 use crate::domain::{
     AcceptanceCriterion, CheckStatus, CommitStatus, CriterionId, CriterionStatus, Evidence,
-    EvidenceId, EvidenceType, FileChange, GitFlowConsent, Plan, RequestId, Task, TaskId,
-    VerificationCheck,
+    EvidenceId, EvidenceType, FileChange, GitFlowConsent, Plan, RequestId, ReviewClassification,
+    ReviewStatus, Task, TaskId, VerificationCheck,
 };
 use crate::evidence::{EvidenceError, EvidenceErrorKind, EvidenceStore};
 use crate::git::{ChangedFile, GitChangeError, inspect_changes, matches_file_map_path};
@@ -405,6 +405,23 @@ fn validate_commit_precondition(
     task: &Task,
     changed_files: &[ChangedFile],
 ) -> Result<(), MinoError> {
+    let is_acceptance_defect_rerun = plan.review_items().iter().any(|item| {
+        item.classification() == ReviewClassification::AcceptanceDefect
+            && item.status() == ReviewStatus::InProgress
+            && item.linked_task() == Some(task.id())
+    });
+    if is_acceptance_defect_rerun {
+        if changed_files.is_empty() {
+            return Ok(());
+        }
+        return Err(MinoError::new(
+            ErrorCategory::PolicyViolation,
+            format!(
+                "Acceptance-defect rework for task {} cannot include changed files; record In-Scope Rework instead",
+                task.id()
+            ),
+        ));
+    }
     let Some(gate) = task.commit_gate().filter(|gate| gate.is_required()) else {
         return Ok(());
     };
@@ -438,6 +455,39 @@ fn validate_commit_precondition(
     } else {
         Err(scope_error(plan, task.id(), &outside_scope))
     }
+}
+
+pub(crate) fn validate_review_evidence(
+    plan: &Plan,
+    evidence: &[Evidence],
+) -> Result<(), MinoError> {
+    let superseded = superseded_ids(evidence);
+    for task in plan.tasks() {
+        validate_task_evidence(plan, task, evidence)?;
+        if let Some(gate) = task
+            .commit_gate()
+            .filter(|gate| gate.is_required() && gate.status() == CommitStatus::Committed)
+        {
+            let evidence_id = gate.evidence_refs().first().ok_or_else(|| {
+                incomplete(format!("Task {} commit evidence is missing", task.id()))
+            })?;
+            let record = evidence_by_id(evidence, evidence_id)?;
+            if superseded.contains(record.id())
+                || record.kind() != EvidenceType::Commit
+                || record.plan_id() != plan.id()
+                || record.task_id() != Some(task.id())
+                || record.artifact_path() != gate.actual_commit()
+            {
+                return Err(incompatible(format!(
+                    "Task {} commit evidence {} is stale or incompatible",
+                    task.id(),
+                    record.id()
+                )));
+            }
+        }
+    }
+    validate_global_evidence(plan, evidence)?;
+    validate_all_deviations(plan)
 }
 
 fn compatible_change(change: FileChange, file: &ChangedFile) -> bool {

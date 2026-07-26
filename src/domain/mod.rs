@@ -8,6 +8,7 @@ mod evidence;
 mod execution;
 mod id;
 mod plan;
+mod review;
 mod state;
 mod task;
 mod timestamp;
@@ -31,8 +32,9 @@ pub use execution::{Checkpoint, CheckpointKind, ExecutionState};
 pub use id::{CheckId, CriterionId, EvidenceId, PlanId, RequestId, TaskId};
 pub use plan::{
     Approach, Approval, ApprovalKind, ContextReference, Decision, EdgeCase, FinalOutcome,
-    GitReadiness, Lineage, Plan, PlanMetadata, PlanScope, ReviewItem, StandardSelection,
+    GitReadiness, Lineage, Plan, PlanMetadata, PlanScope, StandardSelection,
 };
+pub use review::ReviewItem;
 pub use state::{
     CheckStatus, CommitStatus, CriterionStatus, GitFlowConsent, PlanStatus, ReviewClassification,
     ReviewStatus, TaskStatus,

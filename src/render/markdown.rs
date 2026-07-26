@@ -437,8 +437,10 @@ fn render_review_items(output: &mut String, plan: &Value) {
                 scalar(&item["classification"]),
                 scalar(&item["action"]),
                 scalar(&item["linked_task"]),
+                scalar(&item["origin_task"]),
                 scalar(&item["status"]),
                 scalar(&item["recorded_at"]),
+                scalar(&item["approval_reference"]),
             ]
         })
         .collect::<Vec<_>>();
@@ -451,8 +453,10 @@ fn render_review_items(output: &mut String, plan: &Value) {
             "Classification",
             "Action",
             "Task",
+            "Origin Task",
             "Status",
             "Recorded At",
+            "Approval Reference",
         ],
         rows,
     );

@@ -183,7 +183,10 @@ stateDiagram-v2
     Blocked --> Ready: exec resume to recorded Ready state
     Blocked --> InProgress: exec resume to recorded task state
     InProgress --> Review: exec finish after all task/global gates
-    Review --> [*]: v0.1 stops for external review
+    Review --> InProgress: review rework for acceptance defect or in-scope R task
+    Review --> Blocked: review record material-change
+    Review --> Done: review accept after resolution and evidence validation
+    Done --> [*]
 ```
 
 Finalization changes every Draft task to Ready. Only the first dependency-ready
@@ -194,9 +197,16 @@ requirements, unresolved-deviation checks, and changed-file File Map gate pass.
 `exec finish` requires every task Done, every required task commit gate
 Committed, and all required global checks passed, then moves the plan to Review.
 
-The domain includes a `Done` state and review classifications for forward
-schema compatibility, but v0.1 has no CLI transition from Review to Done and no
-review/rework command group. Those commands are deliberately deferred.
+Review feedback is append-only and classified. Acceptance Defect reopens a Done
+task only for fresh acceptance and verification evidence; any changed file is
+rejected and must become In-Scope Rework. In-Scope Rework reserves a monotonic
+`R<n>` identifier when feedback is recorded and materializes it only from a
+complete task definition with dependencies, steps, File Map, criteria, checks,
+and any required Git gate. Failed definitions do not release the reservation.
+Follow-Up records remain outside task order. Material Change records move the
+plan to a Review-owned Blocked state that generic `exec resume` cannot cross.
+`review resolve` revalidates live evidence after rework, and approval-gated
+`review accept` reaches Done only when every blocking item is resolved.
 
 ## Revision, event, and recovery model
 

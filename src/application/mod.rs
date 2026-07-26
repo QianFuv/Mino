@@ -16,3 +16,5 @@ pub mod git_branch;
 pub mod git_commit;
 /// Plan authoring and read-side application service.
 pub mod plan;
+/// Classified review, rework, resolution, and final acceptance service.
+pub mod review;

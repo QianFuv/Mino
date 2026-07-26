@@ -18,6 +18,7 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
             "evidence",
             "exec",
             "git",
+            "review",
             "protocol",
             "help",
         ],
@@ -96,6 +97,10 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
         &["inspect", "bind", "branch", "commit", "help"],
     ),
     (&["git", "branch", "--help"], &["propose", "create", "help"]),
+    (
+        &["review", "--help"],
+        &["record", "rework", "resolve", "accept", "help"],
+    ),
     (&["protocol", "--help"], &["status", "migrate", "help"]),
 ];
 
@@ -146,6 +151,10 @@ const LEAF_COMMANDS: &[&str] = &[
     "project show",
     "protocol migrate",
     "protocol status",
+    "review accept",
+    "review record",
+    "review resolve",
+    "review rework",
     "standards apply",
     "standards detect",
     "standards recommend",
@@ -188,7 +197,7 @@ fn help_commands(output: &Output) -> Vec<String> {
 }
 
 #[test]
-fn recursive_help_inventory_is_exact_and_has_no_review_group() {
+fn recursive_help_inventory_is_exact_and_includes_review_group() {
     for (arguments, expected) in HELP_CASES {
         assert_eq!(
             help_commands(&run_mino(arguments)),
@@ -197,7 +206,7 @@ fn recursive_help_inventory_is_exact_and_has_no_review_group() {
         );
     }
     let top_level = help_commands(&run_mino(&["--help"]));
-    assert!(!top_level.contains(&"review".to_owned()));
+    assert!(top_level.contains(&"review".to_owned()));
     assert!(top_level.contains(&"git".to_owned()));
 }
 
@@ -257,6 +266,14 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
     assert!(
         actions
             .iter()
+            .find(|action| action["id"] == "review.accept")
+            .is_some_and(|action| {
+                action["mutates"] == true && action["approval_boundary"] == true
+            })
+    );
+    assert!(
+        actions
+            .iter()
             .find(|action| action["id"] == "git.commit")
             .is_some_and(|action| {
                 action["mutates"] == false && action["approval_boundary"] == false
@@ -268,7 +285,7 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             .filter(|action| action["approval_boundary"] == true)
             .map(|action| action["id"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["git.branch.create", "plan.approve"]
+        ["git.branch.create", "plan.approve", "review.accept"]
     );
 }
 

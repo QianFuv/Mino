@@ -7,6 +7,7 @@ pub(crate) mod git;
 pub(crate) mod plan;
 pub(crate) mod project;
 pub(crate) mod protocol;
+pub(crate) mod review;
 pub(crate) mod standards;
 
 use serde_json::Value;

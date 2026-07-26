@@ -15,6 +15,7 @@ use crate::commands::git::{self, GitAction};
 use crate::commands::plan::{self, PlanAction};
 use crate::commands::project::{self, ProjectAction};
 use crate::commands::protocol::{self, ProtocolAction};
+use crate::commands::review::{self, ReviewAction};
 use crate::commands::standards::{self, StandardsAction};
 use crate::{ErrorCategory, MinoError, MinoResult, OutputFormat};
 
@@ -49,6 +50,8 @@ enum Command {
     Exec(ExecArguments),
     /// Inspect Git facts and manage worktree-aware active-plan bindings.
     Git(GitArguments),
+    /// Record, execute, resolve, and explicitly accept plan review feedback.
+    Review(ReviewArguments),
     /// Inspect embedded protocol compatibility and explicit migrations.
     Protocol(ProtocolArguments),
 }
@@ -93,6 +96,12 @@ struct ExecArguments {
 struct GitArguments {
     #[command(subcommand)]
     action: GitAction,
+}
+
+#[derive(Debug, Args)]
+struct ReviewArguments {
+    #[command(subcommand)]
+    action: ReviewAction,
 }
 
 #[derive(Debug, Args)]
@@ -152,6 +161,9 @@ fn execute(cli: Cli) -> Result<CliResponse, MinoError> {
             .map(crate::commands::CommandResponse::into_result)
             .map(CliResponse::Result),
         Some(Command::Git(arguments)) => git::execute(&start, arguments.action)
+            .map(crate::commands::CommandResponse::into_result)
+            .map(CliResponse::Result),
+        Some(Command::Review(arguments)) => review::execute(&start, arguments.action)
             .map(crate::commands::CommandResponse::into_result)
             .map(CliResponse::Result),
         Some(Command::Protocol(arguments)) => protocol::execute(&start, arguments.action)

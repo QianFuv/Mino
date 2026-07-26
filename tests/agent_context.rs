@@ -176,7 +176,11 @@ fn lifecycle_contexts() -> Vec<(&'static str, Option<Plan>)> {
         .expect("plan should enter review");
     let review = ready.clone();
     ready
-        .accept_review(timestamp(11))
+        .accept_review(
+            "reviewer".to_owned(),
+            "chat:acceptance".to_owned(),
+            timestamp(11),
+        )
         .expect("plan should become Done");
 
     vec![
