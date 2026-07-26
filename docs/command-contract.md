@@ -251,11 +251,32 @@ satisfy completion. No evidence may be added while a proposal awaits apply.
 | `mino exec start` | Yes | Start only the first eligible Ready task after plan approval and after every prior required task commit is recorded. |
 | `mino exec checkpoint` | Yes | Record a typed checkpoint for the active task. |
 | `mino exec check run` | Yes + process/evidence | Run one planned task/global check with durable lease/result and evidence attachment. |
+| `mino exec check monitor` | Yes + bounded processes/evidence | Re-run one existing planned check in the foreground under required attempt, interval, and elapsed-deadline bounds; stop on pass, attempt exhaustion, deadline, or an optional safe cancellation file. |
 | `mino exec criterion pass` | Yes | Bind one compatible immutable evidence record to one active criterion. |
 | `mino exec complete` | Yes | Complete the active task after check, evidence, deviation, checkpoint, and File Map gates. |
 | `mino exec block` | Yes | Block a Ready/In Progress plan with a non-empty resumable reason. |
 | `mino exec resume` | Yes | Restore the exact recorded Ready/In Progress state. |
 | `mino exec finish` | Yes | Require all tasks, required task commit gates, and global checks complete, then transition In Progress to Review. |
+
+`exec check monitor` requires `--max-attempts 1..=100`,
+`--interval-milliseconds 1..=60000`, and
+`--deadline-milliseconds 1..=86400000`. The deadline must leave at least one
+millisecond of process budget per attempt after every possible interval. Mino
+divides that remaining budget across attempts, caps each check at five minutes,
+and retains the existing 1 MiB output bound. `--cancel-file`, when supplied,
+must name a project-relative regular file with an existing in-project parent.
+Its presence is checked only between attempts; no watcher or background service
+is created.
+
+Each attempt uses deterministic child request IDs, advances the plan through
+the normal two check revisions, and records ordinary immutable command
+evidence. The first terminal condition is persisted canonically at
+`.mino/plans/<plan-id>/monitors/<request-id>/summary.json`. The summary is bound
+to the complete request hash and published without replacing an existing file.
+An exact retry returns it without executing, sleeping, or mutating state;
+different inputs under the same request ID return exit 3. A passing terminal
+reason returns exit 0. Attempt exhaustion, deadline, and cancellation return
+exit 6 with the complete `monitor` report and all completed attempt evidence.
 
 The execution commands themselves perform no Git mutation. The v0.2 Git
 surfaces can write binding/journal state, create/switch only the deterministic
@@ -317,6 +338,7 @@ overwriting the common keys.
 | `mino.validation/v1` | Plan validation details |
 | `mino.plan-review/v1` | Revision-bound `plan review` payload |
 | `mino.check-run/v1` | Persisted check lease/result `schema_version` |
+| `mino.monitor/v1` | Immutable terminal `exec check monitor` summary under `monitor_kind` |
 | `mino.plan-diff/v1` | Read-only semantic `plan diff` payload under `diff_kind` |
 | `mino.git-hook-status/v1` | Read-only `git hook status` and proposal status payload |
 | `mino.git-hook-proposal/v1` | Hash-bound `git hook propose` payload |

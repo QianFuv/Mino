@@ -135,6 +135,21 @@ Use `evidence add` only for supplemental files or observations that are not a
 planned check. Never mark a criterion or task complete without the evidence
 references required by the current plan.
 
+For finite repeated observation of one existing check, invoke:
+
+```text
+mino exec check monitor --plan <id> --check <check-id> --expect-revision <revision> --request-id <uuid> --actor <actor> --max-attempts <1..100> --interval-milliseconds <1..60000> --deadline-milliseconds <1..86400000> --format json --no-input
+```
+
+Add `--cancel-file <project-relative-file>` only when the parent already exists
+inside the project. Mino remains in the foreground, derives bounded child check
+timeouts and deterministic attempt request IDs, and persists every completed
+attempt plus one immutable `mino.monitor/v1` terminal summary. Reuse the base
+UUID and identical argv only to recover/replay that invocation. Pass returns
+success; attempts exhausted, deadline, and cancellation return exit 6 with the
+complete report. Do not replace this command with loops, tails, watchers,
+background processes, schedulers, manual polling, or rebuilt attempt argv.
+
 ## Plan alternatives
 
 Create an independent Draft from one exact retained revision with:

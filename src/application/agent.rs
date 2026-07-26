@@ -31,6 +31,7 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("evidence.list", false, false),
     ("evidence.show", false, false),
     ("exec.block", true, false),
+    ("exec.check.monitor", true, false),
     ("exec.check.run", true, false),
     ("exec.checkpoint", true, false),
     ("exec.complete", true, false),

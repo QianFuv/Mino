@@ -105,7 +105,7 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
             "help",
         ],
     ),
-    (&["exec", "check", "--help"], &["run", "help"]),
+    (&["exec", "check", "--help"], &["run", "monitor", "help"]),
     (&["exec", "criterion", "--help"], &["pass", "help"]),
     (
         &["git", "--help"],
@@ -131,6 +131,7 @@ const LEAF_COMMANDS: &[&str] = &[
     "evidence list",
     "evidence show",
     "exec block",
+    "exec check monitor",
     "exec check run",
     "exec checkpoint",
     "exec complete",
@@ -343,6 +344,7 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
         "mino.validation/v1",
         "mino.plan-review/v1",
         "mino.check-run/v1",
+        "mino.monitor/v1",
         "mino.plan-diff/v1",
         "mino.git-hook-status/v1",
         "mino.git-hook-proposal/v1",
@@ -381,6 +383,7 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
         ".mino/git/branches/",
         ".mino/git/commits/",
         ".mino/plans/",
+        ".mino/plans/<plan-id>/monitors/<request-id>/summary.json",
         "docs/plan/",
         ".agents/skills/mino/",
     ] {
@@ -388,6 +391,7 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
     }
     assert!(commands.contains("No command accepts an arbitrary status value"));
     assert!(security.contains("There is no hidden Git mutation path"));
+    assert!(security.contains("creates no background service"));
     assert!(security.contains("copy the protocol template as a fallback"));
     assert!(security.contains("Do not edit it manually"));
 }

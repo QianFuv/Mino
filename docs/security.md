@@ -104,6 +104,22 @@ unexpected exit, timeout, output limit, capture failure, and interruption are
 durable terminal outcomes. Do not treat an exit-6 check as missing evidence;
 the failure evidence is intentionally retained.
 
+`exec check monitor` can invoke only one check already stored in the plan. It
+requires a finite attempt count, interval, and elapsed deadline, then derives a
+bounded per-attempt process timeout from the complete retry budget while
+retaining the 1 MiB capture limit. It runs in the foreground;
+it creates no background service, daemon, scheduler, signal watcher, or
+indefinite poll.
+
+Optional cancellation names only a normalized project-relative path whose
+parent resolves inside the project. If present it must be a regular file;
+symbolic links, directories, absolute paths, parent traversal, and parents that
+resolve outside the project are refused before an attempt. Monitor summary
+ancestors are likewise required to be regular in-project directories. Terminal
+summaries are bounded, canonical, request-hash-bound, and published without
+overwriting existing bytes. A failed, timed-out, or cancelled monitor still
+retains every completed attempt's immutable evidence and returns exit 6.
+
 ## Output redaction and evidence
 
 Output is redacted before hashing or persistence. The default policy replaces

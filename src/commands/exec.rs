@@ -1,6 +1,6 @@
 //! Ordered execution CLI adapter.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::application::agent::AgentService;
 use crate::application::completion::CompletionService;
 use crate::application::execution::ExecutionService;
+use crate::application::monitor::{MonitorBounds, MonitorRequest, MonitorService};
 use crate::application::plan::PlanMutationRequest;
 use crate::commands::CommandResponse;
 use crate::domain::{
@@ -108,6 +109,8 @@ pub(crate) struct CheckArguments {
 enum CheckAction {
     /// Execute, journal, and attach evidence for one planned check.
     Run(CheckRunArguments),
+    /// Re-run one planned check under finite attempt, interval, and deadline bounds.
+    Monitor(CheckMonitorArguments),
 }
 
 #[derive(Debug, Args)]
@@ -117,6 +120,27 @@ struct CheckRunArguments {
     /// Globally unique planned check identifier.
     #[arg(long)]
     check: String,
+}
+
+#[derive(Debug, Args)]
+struct CheckMonitorArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    /// Globally unique planned check identifier.
+    #[arg(long)]
+    check: String,
+    /// Maximum number of check invocations, from 1 through 100.
+    #[arg(long)]
+    max_attempts: u32,
+    /// Delay between failed attempts, from 1 through 60000 milliseconds.
+    #[arg(long)]
+    interval_milliseconds: u64,
+    /// Complete attempt-and-wait elapsed bound, up to 24 hours.
+    #[arg(long)]
+    deadline_milliseconds: u64,
+    /// Optional project-relative regular file whose presence requests cancellation.
+    #[arg(long)]
+    cancel_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -214,6 +238,7 @@ pub(crate) fn execute(start: &Path, action: ExecAction) -> Result<CommandRespons
         }
         ExecAction::Check(arguments) => match arguments.action {
             CheckAction::Run(arguments) => run_check(start, &service, arguments),
+            CheckAction::Monitor(arguments) => monitor_check(start, arguments),
         },
         ExecAction::Criterion(arguments) => match arguments.action {
             CriterionAction::Pass(arguments) => pass_criterion(start, arguments),
@@ -311,6 +336,65 @@ fn run_check(
     }
     response(
         "Verification check passed and evidence was attached.",
+        report,
+        guidance.next_actions,
+    )
+}
+
+fn monitor_check(
+    start: &Path,
+    arguments: CheckMonitorArguments,
+) -> Result<CommandResponse, MinoError> {
+    let bounds = MonitorBounds::new(
+        arguments.max_attempts,
+        arguments.interval_milliseconds,
+        arguments.deadline_milliseconds,
+    )?;
+    let mut extra = vec![
+        "--check".to_owned(),
+        arguments.check.clone(),
+        "--max-attempts".to_owned(),
+        arguments.max_attempts.to_string(),
+        "--interval-milliseconds".to_owned(),
+        arguments.interval_milliseconds.to_string(),
+        "--deadline-milliseconds".to_owned(),
+        arguments.deadline_milliseconds.to_string(),
+    ];
+    if let Some(path) = &arguments.cancel_file {
+        extra.extend([
+            "--cancel-file".to_owned(),
+            path.to_string_lossy().into_owned(),
+        ]);
+    }
+    let command = mutation_command(&["check", "monitor"], &arguments.mutation, extra);
+    let check_id = parse_check_id(&arguments.check)?;
+    let report = MonitorService::discover(start)?.run(MonitorRequest {
+        plan_id: parse_plan_id(&arguments.mutation.plan)?,
+        expected_revision: arguments.mutation.expect_revision,
+        request_id: parse_request_id(&arguments.mutation.request_id)?,
+        actor: arguments.mutation.actor,
+        command,
+        check_id: check_id.clone(),
+        bounds,
+        cancel_file: arguments.cancel_file,
+    })?;
+    let guidance = AgentService::discover(start)?.context()?;
+    if !report.is_success() {
+        return Err(MinoError::new(
+            ErrorCategory::CheckFailed,
+            format!(
+                "Bounded monitoring for check {check_id} stopped with {:?}",
+                report.terminal_reason
+            ),
+        )
+        .with_remediation(
+            vec![format!("verification_checks.{check_id}")],
+            guidance.next_actions,
+        )
+        .with_details(serde_json::json!({ "monitor": report })));
+    }
+    response(
+        "Bounded monitoring stopped after the planned check passed.",
         report,
         guidance.next_actions,
     )

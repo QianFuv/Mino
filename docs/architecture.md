@@ -332,6 +332,23 @@ of launching an ambiguous duplicate. Criterion and completion services accept
 only compatible, current, non-superseded evidence. Failed command evidence
 remains auditable but cannot prove a passing criterion.
 
+`exec check monitor` is a finite foreground coordinator over that same
+three-phase operation. Its required maximum-attempt, interval, and elapsed
+deadline values allocate a deterministic timeout to every possible process:
+the deadline minus all possible inter-attempt waits is divided by the attempt
+count and capped at five minutes. The loop checks cancellation, deadline, and
+attempt exhaustion before a new attempt and again after each failed attempt;
+it never tails and creates no background service.
+
+Attempt request IDs and expected revisions are deterministically derived from
+the base request. Therefore an interrupted invocation can replay already
+journaled attempts without launching duplicates and can run only the remaining
+finite attempts. Pass, attempts exhausted, deadline reached, and cancellation
+all produce a canonical request-hash-bound `mino.monitor/v1` record at
+`.mino/plans/<plan-id>/monitors/<request-id>/summary.json`. Guarded regular
+directories and no-clobber publication make the terminal record immutable;
+an exact retry reads it before plan or evidence mutation.
+
 ## Version ownership
 
 The v0.1 plan schema is `1`, renderer is `2`, and planning protocol is

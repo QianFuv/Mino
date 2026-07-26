@@ -80,10 +80,23 @@ another, read [approval-boundaries.md](references/approval-boundaries.md) and
 invoke `plan archive` with their reason and auditable reference. Never infer
 archive approval merely because a fork exists, and never delete plan state.
 
+## Bounded check monitoring
+
+Use `exec check monitor` only for repeated foreground observation of one check
+already authored in the active plan. Read
+[command-contract.md](references/command-contract.md), supply explicit finite
+attempt, interval, and deadline values, and preserve the exact returned argv
+and request ID for recovery. An optional cancellation file must be a safe
+project-relative regular file. Treat pass as success; treat attempt exhaustion,
+deadline, and cancellation as exit-6 terminal reports whose attempt evidence
+must be preserved. Never emulate monitoring with a shell loop, tail, watcher,
+daemon, scheduler, repeated manual polling, or reconstructed child requests.
+
 ## References
 
 - Read [command-contract.md](references/command-contract.md) when starting a
-  plan, interpreting JSON or exit codes, or recording execution evidence.
+  plan, interpreting JSON or exit codes, recording execution evidence, or
+  invoking bounded check monitoring.
 - Read [approval-boundaries.md](references/approval-boundaries.md) whenever
   context requires approval or the next step involves review, exceptions,
   rework, or Git.
