@@ -246,6 +246,63 @@ fn create_complete_plan(
     plan_id
 }
 
+fn create_named_draft(
+    label: &str,
+    name: &str,
+    request_number: u64,
+) -> (TestProject, Vec<String>, Value) {
+    let project = TestProject::new(label);
+    let request_file = project.path().join("request.md");
+    fs::write(&request_file, "Create a Unicode-named plan.\n").expect("request should be written");
+    let arguments = create_arguments(&project, name, &request_file, request_number);
+    let created = parse_success(&run_mino(&arguments));
+    (project, arguments, created)
+}
+
+fn plan_slug(value: &Value) -> &str {
+    value["plan_id"]
+        .as_str()
+        .expect("plan ID should be a string")
+        .get(11..)
+        .expect("plan ID should contain a date prefix")
+}
+
+#[test]
+fn unicode_names_use_stable_hash_fallback_without_changing_ascii_slugs() {
+    let chinese_name = "修复网络重试策略";
+    let (chinese_project, chinese_arguments, chinese) =
+        create_named_draft("unicode-chinese", chinese_name, 200);
+    assert_eq!(plan_slug(&chinese), "plan-9be17b54");
+    let chinese_id = plan_id_from(&chinese);
+    assert_eq!(
+        load_plan(&chinese_project, &chinese_id).metadata().name(),
+        chinese_name
+    );
+    let replay = parse_success(&run_mino(&chinese_arguments));
+    assert_eq!(replay["plan_id"], chinese_id);
+    assert_eq!(replay["replayed"], true);
+    let collision = run_mino(&create_arguments(
+        &chinese_project,
+        chinese_name,
+        &chinese_project.path().join("request.md"),
+        201,
+    ));
+    assert_eq!(collision.status.code(), Some(2));
+
+    let (_, _, different) = create_named_draft("unicode-different", "改进网络重试策略", 202);
+    assert_eq!(plan_slug(&different), "plan-cd683e41");
+    assert_ne!(plan_slug(&different), plan_slug(&chinese));
+
+    let (_, _, punctuation) = create_named_draft("unicode-punctuation", "！！！", 203);
+    assert_eq!(plan_slug(&punctuation), "plan-bd03faef");
+
+    let (_, _, mixed) = create_named_draft("unicode-mixed", "修复 Retry 策略", 204);
+    assert_eq!(plan_slug(&mixed), "retry");
+    let long_ascii_name = format!("{} trailing words", "A".repeat(120));
+    let (_, _, long_ascii) = create_named_draft("unicode-long-ascii", &long_ascii_name, 205);
+    assert_eq!(plan_slug(&long_ascii), "a".repeat(96));
+}
+
 #[test]
 fn create_is_incomplete_collision_safe_and_request_idempotent() {
     let project = TestProject::new("create");

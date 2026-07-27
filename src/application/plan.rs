@@ -1159,7 +1159,7 @@ fn validate_create_request(request: &CreatePlanRequest) -> Result<(), MinoError>
 }
 
 pub(crate) fn plan_id_for(name: &str, created_at: &Timestamp) -> Result<PlanId, MinoError> {
-    let slug = ascii_slug(name)?;
+    let slug = ascii_slug(name).unwrap_or_else(|| hashed_name_slug(name));
     let date = created_at.as_str().get(..10).ok_or_else(|| {
         MinoError::new(
             ErrorCategory::IncompleteOrValidation,
@@ -1169,7 +1169,7 @@ pub(crate) fn plan_id_for(name: &str, created_at: &Timestamp) -> Result<PlanId, 
     PlanId::parse(format!("{date}-{slug}")).map_err(|error| domain_input_error(&error))
 }
 
-fn ascii_slug(name: &str) -> Result<String, MinoError> {
+fn ascii_slug(name: &str) -> Option<String> {
     let mut slug = String::new();
     let mut needs_separator = false;
     for character in name.chars() {
@@ -1186,14 +1186,12 @@ fn ascii_slug(name: &str) -> Result<String, MinoError> {
             break;
         }
     }
-    if slug.is_empty() {
-        Err(MinoError::new(
-            ErrorCategory::IncompleteOrValidation,
-            "Plan name must contain at least one ASCII letter or digit for its stable slug",
-        ))
-    } else {
-        Ok(slug)
-    }
+    (!slug.is_empty()).then_some(slug)
+}
+
+fn hashed_name_slug(name: &str) -> String {
+    let digest = sha256_digest(name.as_bytes());
+    format!("plan-{}", &digest["sha256:".len().."sha256:".len() + 8])
 }
 
 pub(crate) fn detect_git_readiness(root: &Path) -> (GitReadiness, Option<String>) {
