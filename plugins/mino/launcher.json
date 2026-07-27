@@ -12,7 +12,7 @@
     "capabilities_kind": "mino.agent-capabilities/v1",
     "context_kind": "mino.agent-context/v1",
     "next_kind": "mino.agent-next/v1",
-    "capabilities_digest": "sha256:b2e7251e22891ae0ccf4b3af78a2a2c30e9479a97774c77dc27f8cfb42a874b2"
+    "capabilities_digest": "sha256:42b665e5ef4fbb8b094d90d0e2102a22d5f1bea5e767b47a0367a250cca77601"
   },
   "standards": [
     "common@1.0.0",

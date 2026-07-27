@@ -14,6 +14,8 @@ use crate::domain::Plan;
 use crate::store::sha256_digest;
 use crate::{ErrorCategory, MinoError, NextAction};
 
+use crate::application::AGENT_EXECUTOR_IDENTITY;
+
 pub use finding::{
     VALIDATION_KIND, ValidationFinding, ValidationLayer, ValidationReport, ValidationSeverity,
 };
@@ -84,6 +86,8 @@ fn derive_next_actions(plan: &Plan, findings: &[ValidationFinding]) -> Vec<NextA
                 plan.revision().to_string(),
                 "--request-id".to_owned(),
                 derived_request_id(plan, "plan.finalize"),
+                "--actor".to_owned(),
+                AGENT_EXECUTOR_IDENTITY.to_owned(),
                 "--format".to_owned(),
                 "json".to_owned(),
                 "--no-input".to_owned(),
@@ -136,6 +140,8 @@ fn derive_next_actions(plan: &Plan, findings: &[ValidationFinding]) -> Vec<NextA
                 plan.revision().to_string(),
                 "--request-id".to_owned(),
                 derived_request_id(plan, "plan.apply.validation"),
+                "--actor".to_owned(),
+                AGENT_EXECUTOR_IDENTITY.to_owned(),
                 "--format".to_owned(),
                 "json".to_owned(),
                 "--no-input".to_owned(),
@@ -169,6 +175,8 @@ fn conflict_next_action(plan: &Plan, findings: &[ValidationFinding]) -> Option<N
                 plan.revision().to_string(),
                 "--request-id".to_owned(),
                 derived_request_id(plan, "standards.conflict.refresh"),
+                "--actor".to_owned(),
+                AGENT_EXECUTOR_IDENTITY.to_owned(),
                 "--format".to_owned(),
                 "json".to_owned(),
                 "--no-input".to_owned(),

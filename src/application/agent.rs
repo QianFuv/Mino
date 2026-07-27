@@ -17,6 +17,8 @@ use crate::project::ProjectPlanSelection;
 use crate::validation::validate_plan;
 use crate::{ErrorCategory, MinoError, NextAction};
 
+use super::AGENT_EXECUTOR_IDENTITY;
+
 /// Versioned Agent context schema identifier.
 pub const AGENT_CONTEXT_KIND: &str = "mino.agent-context/v1";
 /// Versioned Agent next-action schema identifier.
@@ -194,6 +196,8 @@ pub struct BlockedAction {
 pub struct AgentContext {
     /// Versioned context schema identifier.
     pub kind: &'static str,
+    /// Stable actor identity for mutations invoked from this Agent context.
+    pub executor_identity: &'static str,
     /// Discovered project and protocol identity.
     pub project: AgentProject,
     /// Git worktree facts when the project belongs to a repository.
@@ -224,6 +228,8 @@ pub struct AgentContext {
 pub struct AgentNextReport {
     /// Versioned next-action schema identifier.
     pub kind: &'static str,
+    /// Stable actor identity for mutations invoked from this next-action view.
+    pub executor_identity: &'static str,
     /// Current active plan identity, when one exists.
     pub active_plan: Option<AgentActivePlan>,
     /// Project-level selected plan and live alternatives when candidates exist.
@@ -253,6 +259,8 @@ pub struct AgentCapability {
 pub struct AgentCapabilities {
     /// Versioned capabilities schema identifier.
     pub kind: &'static str,
+    /// Stable actor identity required in canonical Agent mutation commands.
+    pub executor_identity: &'static str,
     /// Locked protocol version and revision.
     pub protocol: String,
     /// Context schema produced by this CLI.
@@ -328,6 +336,7 @@ impl AgentService {
         let context = self.context()?;
         Ok(AgentNextReport {
             kind: AGENT_NEXT_KIND,
+            executor_identity: context.executor_identity,
             active_plan: context.active_plan,
             plan_selection: context.plan_selection,
             approval_required: context.approval_required,
@@ -341,6 +350,7 @@ impl AgentService {
     pub fn capabilities() -> AgentCapabilities {
         AgentCapabilities {
             kind: AGENT_CAPABILITIES_KIND,
+            executor_identity: AGENT_EXECUTOR_IDENTITY,
             protocol: protocol_name(),
             context_kind: AGENT_CONTEXT_KIND,
             next_kind: AGENT_NEXT_KIND,
@@ -393,6 +403,7 @@ fn build_agent_context_with_selection(
         if serialized_selection.is_some() {
             return Ok(AgentContext {
                 kind: AGENT_CONTEXT_KIND,
+                executor_identity: AGENT_EXECUTOR_IDENTITY,
                 project,
                 git,
                 active_plan: None,
@@ -416,6 +427,7 @@ fn build_agent_context_with_selection(
         }
         return Ok(AgentContext {
             kind: AGENT_CONTEXT_KIND,
+            executor_identity: AGENT_EXECUTOR_IDENTITY,
             project,
             git,
             active_plan: None,
@@ -466,6 +478,7 @@ fn build_agent_context_with_selection(
     }
     Ok(AgentContext {
         kind: AGENT_CONTEXT_KIND,
+        executor_identity: AGENT_EXECUTOR_IDENTITY,
         project,
         git,
         active_plan: Some(active_plan),
@@ -1256,6 +1269,8 @@ fn mutation_action(plan: &Plan, id: &str, command: &[&str], extra: Vec<String>) 
         plan.revision().to_string(),
         "--request-id".to_owned(),
         derived_request_id(plan, id),
+        "--actor".to_owned(),
+        AGENT_EXECUTOR_IDENTITY.to_owned(),
     ]);
     argv.extend([
         "--format".to_owned(),

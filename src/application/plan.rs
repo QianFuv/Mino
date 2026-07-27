@@ -27,6 +27,8 @@ use crate::standards::{EmbeddedCatalog, SystemToolProbe, apply_recommendation, r
 use crate::store::{MutationRequest, PlanStore, StoreError, StoreErrorKind, sha256_digest};
 use crate::{ErrorCategory, MinoError, NextAction};
 
+use super::AGENT_EXECUTOR_IDENTITY;
+
 /// Maximum UTF-8 request or YAML input accepted by authoring adapters.
 pub const MAX_AUTHORING_INPUT_BYTES: usize = 1024 * 1024;
 
@@ -1296,6 +1298,8 @@ pub(crate) fn draft_next_actions(plan: &Plan, missing: &[String]) -> Vec<NextAct
                 plan.revision().to_string(),
                 "--request-id".to_owned(),
                 derived_request_id(plan, "plan.summary.set"),
+                "--actor".to_owned(),
+                AGENT_EXECUTOR_IDENTITY.to_owned(),
                 "--format".to_owned(),
                 "json".to_owned(),
                 "--no-input".to_owned(),
@@ -1330,6 +1334,8 @@ pub(crate) fn draft_next_actions(plan: &Plan, missing: &[String]) -> Vec<NextAct
                 plan.revision().to_string(),
                 "--request-id".to_owned(),
                 derived_request_id(plan, "plan.apply"),
+                "--actor".to_owned(),
+                AGENT_EXECUTOR_IDENTITY.to_owned(),
                 "--format".to_owned(),
                 "json".to_owned(),
                 "--no-input".to_owned(),

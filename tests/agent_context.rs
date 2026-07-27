@@ -1,11 +1,12 @@
 //! Golden and CLI contract tests for stable Agent context and next-action APIs.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mino::application::agent::build_agent_context;
+use mino::application::{AGENT_EXECUTOR_IDENTITY, agent::build_agent_context};
 use mino::domain::{
     AmendmentPatch, Approval, CheckId, CriterionId, DeviationClassification, DraftCriterionInput,
     DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput, DraftTaskInput,
@@ -15,6 +16,7 @@ use mino::domain::{
 use mino::git::{ActiveBindingStore, GitAdapter};
 use mino::project::initialize;
 use mino::standards::EmbeddedCatalog;
+use mino::store::PlanStore;
 use mino::validation::validate_plan;
 use serde_json::Value;
 
@@ -271,6 +273,33 @@ fn normalized(mut value: Value) -> Value {
     value
 }
 
+fn assert_agent_action_identity(actions: &[mino::NextAction]) {
+    for action in actions {
+        let actor_index = action
+            .argv
+            .iter()
+            .position(|argument| argument == "--actor");
+        if action
+            .argv
+            .iter()
+            .any(|argument| argument == "--expect-revision")
+        {
+            let actor_index =
+                actor_index.expect("revisioned Agent action should identify its actor");
+            assert_eq!(
+                action.argv.get(actor_index + 1).map(String::as_str),
+                Some(AGENT_EXECUTOR_IDENTITY)
+            );
+        } else {
+            assert!(
+                actor_index.is_none(),
+                "read-only Agent action {} must not include --actor",
+                action.id
+            );
+        }
+    }
+}
+
 #[test]
 fn every_lifecycle_state_matches_its_agent_context_golden() {
     let project = TestProject::new("goldens");
@@ -286,6 +315,8 @@ fn every_lifecycle_state_matches_its_agent_context_golden() {
             );
         }
         let context = build_agent_context(root, plan.as_ref()).expect("context should build");
+        assert_eq!(context.executor_identity, AGENT_EXECUTOR_IDENTITY);
+        assert_agent_action_identity(&context.next_actions);
         let actual = normalized(serde_json::to_value(context).expect("context should serialize"));
         let expected: Value = serde_json::from_str(
             &fs::read_to_string(fixture_path(name)).expect("golden should be readable"),
@@ -426,6 +457,40 @@ fn run_mino(arguments: &[String]) -> Output {
         .expect("Mino binary should run")
 }
 
+fn run_canonical_action(project: &TestProject, arguments: &[String], input: &str) -> Output {
+    assert_eq!(arguments.first().map(String::as_str), Some("mino"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mino"))
+        .args(&arguments[1..])
+        .current_dir(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Mino canonical action should start");
+    child
+        .stdin
+        .take()
+        .expect("canonical action stdin should be piped")
+        .write_all(input.as_bytes())
+        .expect("canonical action input should be written");
+    child
+        .wait_with_output()
+        .expect("Mino canonical action should finish")
+}
+
+fn last_event_actor(project: &TestProject, plan_id: &str) -> String {
+    let plan_id = PlanId::parse(plan_id).expect("plan ID should parse");
+    let events = PlanStore::new(project.path())
+        .events(&plan_id)
+        .expect("plan events should load");
+    let event = serde_json::to_value(events.last().expect("plan should have an event"))
+        .expect("event should serialize");
+    event["actor"]
+        .as_str()
+        .expect("event actor should be a string")
+        .to_owned()
+}
+
 fn base_arguments(project: &TestProject) -> Vec<String> {
     vec![
         "--root".to_owned(),
@@ -508,6 +573,7 @@ fn agent_cli_is_direct_strict_and_uses_the_only_active_plan() {
     let project = TestProject::new("cli");
     let empty = parse_success(&run_mino(&agent_arguments(&project, "context")));
     assert_eq!(empty["kind"], "mino.agent-context/v1");
+    assert_eq!(empty["executor_identity"], AGENT_EXECUTOR_IDENTITY);
     assert!(empty.get("ok").is_none());
     assert_eq!(empty["active_plan"], Value::Null);
 
@@ -519,6 +585,11 @@ fn agent_cli_is_direct_strict_and_uses_the_only_active_plan() {
     assert_eq!(rejected["error"]["code"], "policy_violation");
     assert_eq!(rejected["missing"], serde_json::json!(["--no-input"]));
     assert_eq!(rejected["next_actions"][0]["id"], "agent.context");
+    assert!(
+        rejected["next_actions"][0]["argv"]
+            .as_array()
+            .is_some_and(|arguments| arguments.iter().all(|argument| argument != "--actor"))
+    );
 
     let created = parse_success(&run_mino(&create_arguments(&project, "Active plan", 1)));
     let plan_id = created["plan_id"]
@@ -531,11 +602,13 @@ fn agent_cli_is_direct_strict_and_uses_the_only_active_plan() {
     assert_eq!(context["next_actions"][0]["id"], "plan.summary.set");
     let next = parse_success(&run_mino(&agent_arguments(&project, "next")));
     assert_eq!(next["kind"], "mino.agent-next/v1");
+    assert_eq!(next["executor_identity"], AGENT_EXECUTOR_IDENTITY);
     assert_eq!(next["active_plan"], context["active_plan"]);
     assert_eq!(next["plan_selection"], context["plan_selection"]);
     assert_eq!(next["next_actions"], context["next_actions"]);
     let capabilities = parse_success(&run_mino(&agent_arguments(&project, "capabilities")));
     assert_eq!(capabilities["kind"], "mino.agent-capabilities/v1");
+    assert_eq!(capabilities["executor_identity"], AGENT_EXECUTOR_IDENTITY);
     assert_eq!(capabilities["invocation"]["requires_json"], true);
     assert_eq!(capabilities["invocation"]["requires_no_input"], true);
     assert!(
@@ -549,4 +622,68 @@ fn agent_cli_is_direct_strict_and_uses_the_only_active_plan() {
     let second = parse_json(&second);
     assert_eq!(second["missing"], serde_json::json!(["active_plan"]));
     assert_eq!(second["next_actions"][0]["id"], "agent.context");
+}
+
+#[test]
+fn canonical_agent_mutations_record_codex_while_direct_cli_defaults_to_user() {
+    for (label, should_keep_agent_actor, expected_actor) in [
+        ("agent-actor", true, AGENT_EXECUTOR_IDENTITY),
+        ("human-actor", false, "user"),
+    ] {
+        let project = TestProject::new(label);
+        let created = parse_success(&run_mino(&create_arguments(&project, label, 20)));
+        let plan_id = created["plan_id"]
+            .as_str()
+            .expect("created plan ID should be a string");
+        let context = parse_success(&run_mino(&agent_arguments(&project, "context")));
+        let mut arguments = context["next_actions"][0]["argv"]
+            .as_array()
+            .expect("canonical argv should be an array")
+            .iter()
+            .map(|argument| {
+                argument
+                    .as_str()
+                    .expect("canonical argument should be a string")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(context["next_actions"][0]["id"], "plan.summary.set");
+        let actor_index = arguments
+            .iter()
+            .position(|argument| argument == "--actor")
+            .expect("Agent mutation should identify its actor");
+        assert_eq!(arguments[actor_index + 1], AGENT_EXECUTOR_IDENTITY);
+        if !should_keep_agent_actor {
+            arguments.drain(actor_index..=actor_index + 1);
+        }
+
+        let mutation = parse_success(&run_canonical_action(
+            &project,
+            &arguments,
+            "Record the executor identity in this plan.\n",
+        ));
+        assert_eq!(last_event_actor(&project, plan_id), expected_actor);
+        assert_eq!(mutation["next_actions"][0]["id"], "plan.apply");
+        let next_arguments = mutation["next_actions"][0]["argv"]
+            .as_array()
+            .expect("next canonical argv should be an array");
+        let next_actor = next_arguments
+            .iter()
+            .position(|argument| argument == "--actor")
+            .expect("next Agent mutation should identify its actor");
+        assert_eq!(
+            next_arguments[next_actor + 1],
+            Value::String(AGENT_EXECUTOR_IDENTITY.to_owned())
+        );
+    }
+}
+
+#[test]
+fn validation_finalization_action_uses_the_agent_executor_identity() {
+    let project = TestProject::new("validation-actor");
+    let plan = configured_draft();
+    let report = validate_plan(project.path(), &plan).expect("Draft should validate");
+    assert!(report.valid);
+    assert_eq!(report.next_actions[0].id, "plan.finalize");
+    assert_agent_action_identity(&report.next_actions);
 }

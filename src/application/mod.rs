@@ -1,5 +1,8 @@
 //! Application services coordinating project facts, domain mutations, storage, and projections.
 
+/// Stable actor recorded for mutations executed from canonical Agent guidance.
+pub const AGENT_EXECUTOR_IDENTITY: &str = "codex";
+
 /// Stable machine context, next-action, capability, and active-plan service.
 pub mod agent;
 /// Typed protected-plan amendment proposal, approval, and application service.

@@ -1,5 +1,6 @@
 {
   "kind": "mino.agent-context/v1",
+  "executor_identity": "codex",
   "project": {
     "root": "<ROOT>",
     "protocol": "2026-05-11.review-rework-git-flow-v1"
@@ -79,6 +80,8 @@
         "1",
         "--request-id",
         "<REQUEST_ID>",
+        "--actor",
+        "codex",
         "--format",
         "json",
         "--no-input"
