@@ -2327,6 +2327,69 @@ impl Plan {
         self.validate_invariants()
     }
 
+    /// Reopens one completed task after required final verification fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan is In Progress, every task is Done,
+    /// at least one required global check is Failed, and the selected task is
+    /// a completed task with a non-empty rework reason.
+    pub fn rework_failed_global_verification(
+        &mut self,
+        task_id: &TaskId,
+        reason: &str,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.ensure_no_pending_amendment("rework failed final verification")?;
+        self.require_status(PlanStatus::InProgress, "rework failed final verification")?;
+        if self.running_check_count() != 0 {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Final verification rework cannot start while a check is Running",
+            ));
+        }
+        if self
+            .tasks
+            .iter()
+            .any(|task| task.status() != TaskStatus::Done)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Final verification rework requires every task to be Done",
+            ));
+        }
+        if !self
+            .global_verification
+            .iter()
+            .any(|check| check.is_required() && check.status() == CheckStatus::Failed)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Final verification rework requires a failed required global check",
+            ));
+        }
+        if self.task(task_id).is_none() {
+            return Err(DomainError::new(
+                DomainErrorKind::TaskNotFound,
+                format!("Task {task_id} does not exist"),
+            ));
+        }
+        let mut candidate = self.clone();
+        candidate
+            .task_mut(task_id)?
+            .reopen_after_global_failure(reason)?;
+        for check in &mut candidate.global_verification {
+            check.reset_for_rework();
+        }
+        let mut workspace = candidate.workspace_state()?;
+        workspace.remove_task_baseline(task_id);
+        candidate.store_workspace_state(&workspace)?;
+        candidate.record_revision(candidate.next_revision()?, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Marks passing verification checks stale after workspace content drift.
     ///
     /// # Errors

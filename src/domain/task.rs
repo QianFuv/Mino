@@ -1073,6 +1073,31 @@ impl Task {
         Ok(())
     }
 
+    pub(crate) fn reopen_after_global_failure(&mut self, reason: &str) -> Result<(), DomainError> {
+        if self.status != TaskStatus::Done {
+            return Err(self.invalid_transition("reopen after final verification failure"));
+        }
+        if reason.trim().is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Final verification rework requires a non-empty reason",
+            ));
+        }
+        for criterion in &mut self.acceptance_criteria {
+            criterion.reset_for_rework();
+        }
+        for check in &mut self.verification_checks {
+            check.reset_for_rework();
+        }
+        if let Some(commit_gate) = &mut self.commit_gate {
+            commit_gate.reset_for_material_amendment();
+        }
+        self.status = TaskStatus::Ready;
+        self.resume_status = None;
+        self.blocker = None;
+        self.add_implementation_note(format!("Final verification rework: {}", reason.trim()))
+    }
+
     pub(crate) fn add_amended_file(&mut self, entry: FileMapEntry) -> Result<(), DomainError> {
         if self.status == TaskStatus::Draft {
             return Err(self.invalid_transition("accept an amended file responsibility"));

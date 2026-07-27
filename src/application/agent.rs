@@ -38,6 +38,7 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("exec.criterion.pass", true, false),
     ("exec.finish", true, false),
     ("exec.resume", true, false),
+    ("exec.rework", true, false),
     ("exec.schedule.spec", false, false),
     ("exec.start", true, false),
     ("git.bind", false, false),
@@ -788,6 +789,16 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
             action_ids(&["exec.start", "exec.block"]),
             vec![start_action(plan, task_id)],
         )
+    } else if let Some(check_id) = failed_required_global_check(plan) {
+        (
+            action_ids(&["exec.check.run", "exec.rework", "exec.block"]),
+            plan.task_order()
+                .iter()
+                .filter_map(|task_id| plan.task(task_id))
+                .filter(|task| task.status() == TaskStatus::Done)
+                .map(|task| rework_action(plan, task.id(), check_id))
+                .collect(),
+        )
     } else if let Some(check_id) = next_execution_check(plan) {
         (
             action_ids(&["exec.check.run", "exec.block"]),
@@ -885,6 +896,20 @@ fn finish_action(plan: &Plan) -> NextAction {
     mutation_action(plan, "exec.finish", &["exec", "finish"], Vec::new())
 }
 
+fn rework_action(plan: &Plan, task_id: &TaskId, check_id: &CheckId) -> NextAction {
+    mutation_action(
+        plan,
+        "exec.rework",
+        &["exec", "rework"],
+        vec![
+            "--task".to_owned(),
+            task_id.to_string(),
+            "--reason".to_owned(),
+            format!("Required global check {check_id} failed"),
+        ],
+    )
+}
+
 fn amendment_apply_action(plan: &Plan, change_id: &str) -> NextAction {
     mutation_action(
         plan,
@@ -973,6 +998,13 @@ fn next_execution_check(plan: &Plan) -> Option<&CheckId> {
             .map(crate::domain::VerificationCheck::id);
     }
     None
+}
+
+fn failed_required_global_check(plan: &Plan) -> Option<&CheckId> {
+    plan.global_verification()
+        .iter()
+        .find(|check| check.is_required() && check.status() == CheckStatus::Failed)
+        .map(crate::domain::VerificationCheck::id)
 }
 
 fn mutation_action(plan: &Plan, id: &str, command: &[&str], extra: Vec<String>) -> NextAction {

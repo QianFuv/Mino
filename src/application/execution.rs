@@ -238,6 +238,34 @@ impl ExecutionService {
         )
     }
 
+    /// Reopens one completed task after required global verification fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for an illegal lifecycle position, missing task,
+    /// empty reason, revision/request conflict, storage failure, or drift.
+    pub fn rework_failed_global_verification(
+        &self,
+        request: PlanMutationRequest,
+        task_id: TaskId,
+        reason: String,
+    ) -> Result<PlanOperationReport, MinoError> {
+        self.plans.commit_semantic(
+            request,
+            vec![
+                "status".to_owned(),
+                format!("tasks.{task_id}.status"),
+                format!("tasks.{task_id}.acceptance_criteria"),
+                format!("tasks.{task_id}.verification_checks"),
+                format!("tasks.{task_id}.commit_gate"),
+                "verification_plan".to_owned(),
+                "extensions.workspace.task_baselines".to_owned(),
+            ],
+            |_| Ok(None),
+            move |plan, at| plan.rework_failed_global_verification(&task_id, &reason, at),
+        )
+    }
+
     /// Runs one uniquely identified planned check and attaches immutable evidence.
     ///
     /// # Errors

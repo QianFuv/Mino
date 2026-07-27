@@ -8,12 +8,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use mino::ErrorCategory;
+use mino::application::agent::AgentService;
+use mino::application::completion::CompletionService;
 use mino::application::execution::{CheckExecutionDisposition, ExecutionService};
 use mino::application::plan::PlanMutationRequest;
 use mino::domain::{
     AcceptanceCriterion, Approval, CheckId, CheckRunContext, CheckRunLease, CheckRunLimits,
-    CheckStatus, CheckpointKind, CriterionId, GitFlowConsent, GitReadiness, Plan, PlanDraftSeed,
-    PlanId, RequestId, Task, TaskId, Timestamp, VerificationCheck,
+    CheckStatus, CheckpointKind, CommitStatus, CriterionId, CriterionStatus, GitFlowConsent,
+    GitReadiness, Plan, PlanDraftSeed, PlanId, RequestId, Task, TaskId, TaskStatus, Timestamp,
+    VerificationCheck,
 };
 use mino::evidence::EvidenceStore;
 use mino::project::initialize;
@@ -32,6 +35,15 @@ struct TestProject {
 
 impl TestProject {
     fn new(label: &str, first_mode: &str, marker: Option<&Path>) -> Self {
+        Self::new_with_global_mode(label, first_mode, "pass", marker)
+    }
+
+    fn new_with_global_mode(
+        label: &str,
+        first_mode: &str,
+        global_mode: &str,
+        marker: Option<&Path>,
+    ) -> Self {
         let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "mino-execution-{label}-{}-{sequence}",
@@ -49,7 +61,7 @@ impl TestProject {
         initialize(&path).expect("temporary project should initialize");
         let path = path.canonicalize().expect("project root should resolve");
         let helper = compile_helper(&path);
-        let base_revision = create_approved_plan(&path, &helper, first_mode, marker);
+        let base_revision = create_approved_plan(&path, &helper, first_mode, global_mode, marker);
         Self {
             path,
             helper,
@@ -145,11 +157,12 @@ fn create_approved_plan(
     root: &Path,
     helper: &Path,
     first_mode: &str,
+    global_mode: &str,
     marker: Option<&Path>,
 ) -> u64 {
     let global = VerificationCheck::new(
         check_id("GLOBAL-CHECK"),
-        helper_command(helper, "pass", None),
+        helper_command(helper, global_mode, None),
         ".",
         0,
         true,
@@ -424,6 +437,181 @@ fn execution_order_checkpoints_and_block_resume_are_revision_checked() {
         ))
         .expect("plan should resume");
     assert_eq!(resumed.revision, project.base_revision + 4);
+}
+
+#[test]
+fn failed_global_verification_reopens_an_owned_task_for_fresh_execution() {
+    let project = TestProject::new_with_global_mode("global-rework", "pass", "fail", None);
+    let service = ExecutionService::discover(project.path()).expect("service should discover");
+    let first_done = complete_task_workflow(
+        &project,
+        &service,
+        project.base_revision,
+        100,
+        ("T1", "TASK-CHECK", "T1-A1"),
+        30,
+    );
+    let second_done = complete_task_workflow(
+        &project,
+        &service,
+        first_done,
+        110,
+        ("T2", "SECOND-CHECK", "T2-A1"),
+        35,
+    );
+    let failed = service
+        .run_check(
+            &mutation(
+                second_done,
+                120,
+                vec!["mino".to_owned(), "exec".to_owned(), "check".to_owned()],
+                40,
+            ),
+            &check_id("GLOBAL-CHECK"),
+        )
+        .expect("failed global check should persist its result");
+    assert!(!failed.is_success());
+    let guidance = AgentService::discover(project.path())
+        .expect("Agent service should discover")
+        .context()
+        .expect("failed global check should produce Agent guidance");
+    assert!(
+        guidance
+            .allowed_actions
+            .iter()
+            .any(|action| action == "exec.rework")
+    );
+    assert_eq!(
+        guidance
+            .next_actions
+            .iter()
+            .filter(|action| action.id == "exec.rework")
+            .count(),
+        2
+    );
+
+    let reworked = service
+        .rework_failed_global_verification(
+            mutation(
+                failed.plan().revision,
+                121,
+                vec!["mino".to_owned(), "exec".to_owned(), "rework".to_owned()],
+                41,
+            ),
+            task_id("T1"),
+            "GLOBAL-CHECK exposed a defect owned by T1".to_owned(),
+        )
+        .expect("failed final verification should reopen the owning task");
+    assert_global_rework_state(&project, reworked.revision, failed.plan().revision);
+
+    service
+        .start_task(
+            mutation(
+                reworked.revision,
+                122,
+                start_command(reworked.revision, 122, "T1"),
+                42,
+            ),
+            task_id("T1"),
+        )
+        .expect("reopened task should return to normal execution");
+}
+
+fn assert_global_rework_state(project: &TestProject, reworked_revision: u64, failed_revision: u64) {
+    let plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("reworked plan should load");
+    let first = plan.task(&task_id("T1")).expect("first task should exist");
+    assert_eq!(reworked_revision, failed_revision + 1);
+    assert_eq!(first.status(), TaskStatus::Ready);
+    assert_eq!(
+        first.acceptance_criteria()[0].status(),
+        CriterionStatus::Pending
+    );
+    assert_eq!(
+        first.verification_checks()[0].status(),
+        CheckStatus::Pending
+    );
+    assert!(!first.verification_checks()[0].evidence_refs().is_empty());
+    assert!(
+        first
+            .commit_gate()
+            .is_none_or(|gate| gate.status() == CommitStatus::NotRequired)
+    );
+    assert_eq!(plan.global_verification()[0].status(), CheckStatus::Pending);
+    assert!(!plan.global_verification()[0].evidence_refs().is_empty());
+    assert!(
+        plan.workspace_state()
+            .expect("workspace state should decode")
+            .task_baseline(&task_id("T1"))
+            .is_none()
+    );
+    assert!(
+        first
+            .implementation_notes()
+            .last()
+            .is_some_and(|note| note.contains("GLOBAL-CHECK exposed a defect"))
+    );
+}
+
+fn complete_task_workflow(
+    project: &TestProject,
+    service: &ExecutionService,
+    revision: u64,
+    sequence: u64,
+    identity: (&str, &str, &str),
+    minute: u8,
+) -> u64 {
+    let (task, check, criterion) = identity;
+    let started = service
+        .start_task(
+            mutation(
+                revision,
+                sequence,
+                start_command(revision, sequence, task),
+                minute,
+            ),
+            task_id(task),
+        )
+        .expect("task should start");
+    let checked = service
+        .run_check(
+            &mutation(
+                started.revision,
+                sequence + 1,
+                vec!["mino".to_owned(), "exec".to_owned(), "check".to_owned()],
+                minute + 1,
+            ),
+            &check_id(check),
+        )
+        .expect("task check should run");
+    assert!(checked.is_success());
+    let completion =
+        CompletionService::discover(project.path()).expect("completion service should discover");
+    let criterion = completion
+        .pass_criterion(
+            mutation(
+                checked.plan().revision,
+                sequence + 2,
+                vec!["mino".to_owned(), "exec".to_owned(), "criterion".to_owned()],
+                minute + 2,
+            ),
+            CriterionId::parse(criterion).expect("criterion ID should be valid"),
+            checked.evidence().id().clone(),
+        )
+        .expect("criterion should pass");
+    completion
+        .complete_task(
+            mutation(
+                criterion.revision,
+                sequence + 3,
+                vec!["mino".to_owned(), "exec".to_owned(), "complete".to_owned()],
+                minute + 3,
+            ),
+            task_id(task),
+        )
+        .expect("task should complete")
+        .revision
 }
 
 #[test]

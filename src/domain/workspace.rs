@@ -449,6 +449,10 @@ impl WorkspaceProtocolState {
         Ok(())
     }
 
+    pub(crate) fn remove_task_baseline(&mut self, task_id: &TaskId) {
+        self.task_baselines.remove(task_id);
+    }
+
     pub(crate) fn validate(&self, task_ids: &BTreeSet<&TaskId>) -> Result<(), DomainError> {
         if let Some(baseline) = &self.plan_baseline {
             validate_baseline(baseline)?;

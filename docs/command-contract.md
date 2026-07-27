@@ -142,6 +142,7 @@ artifact path 必须留在项目内。修正证据会创建带 `supersedes` 的�
 | `mino exec schedule spec` | 无 | 输出摘要绑定、调度器中立的检查 handoff；不创建外部任务、不联网、不写 Mino 状态。 |
 | `mino exec criterion pass` | 计划 | 把兼容的不可变证据绑定到一个活动验收条件。 |
 | `mino exec complete` | 计划 | 在检查、证据、偏差、checkpoint 和 File Map 门槛后完成活动任务。 |
+| `mino exec rework` | 计划 | 仅在必需全局检查失败后，用 `--task` 和非空 `--reason` 重新打开一个 Done 任务，重置其验收、检查、commit gate、任务基线和全部全局检查状态，同时保留历史 evidence。 |
 | `mino exec block` | 计划 | 用非空且可恢复的原因阻塞 Ready 或 In Progress 计划。 |
 | `mino exec resume` | 计划 | 恢复到记录的 Ready 或 In Progress 状态。 |
 | `mino exec finish` | 计划 | 在所有任务、必需 commit gate 和全局检查完成后转入 Review。 |

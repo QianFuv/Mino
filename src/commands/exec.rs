@@ -31,6 +31,8 @@ pub(crate) enum ExecAction {
     Criterion(CriterionArguments),
     /// Complete the active task after every evidence and scope gate passes.
     Complete(CompleteArguments),
+    /// Reopen one completed task after required final verification fails.
+    Rework(ReworkArguments),
     /// Block the current plan with a resumable reason.
     Block(BlockArguments),
     /// Resume a plan from its recorded blocked state.
@@ -247,6 +249,18 @@ pub(crate) struct CompleteArguments {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct ReworkArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    /// Completed task that owns the corrective change.
+    #[arg(long)]
+    task: String,
+    /// Non-empty reason connecting the task to final verification failure.
+    #[arg(long)]
+    reason: String,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct BlockArguments {
     #[command(flatten)]
     mutation: MutationArguments,
@@ -317,6 +331,29 @@ pub(crate) fn execute(start: &Path, action: ExecAction) -> Result<CommandRespons
             CriterionAction::Pass(arguments) => pass_criterion(start, arguments),
         },
         ExecAction::Complete(arguments) => complete_task(start, arguments),
+        ExecAction::Rework(arguments) => {
+            let command = mutation_command(
+                &["rework"],
+                &arguments.mutation,
+                vec![
+                    "--task".to_owned(),
+                    arguments.task.clone(),
+                    "--reason".to_owned(),
+                    arguments.reason.clone(),
+                ],
+            );
+            let request = mutation_request(arguments.mutation, command)?;
+            let report = service.rework_failed_global_verification(
+                request,
+                parse_task_id(&arguments.task)?,
+                arguments.reason,
+            )?;
+            response_with_guidance(
+                start,
+                "Task reopened for final verification rework.",
+                report,
+            )
+        }
         ExecAction::Block(arguments) => {
             let command = mutation_command(
                 &["block"],

@@ -1543,6 +1543,21 @@ fn expected_parent(
             "Task commit requires a current HEAD",
         )
     })?;
+    let workspace = plan
+        .workspace_state()
+        .map_err(|error| MinoError::new(ErrorCategory::DriftDetected, error.to_string()))?;
+    if let Some(baseline) = workspace.task_baseline(task_id)
+        && baseline.repository_mode() == WorkspaceRepositoryMode::Git
+        && let Some(task_start_head) = baseline.head()
+    {
+        if task_start_head.eq_ignore_ascii_case(live_head) {
+            return Ok(live_head.to_ascii_lowercase());
+        }
+        return Err(MinoError::new(
+            ErrorCategory::DriftDetected,
+            "Current HEAD does not match the task-start workspace baseline",
+        ));
+    }
     let position = plan
         .task_order()
         .iter()

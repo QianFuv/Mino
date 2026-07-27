@@ -454,6 +454,65 @@ fn approved_commit_skips_satisfy_task_order_finish_and_acceptance() {
 }
 
 #[test]
+fn final_verification_failure_has_an_explicit_rework_exit() {
+    let (mut plan, first_id, second_id) = approved_two_task_plan();
+    let premature = plan
+        .rework_failed_global_verification(&first_id, "No global failure exists", timestamp(8))
+        .expect_err("rework must not start before final verification fails");
+    assert_eq!(premature.kind(), DomainErrorKind::InvalidTransition);
+
+    plan.start_task(&first_id, timestamp(9))
+        .expect("first task should start");
+    satisfy_task(&mut plan, &first_id, 1, 10);
+    plan.complete_task(&first_id, timestamp(12))
+        .expect("first task should complete");
+    satisfy_commit(&mut plan, &first_id, 3, 13);
+    plan.start_task(&second_id, timestamp(14))
+        .expect("second task should start");
+    satisfy_task(&mut plan, &second_id, 4, 15);
+    plan.complete_task(&second_id, timestamp(17))
+        .expect("second task should complete");
+    satisfy_commit(&mut plan, &second_id, 6, 18);
+    plan.begin_check_run(&check_id("GLOBAL-V1"), timestamp(19))
+        .expect("global check should start");
+    plan.record_check_run(
+        &check_id("GLOBAL-V1"),
+        evidence_id("E0007"),
+        false,
+        timestamp(20),
+    )
+    .expect("global failure should persist");
+
+    plan.rework_failed_global_verification(
+        &first_id,
+        "Global verification exposed T1 behavior",
+        timestamp(21),
+    )
+    .expect("failed global verification should reopen T1");
+    assert_eq!(
+        plan.task(&first_id)
+            .expect("first task should exist")
+            .status(),
+        TaskStatus::Ready
+    );
+    assert_eq!(
+        plan.global_verification()[0].status(),
+        mino::domain::CheckStatus::Pending
+    );
+
+    plan.start_task(&first_id, timestamp(22))
+        .expect("reopened task should start");
+    satisfy_task(&mut plan, &first_id, 8, 23);
+    plan.complete_task(&first_id, timestamp(25))
+        .expect("reopened task should complete with fresh evidence");
+    satisfy_commit_skip(&mut plan, &first_id, 10, 26);
+    satisfy_global(&mut plan, 11, 27);
+    plan.finish_execution(timestamp(28))
+        .expect("fresh global verification should restore Review");
+    assert_eq!(plan.status(), PlanStatus::Review);
+}
+
+#[test]
 fn blocked_execution_resumes_and_review_rework_reopens_a_task() {
     let first_id = task_id("T1");
     let mut plan = Plan::new(plan_id(), "Exercise block and rework.", timestamp(0));
