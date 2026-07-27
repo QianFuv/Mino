@@ -490,7 +490,16 @@ fn create_non_utf8_file(root: &Path) {
     use std::os::unix::ffi::OsStringExt;
 
     let name = OsString::from_vec(vec![b'n', b'o', b'n', 0xff]);
-    fs::write(root.join(name), b"ignored\n").expect("non-UTF8 file should be created");
+    if let Err(error) = fs::write(root.join(name), b"ignored\n") {
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            error.raw_os_error(),
+            Some(92),
+            "macOS should reject an invalid byte sequence with EILSEQ"
+        );
+        #[cfg(not(target_os = "macos"))]
+        panic!("non-UTF8 file should be created: {error}");
+    }
 }
 
 #[cfg(not(unix))]
