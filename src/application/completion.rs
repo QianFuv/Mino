@@ -12,8 +12,10 @@ use crate::domain::{
     ReviewStatus, Task, TaskId, Timestamp, VerificationCheck,
 };
 use crate::evidence::{EvidenceError, EvidenceErrorKind, EvidenceStore};
-use crate::git::{ChangedFile, GitChangeError, inspect_changes, matches_file_map_path};
-use crate::workspace::workspace_fingerprint_is_current;
+use crate::git::matches_file_map_path;
+use crate::workspace::{
+    WorkspaceDeltaEntry, WorkspaceDeltaKind, workspace_delta, workspace_fingerprint_is_current,
+};
 use crate::{ErrorCategory, MinoError, NextAction};
 
 #[derive(Clone, Copy)]
@@ -448,24 +450,27 @@ fn task_changed_files(
     root: &Path,
     plan: &Plan,
     task: &Task,
-) -> Result<Vec<ChangedFile>, MinoError> {
-    let inspection = inspect_changes(root).map_err(|error| map_git_error(&error))?;
-    let files = inspection
-        .files()
-        .iter()
-        .filter(|file| !is_mino_owned_path(plan, file.path()))
-        .cloned()
-        .collect::<Vec<_>>();
-    let requires_inspection = task
-        .file_map()
-        .iter()
-        .any(|entry| entry.change() != FileChange::NotApplicable);
-    if !inspection.is_repository() && requires_inspection {
+) -> Result<Vec<WorkspaceDeltaEntry>, MinoError> {
+    let workspace = plan
+        .workspace_state()
+        .map_err(|error| map_domain_error(&error))?;
+    let baseline = workspace.task_baseline(task.id()).ok_or_else(|| {
+        incomplete(format!(
+            "Task {} has no recorded workspace start baseline",
+            task.id()
+        ))
+    })?;
+    let delta = workspace_delta(root, plan, baseline)?;
+    if delta.repository_head_changed() {
         return Err(MinoError::new(
-            ErrorCategory::EnvironmentUnavailable,
-            "Task File Map changes require an available Git work tree for completion",
+            ErrorCategory::DriftDetected,
+            format!(
+                "Repository mode or HEAD changed after task {} started",
+                task.id()
+            ),
         ));
     }
+    let files = delta.entries().to_vec();
     let outside = files
         .iter()
         .filter(|file| {
@@ -486,7 +491,7 @@ fn task_changed_files(
 fn validate_commit_precondition(
     plan: &Plan,
     task: &Task,
-    changed_files: &[ChangedFile],
+    changed_files: &[WorkspaceDeltaEntry],
 ) -> Result<(), MinoError> {
     let is_acceptance_defect_rerun = plan.review_items().iter().any(|item| {
         item.classification() == ReviewClassification::AcceptanceDefect
@@ -709,11 +714,11 @@ pub(crate) fn validate_review_evidence(
     validate_all_deviations(plan)
 }
 
-fn compatible_change(change: FileChange, file: &ChangedFile) -> bool {
+fn compatible_change(change: FileChange, file: &WorkspaceDeltaEntry) -> bool {
     match change {
-        FileChange::Create => file.is_added(),
-        FileChange::Modify => !file.is_added() && !file.is_deleted(),
-        FileChange::Delete => file.is_deleted(),
+        FileChange::Create => file.kind() == WorkspaceDeltaKind::Created,
+        FileChange::Modify => file.kind() == WorkspaceDeltaKind::Modified,
+        FileChange::Delete => file.kind() == WorkspaceDeltaKind::Deleted,
         FileChange::Test => true,
         FileChange::NotApplicable => false,
     }
@@ -799,10 +804,6 @@ fn superseded_ids(evidence: &[Evidence]) -> BTreeSet<&EvidenceId> {
     evidence.iter().filter_map(Evidence::supersedes).collect()
 }
 
-fn is_mino_owned_path(plan: &Plan, path: &str) -> bool {
-    path == ".mino" || path.starts_with(".mino/") || plan.metadata().markdown_path() == Some(path)
-}
-
 fn is_replay_position(plan: &Plan, expected_revision: u64) -> Result<bool, MinoError> {
     let target = expected_revision.checked_add(1).ok_or_else(|| {
         MinoError::new(
@@ -871,10 +872,6 @@ fn incompatible(message: impl Into<String>) -> MinoError {
 
 fn map_domain_error(error: &crate::domain::DomainError) -> MinoError {
     MinoError::new(ErrorCategory::DriftDetected, error.to_string())
-}
-
-fn map_git_error(error: &GitChangeError) -> MinoError {
-    MinoError::new(ErrorCategory::EnvironmentUnavailable, error.message())
 }
 
 fn map_evidence_error(error: &EvidenceError) -> MinoError {

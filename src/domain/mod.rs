@@ -60,7 +60,8 @@ pub use version::{
     CURRENT_PROTOCOL_REVISION, CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, ProtocolVersion,
     SchemaVersion,
 };
+pub(crate) use workspace::WORKSPACE_EXTENSION_KEY;
 pub use workspace::{
     WorkspaceFileKind, WorkspaceFileSnapshot, WorkspaceFingerprint, WorkspaceFingerprintScope,
-    WorkspaceRepositoryMode, WorkspaceScopeKind, WorkspaceStatusEntry,
+    WorkspaceProtocolState, WorkspaceRepositoryMode, WorkspaceScopeKind, WorkspaceStatusEntry,
 };

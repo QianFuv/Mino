@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 
+use super::WORKSPACE_EXTENSION_KEY;
 use super::execution::EXECUTION_EXTENSION_KEY;
 use super::standards::STANDARDS_CONFLICT_EXTENSION_KEY;
 use super::{
@@ -16,6 +17,7 @@ use super::{
     GitFlowConsent, Lineage, PlanArchive, PlanDraftSeed, PlanId, PlanStatus, ProtocolVersion,
     ReviewClassification, ReviewItem, ReviewStatus, SchemaVersion, StandardConflict,
     StandardsConflictState, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
+    WorkspaceFingerprint, WorkspaceProtocolState,
 };
 
 /// Human and repository metadata associated with a plan.
@@ -1024,6 +1026,28 @@ impl Plan {
             )
     }
 
+    /// Returns persisted plan and task workspace baselines.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when the workspace extension is malformed.
+    pub fn workspace_state(&self) -> Result<WorkspaceProtocolState, DomainError> {
+        self.extensions
+            .get(WORKSPACE_EXTENSION_KEY)
+            .cloned()
+            .map_or_else(
+                || Ok(WorkspaceProtocolState::default()),
+                |value| {
+                    serde_json::from_value(value).map_err(|error| {
+                        DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            format!("Workspace extension is malformed: {error}"),
+                        )
+                    })
+                },
+            )
+    }
+
     /// Returns typed standards-conflict snapshots stored in the extension namespace.
     ///
     /// # Errors
@@ -1870,6 +1894,28 @@ impl Plan {
     ///
     /// Returns an error unless the plan is Ready and the approval kind is Plan.
     pub fn record_approval(&mut self, approval: Approval) -> Result<(), DomainError> {
+        self.record_approval_internal(approval, None)
+    }
+
+    /// Records a plan approval and the exact approved workspace baseline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan is Ready, the approval is explicit,
+    /// and the baseline is a valid complete-project capture.
+    pub fn record_approval_with_baseline(
+        &mut self,
+        approval: Approval,
+        baseline: WorkspaceFingerprint,
+    ) -> Result<(), DomainError> {
+        self.record_approval_internal(approval, Some(baseline))
+    }
+
+    fn record_approval_internal(
+        &mut self,
+        approval: Approval,
+        baseline: Option<WorkspaceFingerprint>,
+    ) -> Result<(), DomainError> {
         self.require_status(PlanStatus::Ready, "record approval")?;
         if approval.kind != ApprovalKind::Plan {
             return Err(DomainError::new(
@@ -1897,6 +1943,11 @@ impl Plan {
         }
         let next_revision = self.next_revision()?;
         let updated_at = approval.recorded_at.clone();
+        if let Some(baseline) = baseline {
+            let mut workspace = self.workspace_state()?;
+            workspace.record_plan_baseline(baseline)?;
+            self.store_workspace_state(&workspace)?;
+        }
         self.git_readiness.git_flow_consent = approval.git_flow_consent;
         self.git_readiness.approved_at = Some(updated_at.clone());
         self.approvals.push(approval);
@@ -1913,6 +1964,30 @@ impl Plan {
     pub fn start_task(
         &mut self,
         task_id: &TaskId,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.start_task_internal(task_id, None, updated_at)
+    }
+
+    /// Starts the first eligible task and records its exact workspace baseline.
+    ///
+    /// # Errors
+    ///
+    /// Returns the normal task-start errors or an invariant error for a
+    /// malformed complete-project baseline.
+    pub fn start_task_with_baseline(
+        &mut self,
+        task_id: &TaskId,
+        baseline: WorkspaceFingerprint,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.start_task_internal(task_id, Some(baseline), updated_at)
+    }
+
+    fn start_task_internal(
+        &mut self,
+        task_id: &TaskId,
+        baseline: Option<WorkspaceFingerprint>,
         updated_at: Timestamp,
     ) -> Result<(), DomainError> {
         self.ensure_no_pending_amendment("start a task")?;
@@ -1941,49 +2016,7 @@ impl Plan {
             ));
         }
 
-        let expected = self
-            .task_order
-            .iter()
-            .find(|id| {
-                self.task(id)
-                    .is_some_and(|task| task.status() != TaskStatus::Done)
-            })
-            .ok_or_else(|| {
-                DomainError::new(
-                    DomainErrorKind::TaskOrderViolation,
-                    "No incomplete task is available to start",
-                )
-            })?;
-        if expected != task_id {
-            return Err(DomainError::new(
-                DomainErrorKind::TaskOrderViolation,
-                format!("Task {task_id} is not the first eligible task; expected {expected}"),
-            ));
-        }
-
-        let task_position = self
-            .task_order
-            .iter()
-            .position(|candidate| candidate == task_id)
-            .ok_or_else(|| {
-                DomainError::new(
-                    DomainErrorKind::TaskOrderViolation,
-                    format!("Task {task_id} is missing from implementation order"),
-                )
-            })?;
-        let uncommitted_prior = self.task_order[..task_position].iter().find(|prior_id| {
-            self.task(prior_id).is_some_and(|prior| {
-                prior.commit_gate().is_some_and(|gate| {
-                    gate.is_required() && gate.status() != CommitStatus::Committed
-                })
-            })
-        });
-        if let Some(prior_id) = uncommitted_prior {
-            return Err(DomainError::new(
-                DomainErrorKind::TaskOrderViolation,
-                format!("Task {prior_id} must be committed before task {task_id} can start"),
-            ));
-        }
+        self.validate_task_order_for_start(task_id)?;
 
         let task = self.task(task_id).ok_or_else(|| {
             DomainError::new(
@@ -2016,8 +2049,61 @@ impl Plan {
 
         let next_revision = self.next_revision()?;
         self.task_mut(task_id)?.start()?;
+        if let Some(baseline) = baseline {
+            let mut workspace = self.workspace_state()?;
+            if workspace.plan_baseline().is_none() {
+                workspace.record_plan_baseline(baseline.clone())?;
+            }
+            workspace.record_task_baseline(task_id.clone(), baseline)?;
+            self.store_workspace_state(&workspace)?;
+        }
         self.status = PlanStatus::InProgress;
         self.record_revision(next_revision, updated_at);
+        Ok(())
+    }
+
+    fn validate_task_order_for_start(&self, task_id: &TaskId) -> Result<(), DomainError> {
+        let expected = self
+            .task_order
+            .iter()
+            .find(|id| {
+                self.task(id)
+                    .is_some_and(|task| task.status() != TaskStatus::Done)
+            })
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::TaskOrderViolation,
+                    "No incomplete task is available to start",
+                )
+            })?;
+        if expected != task_id {
+            return Err(DomainError::new(
+                DomainErrorKind::TaskOrderViolation,
+                format!("Task {task_id} is not the first eligible task; expected {expected}"),
+            ));
+        }
+        let task_position = self
+            .task_order
+            .iter()
+            .position(|candidate| candidate == task_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::TaskOrderViolation,
+                    format!("Task {task_id} is missing from implementation order"),
+                )
+            })?;
+        if let Some(prior_id) = self.task_order[..task_position].iter().find(|prior_id| {
+            self.task(prior_id).is_some_and(|prior| {
+                prior.commit_gate().is_some_and(|gate| {
+                    gate.is_required() && gate.status() != CommitStatus::Committed
+                })
+            })
+        }) {
+            return Err(DomainError::new(
+                DomainErrorKind::TaskOrderViolation,
+                format!("Task {prior_id} must be committed before task {task_id} can start"),
+            ));
+        }
         Ok(())
     }
 
@@ -2878,6 +2964,8 @@ impl Plan {
         self.validate_amendment_state()?;
         self.validate_review_state()?;
         self.validate_execution_state()?;
+        let task_ids = self.tasks.iter().map(Task::id).collect::<BTreeSet<_>>();
+        self.workspace_state()?.validate(&task_ids)?;
         self.standards_conflict_state()?.validate()?;
         Ok(())
     }
@@ -2898,6 +2986,18 @@ impl Plan {
         })?;
         self.extensions
             .insert(STANDARDS_CONFLICT_EXTENSION_KEY.to_owned(), value);
+        Ok(())
+    }
+
+    fn store_workspace_state(&mut self, state: &WorkspaceProtocolState) -> Result<(), DomainError> {
+        let value = serde_json::to_value(state).map_err(|error| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Failed to encode workspace extension: {error}"),
+            )
+        })?;
+        self.extensions
+            .insert(WORKSPACE_EXTENSION_KEY.to_owned(), value);
         Ok(())
     }
 

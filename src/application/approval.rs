@@ -6,6 +6,7 @@ use crate::application::plan::{PlanMutationRequest, PlanOperationReport, PlanSer
 use crate::domain::{Approval, GitFlowConsent, Plan, PlanId, PlanStatus};
 use crate::store::{canonical_json_bytes, sha256_digest};
 use crate::validation::{ValidationReport, validate_plan, validation_failure};
+use crate::workspace::capture_workspace_baseline;
 use crate::{ErrorCategory, MinoError};
 
 /// Versioned generated plan-review schema identifier.
@@ -81,7 +82,8 @@ impl ApprovalService {
     /// illegal transitions, storage failures, or projection drift.
     pub fn finalize(&self, request: PlanMutationRequest) -> Result<PlanOperationReport, MinoError> {
         let current = self.plans.load_verified(&request.plan_id)?;
-        if !is_replay_candidate(&current, &request)? {
+        let is_replay = is_replay_candidate(&current, &request)?;
+        if !is_replay {
             let validation = validate_plan(self.plans.root(), &current)?;
             require_valid(&validation)?;
         }
@@ -106,7 +108,8 @@ impl ApprovalService {
         git_flow_consent: GitFlowConsent,
     ) -> Result<PlanOperationReport, MinoError> {
         let current = self.plans.load_verified(&request.plan_id)?;
-        if !is_replay_candidate(&current, &request)? {
+        let is_replay = is_replay_candidate(&current, &request)?;
+        if !is_replay {
             let validation = validate_plan(self.plans.root(), &current)?;
             require_valid(&validation)?;
         }
@@ -124,15 +127,26 @@ impl ApprovalService {
             request.updated_at.clone(),
             git_flow_consent,
         );
+        let baseline = if is_replay {
+            None
+        } else {
+            Some(capture_workspace_baseline(self.plans.root(), &current)?)
+        };
         self.plans.commit_semantic(
             request,
             vec![
                 "approvals".to_owned(),
                 "git_readiness.git_flow_consent".to_owned(),
                 "git_readiness.approved_at".to_owned(),
+                "extensions.workspace.plan_baseline".to_owned(),
             ],
             |_| Ok(None),
-            move |plan, _| plan.record_approval(approval.clone()),
+            move |plan, _| match &baseline {
+                Some(baseline) => {
+                    plan.record_approval_with_baseline(approval.clone(), baseline.clone())
+                }
+                None => plan.record_approval(approval.clone()),
+            },
         )
     }
 }

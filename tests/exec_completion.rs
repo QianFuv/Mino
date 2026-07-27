@@ -32,6 +32,23 @@ struct TestProject {
 
 impl TestProject {
     fn new(label: &str, task_mode: &str) -> Self {
+        Self::new_with_repository(label, task_mode, true, false)
+    }
+
+    fn new_without_git(label: &str, task_mode: &str) -> Self {
+        Self::new_with_repository(label, task_mode, false, false)
+    }
+
+    fn new_with_two_tasks(label: &str, task_mode: &str) -> Self {
+        Self::new_with_repository(label, task_mode, true, true)
+    }
+
+    fn new_with_repository(
+        label: &str,
+        task_mode: &str,
+        has_git_repository: bool,
+        has_second_task: bool,
+    ) -> Self {
         let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "mino-completion-{label}-{}-{sequence}",
@@ -50,9 +67,17 @@ impl TestProject {
             .expect("ignore rules should be written");
         let helper = compile_helper(&path);
         initialize(&path).expect("Mino project should initialize");
-        initialize_git(&path, &helper);
+        if has_git_repository {
+            initialize_git(&path, &helper);
+        }
         let path = path.canonicalize().expect("project root should resolve");
-        let base_revision = create_approved_plan(&path, &helper, task_mode);
+        let base_revision = create_approved_plan(
+            &path,
+            &helper,
+            task_mode,
+            has_git_repository,
+            has_second_task,
+        );
         Self {
             path,
             base_revision,
@@ -154,34 +179,14 @@ fn git(root: &Path, arguments: &[&str]) {
     );
 }
 
-fn create_approved_plan(root: &Path, helper: &Path, task_mode: &str) -> u64 {
-    let plan = Plan::from_draft_seed(
-        PlanDraftSeed {
-            id: plan_id(),
-            name: "Completion contract".to_owned(),
-            trigger: "durable".to_owned(),
-            original_request: "Complete only with compatible evidence.".to_owned(),
-            branch: Some("master".to_owned()),
-            markdown_path: projection_relative().to_owned(),
-            git_readiness: GitReadiness::detected(
-                "Present",
-                "Clean",
-                Some("master".to_owned()),
-                None,
-                "Clean",
-                false,
-            ),
-            standards: Vec::new(),
-            verification_plan: vec![VerificationCheck::new(
-                check_id("GLOBAL-CHECK"),
-                helper_command(helper, "pass"),
-                ".",
-                0,
-                true,
-            )],
-        },
-        timestamp(0),
-    );
+fn create_approved_plan(
+    root: &Path,
+    helper: &Path,
+    task_mode: &str,
+    has_git_repository: bool,
+    has_second_task: bool,
+) -> u64 {
+    let plan = fixture_plan(helper, has_git_repository);
     let store = PlanStore::new(root);
     store
         .create_plan(
@@ -218,17 +223,31 @@ fn create_approved_plan(root: &Path, helper: &Path, task_mode: &str) -> u64 {
     commit(&store, 2, 3, vec!["tasks.T1.status"], |plan| {
         plan.mark_task_ready(&task_id(), timestamp(2))
     });
-    commit(&store, 3, 4, vec!["status"], |plan| {
-        plan.finalize(timestamp(3))
+    let mut revision = 3;
+    let mut request_sequence = 4;
+    if has_second_task {
+        (revision, request_sequence) =
+            append_second_task(&store, helper, task_mode, revision, request_sequence);
+    }
+    commit(&store, revision, request_sequence, vec!["status"], |plan| {
+        plan.finalize(timestamp(5))
     });
-    commit(&store, 4, 5, vec!["approvals"], |plan| {
-        plan.record_approval(Approval::plan(
-            "user",
-            "chat:completion-approval",
-            timestamp(4),
-            GitFlowConsent::Disabled,
-        ))
-    });
+    revision += 1;
+    request_sequence += 1;
+    commit(
+        &store,
+        revision,
+        request_sequence,
+        vec!["approvals"],
+        |plan| {
+            plan.record_approval(Approval::plan(
+                "user",
+                "chat:completion-approval",
+                timestamp(6),
+                GitFlowConsent::Disabled,
+            ))
+        },
+    );
     let plan = store
         .load_plan(&plan_id())
         .expect("approved plan should load");
@@ -239,6 +258,101 @@ fn create_approved_plan(root: &Path, helper: &Path, task_mode: &str) -> u64 {
     )
     .expect("projection should write");
     plan.revision()
+}
+
+fn fixture_plan(helper: &Path, has_git_repository: bool) -> Plan {
+    let git_readiness = if has_git_repository {
+        GitReadiness::detected(
+            "Present",
+            "Clean",
+            Some("master".to_owned()),
+            None,
+            "Clean",
+            false,
+        )
+    } else {
+        GitReadiness::detected(
+            "Missing",
+            "Not Applicable",
+            None,
+            None,
+            "No Git repository",
+            false,
+        )
+    };
+    Plan::from_draft_seed(
+        PlanDraftSeed {
+            id: plan_id(),
+            name: "Completion contract".to_owned(),
+            trigger: "durable".to_owned(),
+            original_request: "Complete only with compatible evidence.".to_owned(),
+            branch: Some("master".to_owned()),
+            markdown_path: projection_relative().to_owned(),
+            git_readiness,
+            standards: Vec::new(),
+            verification_plan: vec![VerificationCheck::new(
+                check_id("GLOBAL-CHECK"),
+                helper_command(helper, "pass"),
+                ".",
+                0,
+                true,
+            )],
+        },
+        timestamp(0),
+    )
+}
+
+fn append_second_task(
+    store: &PlanStore,
+    helper: &Path,
+    task_mode: &str,
+    revision: u64,
+    request_sequence: u64,
+) -> (u64, u64) {
+    let second_task_id = TaskId::parse("T2").expect("second task ID should be valid");
+    let mut second_task = Task::new(
+        second_task_id.clone(),
+        "Implement the second feature",
+        vec![task_id()],
+    );
+    second_task
+        .add_acceptance_criterion(AcceptanceCriterion::new(
+            CriterionId::parse("T2-A1").expect("second criterion ID should be valid"),
+            "The second feature is observable",
+        ))
+        .expect("second criterion should be added");
+    second_task
+        .add_verification_check(VerificationCheck::new(
+            check_id("SECOND-CHECK"),
+            helper_command(helper, task_mode),
+            ".",
+            0,
+            true,
+        ))
+        .expect("second check should be added");
+    second_task
+        .add_file_map_entry(FileMapEntry::new(
+            "src/second.rs",
+            FileChange::Create,
+            "Own the second feature implementation",
+            second_task_id.clone(),
+        ))
+        .expect("second file map should be added");
+    commit(
+        store,
+        revision,
+        request_sequence,
+        vec!["tasks"],
+        move |plan| plan.add_task(second_task, timestamp(3)),
+    );
+    commit(
+        store,
+        revision + 1,
+        request_sequence + 1,
+        vec!["tasks.T2.status"],
+        move |plan| plan.mark_task_ready(&second_task_id, timestamp(4)),
+    );
+    (revision + 2, request_sequence + 2)
 }
 
 fn commit<F>(
@@ -330,6 +444,198 @@ fn cli_completion_flow_rejects_scope_drift_then_enters_review() {
     let project = TestProject::new("flow", "pass");
     let completed = complete_task_after_scope_and_freshness_rejections(&project);
     assert_final_and_review_freshness(&project, &completed);
+}
+
+#[test]
+fn non_git_project_completes_a_real_file_change_from_its_task_baseline() {
+    let project = TestProject::new_without_git("non-git", "pass");
+    let started = start_active_task(&project, 50);
+    fs::write(
+        project.path().join("src/feature.rs"),
+        "pub fn feature() -> u8 { 5 }\n",
+    )
+    .expect("planned non-Git change should be written");
+
+    complete_started_task(&project, started, 51);
+
+    let plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("completed non-Git plan should load");
+    assert_eq!(
+        plan.task(&task_id()).expect("task should exist").status(),
+        TaskStatus::Done
+    );
+}
+
+#[test]
+fn unchanged_dirty_baseline_files_are_not_attributed_to_the_task() {
+    let project = TestProject::new("dirty-baseline", "pass");
+    fs::write(
+        project.path().join("preexisting-dirty.txt"),
+        "present before task start\n",
+    )
+    .expect("dirty baseline should be written");
+    let started = start_active_task(&project, 50);
+    fs::write(
+        project.path().join("src/feature.rs"),
+        "pub fn feature() -> u8 { 6 }\n",
+    )
+    .expect("planned change should be written");
+
+    complete_started_task(&project, started, 51);
+
+    assert!(project.path().join("preexisting-dirty.txt").exists());
+    let plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("completed dirty-baseline plan should load");
+    assert_eq!(
+        plan.task(&task_id()).expect("task should exist").status(),
+        TaskStatus::Done
+    );
+}
+
+#[test]
+fn disabled_git_flow_attributes_each_uncommitted_task_to_its_own_baseline() {
+    let project = TestProject::new_with_two_tasks("disabled-git-flow", "pass");
+    let first_started = start_active_task(&project, 50);
+    fs::write(
+        project.path().join("src/feature.rs"),
+        "pub fn feature() -> u8 { 7 }\n",
+    )
+    .expect("first planned change should be written");
+    let first_done = complete_task_workflow(
+        &project,
+        first_started,
+        51,
+        task_id(),
+        &check_id("TASK-CHECK"),
+        criterion_id(),
+    );
+
+    let second_task_id = TaskId::parse("T2").expect("second task ID should be valid");
+    let second_started = ExecutionService::discover(project.path())
+        .expect("execution service should discover")
+        .start_task(
+            mutation(
+                first_done,
+                54,
+                vec!["mino".to_owned(), "exec".to_owned(), "start".to_owned()],
+            ),
+            second_task_id.clone(),
+        )
+        .expect("second task should start without committing the first change")
+        .revision;
+    fs::write(
+        project.path().join("src/second.rs"),
+        "pub fn second() -> u8 { 8 }\n",
+    )
+    .expect("second planned change should be written");
+    complete_task_workflow(
+        &project,
+        second_started,
+        55,
+        second_task_id.clone(),
+        &check_id("SECOND-CHECK"),
+        CriterionId::parse("T2-A1").expect("second criterion ID should be valid"),
+    );
+
+    let plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("two-task plan should load");
+    assert_eq!(
+        plan.task(&task_id())
+            .expect("first task should exist")
+            .status(),
+        TaskStatus::Done
+    );
+    assert_eq!(
+        plan.task(&second_task_id)
+            .expect("second task should exist")
+            .status(),
+        TaskStatus::Done
+    );
+}
+
+#[test]
+fn workspace_baseline_capture_fails_loudly_when_a_file_exceeds_its_budget() {
+    let project = TestProject::new_without_git("baseline-budget", "pass");
+    fs::write(
+        project.path().join("oversized.bin"),
+        vec![0_u8; 16 * 1024 * 1024 + 1],
+    )
+    .expect("oversized fixture should be written");
+
+    let error = ExecutionService::discover(project.path())
+        .expect("execution service should discover")
+        .start_task(
+            mutation(
+                project.base_revision,
+                50,
+                vec!["mino".to_owned(), "exec".to_owned(), "start".to_owned()],
+            ),
+            task_id(),
+        )
+        .expect_err("oversized baseline must not be silently truncated");
+
+    assert_eq!(error.category(), ErrorCategory::EnvironmentUnavailable);
+    assert!(error.message().contains("16777216-byte limit"));
+}
+
+fn complete_started_task(project: &TestProject, started: u64, sequence: u64) -> u64 {
+    complete_task_workflow(
+        project,
+        started,
+        sequence,
+        task_id(),
+        &check_id("TASK-CHECK"),
+        criterion_id(),
+    )
+}
+
+fn complete_task_workflow(
+    project: &TestProject,
+    started: u64,
+    sequence: u64,
+    selected_task_id: TaskId,
+    selected_check_id: &CheckId,
+    selected_criterion_id: CriterionId,
+) -> u64 {
+    let execution = ExecutionService::discover(project.path()).expect("service should discover");
+    let check = execution
+        .run_check(
+            &mutation(
+                started,
+                sequence,
+                vec!["mino".to_owned(), "exec".to_owned(), "check".to_owned()],
+            ),
+            selected_check_id,
+        )
+        .expect("task check should pass");
+    assert!(check.is_success());
+    let completion =
+        CompletionService::discover(project.path()).expect("completion service should discover");
+    let criterion = completion
+        .pass_criterion(
+            mutation(
+                check.plan().revision,
+                sequence + 1,
+                vec!["mino".to_owned(), "exec".to_owned(), "criterion".to_owned()],
+            ),
+            selected_criterion_id,
+            check.evidence().id().clone(),
+        )
+        .expect("criterion should pass");
+    completion
+        .complete_task(
+            mutation(
+                criterion.revision,
+                sequence + 2,
+                vec!["mino".to_owned(), "exec".to_owned(), "complete".to_owned()],
+            ),
+            selected_task_id,
+        )
+        .expect("task-local delta should satisfy completion")
+        .revision
 }
 
 fn complete_task_after_scope_and_freshness_rejections(project: &TestProject) -> Value {

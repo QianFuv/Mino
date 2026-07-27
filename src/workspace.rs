@@ -1,6 +1,6 @@
 //! Bounded workspace fingerprint capture for verification freshness.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use ignore::WalkBuilder;
@@ -23,7 +23,6 @@ pub(crate) fn capture_workspace_fingerprint(
     plan: &Plan,
     task_id: Option<&TaskId>,
 ) -> Result<WorkspaceFingerprint, MinoError> {
-    let filesystem = ProjectFs::open(root).map_err(managed_error)?;
     let (scope_kind, patterns) = match task_id {
         Some(task_id) => {
             let task = plan.task(task_id).ok_or_else(|| {
@@ -52,6 +51,159 @@ pub(crate) fn capture_workspace_fingerprint(
         ),
     };
     let scope = WorkspaceFingerprintScope::new(scope_kind, task_id.cloned(), patterns);
+    capture_scope(root, plan, scope)
+}
+
+pub(crate) fn capture_workspace_baseline(
+    root: &Path,
+    plan: &Plan,
+) -> Result<WorkspaceFingerprint, MinoError> {
+    capture_scope(
+        root,
+        plan,
+        WorkspaceFingerprintScope::new(WorkspaceScopeKind::Global, None, vec!["**".to_owned()]),
+    )
+}
+
+pub(crate) fn capture_task_workspace_baseline(
+    root: &Path,
+    plan: &Plan,
+    task_id: &TaskId,
+) -> Result<WorkspaceFingerprint, MinoError> {
+    let task = plan.task(task_id).ok_or_else(|| {
+        MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            format!("Task {task_id} does not exist"),
+        )
+    })?;
+    let mut patterns = vec!["**".to_owned()];
+    patterns.extend(
+        task.file_map()
+            .iter()
+            .filter(|entry| entry.change() != FileChange::NotApplicable)
+            .map(|entry| entry.path().to_owned()),
+    );
+    capture_scope(
+        root,
+        plan,
+        WorkspaceFingerprintScope::new(WorkspaceScopeKind::Global, None, patterns),
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceDeltaKind {
+    Created,
+    Modified,
+    Deleted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorkspaceDeltaEntry {
+    path: String,
+    kind: WorkspaceDeltaKind,
+}
+
+impl WorkspaceDeltaEntry {
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(crate) const fn kind(&self) -> WorkspaceDeltaKind {
+        self.kind
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorkspaceDelta {
+    entries: Vec<WorkspaceDeltaEntry>,
+    repository_head_changed: bool,
+}
+
+impl WorkspaceDelta {
+    pub(crate) fn entries(&self) -> &[WorkspaceDeltaEntry] {
+        &self.entries
+    }
+
+    pub(crate) const fn repository_head_changed(&self) -> bool {
+        self.repository_head_changed
+    }
+}
+
+pub(crate) fn workspace_delta(
+    root: &Path,
+    plan: &Plan,
+    baseline: &WorkspaceFingerprint,
+) -> Result<WorkspaceDelta, MinoError> {
+    let current = recapture_workspace_fingerprint(root, plan, baseline)?;
+    let before_files = baseline
+        .file_snapshots()
+        .iter()
+        .map(|snapshot| (snapshot.path(), snapshot))
+        .collect::<BTreeMap<_, _>>();
+    let after_files = current
+        .file_snapshots()
+        .iter()
+        .map(|snapshot| (snapshot.path(), snapshot))
+        .collect::<BTreeMap<_, _>>();
+    let before_status = baseline
+        .status_entries()
+        .iter()
+        .map(|entry| (entry.path(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let after_status = current
+        .status_entries()
+        .iter()
+        .map(|entry| (entry.path(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let paths = before_files
+        .keys()
+        .chain(after_files.keys())
+        .chain(before_status.keys())
+        .chain(after_status.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let entries = paths
+        .into_iter()
+        .filter(|path| {
+            before_files.get(path) != after_files.get(path)
+                || before_status.get(path) != after_status.get(path)
+        })
+        .map(|path| WorkspaceDeltaEntry {
+            path: path.to_owned(),
+            kind: delta_kind(
+                before_files.get(path).copied(),
+                after_files.get(path).copied(),
+            ),
+        })
+        .collect::<Vec<_>>();
+    let repository_head_changed = baseline.repository_mode() != current.repository_mode()
+        || baseline.head() != current.head();
+    Ok(WorkspaceDelta {
+        entries,
+        repository_head_changed,
+    })
+}
+
+fn delta_kind(
+    before: Option<&WorkspaceFileSnapshot>,
+    after: Option<&WorkspaceFileSnapshot>,
+) -> WorkspaceDeltaKind {
+    let existed_before =
+        before.is_some_and(|snapshot| snapshot.kind() != WorkspaceFileKind::Missing);
+    let exists_after = after.is_some_and(|snapshot| snapshot.kind() != WorkspaceFileKind::Missing);
+    match (existed_before, exists_after) {
+        (false, true) => WorkspaceDeltaKind::Created,
+        (true, false) => WorkspaceDeltaKind::Deleted,
+        _ => WorkspaceDeltaKind::Modified,
+    }
+}
+
+fn capture_scope(
+    root: &Path,
+    plan: &Plan,
+    scope: WorkspaceFingerprintScope,
+) -> Result<WorkspaceFingerprint, MinoError> {
+    let filesystem = ProjectFs::open(root).map_err(managed_error)?;
     let adapter = GitAdapter::new(root);
     let facts = adapter.inspect().map_err(|error| git_error(&error))?;
     let (repository_mode, head, index_tree, status_entries) = if facts.repository {
@@ -77,7 +229,7 @@ pub(crate) fn capture_workspace_fingerprint(
     } else {
         (WorkspaceRepositoryMode::NonGit, None, None, Vec::new())
     };
-    let mut paths = scoped_paths(&filesystem, &scope)?;
+    let mut paths = scoped_paths(&filesystem, plan, &scope)?;
     for entry in &status_entries {
         paths.insert(entry.path().to_owned());
     }
@@ -98,7 +250,7 @@ pub(crate) fn recapture_workspace_fingerprint(
     plan: &Plan,
     expected: &WorkspaceFingerprint,
 ) -> Result<WorkspaceFingerprint, MinoError> {
-    let current = capture_workspace_fingerprint(root, plan, expected.scope().task_id())?;
+    let current = capture_scope(root, plan, expected.scope().clone())?;
     if current.scope().kind() != expected.scope().kind() {
         return Err(MinoError::new(
             ErrorCategory::DriftDetected,
@@ -148,6 +300,7 @@ fn status_entry(entry: &GitStatusEntry) -> WorkspaceStatusEntry {
 
 fn scoped_paths(
     filesystem: &ProjectFs,
+    plan: &Plan,
     scope: &WorkspaceFingerprintScope,
 ) -> Result<BTreeSet<String>, MinoError> {
     let mut paths = BTreeSet::new();
@@ -164,7 +317,7 @@ fn scoped_paths(
         }
     }
     if requires_walk {
-        collect_matching_paths(filesystem, scope.patterns(), &mut paths)?;
+        collect_matching_paths(filesystem, plan, scope.patterns(), &mut paths)?;
     }
     if paths.len() > MAX_FINGERPRINT_FILES {
         return Err(fingerprint_budget_error("file count"));
@@ -174,13 +327,14 @@ fn scoped_paths(
 
 fn collect_matching_paths(
     filesystem: &ProjectFs,
+    plan: &Plan,
     patterns: &[String],
     paths: &mut BTreeSet<String>,
 ) -> Result<(), MinoError> {
     let root = filesystem.root();
     let mut builder = WalkBuilder::new(root);
     builder
-        .standard_filters(false)
+        .standard_filters(true)
         .hidden(false)
         .parents(false)
         .follow_links(false)
@@ -210,6 +364,9 @@ fn collect_matching_paths(
             )
         })?;
         let path = protocol_path(relative)?;
+        if is_mino_owned_path(plan, &path) {
+            continue;
+        }
         if patterns.iter().any(|pattern| {
             matches_file_map_path(pattern, &path)
                 || path

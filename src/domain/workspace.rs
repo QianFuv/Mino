@@ -1,6 +1,6 @@
 //! Deterministic workspace content identities for verification evidence.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Component, Path};
 
@@ -10,6 +10,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{DomainError, DomainErrorKind, TaskId};
+
+pub(crate) const WORKSPACE_EXTENSION_KEY: &str = "workspace";
 
 /// Repository capabilities observed while a workspace fingerprint was captured.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -397,6 +399,87 @@ impl WorkspaceFingerprint {
         write_canonical_value(&mut bytes, &value)?;
         let digest = Sha256::digest(bytes);
         Ok(format!("sha256:{digest:x}"))
+    }
+}
+
+/// Persisted plan and task baselines used to attribute workspace changes.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceProtocolState {
+    plan_baseline: Option<WorkspaceFingerprint>,
+    task_baselines: BTreeMap<TaskId, WorkspaceFingerprint>,
+}
+
+impl WorkspaceProtocolState {
+    /// Returns the workspace observed at plan approval or legacy execution start.
+    #[must_use]
+    pub const fn plan_baseline(&self) -> Option<&WorkspaceFingerprint> {
+        self.plan_baseline.as_ref()
+    }
+
+    /// Returns the workspace observed when the selected task most recently started.
+    #[must_use]
+    pub fn task_baseline(&self, task_id: &TaskId) -> Option<&WorkspaceFingerprint> {
+        self.task_baselines.get(task_id)
+    }
+
+    /// Returns task baselines in stable task identifier order.
+    #[must_use]
+    pub const fn task_baselines(&self) -> &BTreeMap<TaskId, WorkspaceFingerprint> {
+        &self.task_baselines
+    }
+
+    pub(crate) fn record_plan_baseline(
+        &mut self,
+        baseline: WorkspaceFingerprint,
+    ) -> Result<(), DomainError> {
+        validate_baseline(&baseline)?;
+        self.plan_baseline = Some(baseline);
+        self.task_baselines.clear();
+        Ok(())
+    }
+
+    pub(crate) fn record_task_baseline(
+        &mut self,
+        task_id: TaskId,
+        baseline: WorkspaceFingerprint,
+    ) -> Result<(), DomainError> {
+        validate_baseline(&baseline)?;
+        self.task_baselines.insert(task_id, baseline);
+        Ok(())
+    }
+
+    pub(crate) fn validate(&self, task_ids: &BTreeSet<&TaskId>) -> Result<(), DomainError> {
+        if let Some(baseline) = &self.plan_baseline {
+            validate_baseline(baseline)?;
+        }
+        for (task_id, baseline) in &self.task_baselines {
+            if !task_ids.contains(task_id) {
+                return Err(invariant(format!(
+                    "Workspace baseline references missing task {task_id}"
+                )));
+            }
+            validate_baseline(baseline)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_baseline(baseline: &WorkspaceFingerprint) -> Result<(), DomainError> {
+    baseline.validate()?;
+    if baseline.scope.kind != WorkspaceScopeKind::Global
+        || baseline.scope.task_id.is_some()
+        || !baseline
+            .scope
+            .patterns
+            .iter()
+            .any(|pattern| pattern == "**")
+    {
+        Err(invariant(
+            "Workspace baselines must capture the complete project scope",
+        ))
+    } else {
+        Ok(())
     }
 }
 

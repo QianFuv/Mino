@@ -17,7 +17,7 @@ use crate::runner::{
 };
 use crate::store::sha256_digest;
 use crate::validation::{validate_plan, validation_failure};
-use crate::workspace::capture_workspace_fingerprint;
+use crate::workspace::{capture_task_workspace_baseline, capture_workspace_fingerprint};
 use crate::{ErrorCategory, MinoError};
 
 const DEFAULT_CHECK_TIMEOUT: Duration = Duration::from_mins(5);
@@ -149,12 +149,26 @@ impl ExecutionService {
                 return Err(validation_failure(&validation));
             }
         }
-        let changed_fields = vec!["status".to_owned(), format!("tasks.{task_id}.status")];
+        let baseline = if stored.revision() == request.expected_revision {
+            Some(capture_task_workspace_baseline(
+                &self.root, &stored, &task_id,
+            )?)
+        } else {
+            None
+        };
+        let changed_fields = vec![
+            "status".to_owned(),
+            format!("tasks.{task_id}.status"),
+            "extensions.workspace.task_baselines".to_owned(),
+        ];
         self.plans.commit_semantic(
             request,
             changed_fields,
             |_| Ok(None),
-            move |plan, at| plan.start_task(&task_id, at),
+            move |plan, at| match &baseline {
+                Some(baseline) => plan.start_task_with_baseline(&task_id, baseline.clone(), at),
+                None => plan.start_task(&task_id, at),
+            },
         )
     }
 
