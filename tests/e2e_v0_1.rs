@@ -138,7 +138,7 @@ struct PlanBytes {
 }
 
 #[test]
-fn installed_binary_completes_the_v0_1_lifecycle_without_source_leakage() {
+fn agent_loop_follows_returned_binding_and_commit_actions_through_the_v0_1_lifecycle() {
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source_status = git_status(source_root);
     let workspace = TestWorkspace::new();
@@ -487,6 +487,10 @@ fn finalize_and_approve_plan(binary: &Path, project: &Path, plan_id: &str) {
     let approved = assert_success(&run_json(binary, project, &approve));
     assert_eq!(approved["revision"], 4);
     let next = assert_agent_success(&run_json(binary, project, &strings(&["agent", "next"])));
+    assert_eq!(next["next_actions"][0]["id"], "git.bind");
+    let bound = assert_success(&run_agent_action(binary, project, &next["next_actions"][0]));
+    assert_eq!(bound["binding"]["plan_id"], plan_id);
+    let next = assert_agent_success(&run_json(binary, project, &strings(&["agent", "next"])));
     assert_eq!(next["approval_required"], false);
     assert_eq!(next["next_actions"][0]["id"], "exec.start");
 }
@@ -497,11 +501,9 @@ fn execute_plan_through_review(binary: &Path, project: &Path, plan_id: &str) {
 }
 
 fn start_recover_and_resume(binary: &Path, project: &Path, plan_id: &str) {
-    let started = assert_success(&run_json(
-        binary,
-        project,
-        &exec_arguments(&["start"], plan_id, 4, 9, &["--task", "T1"]),
-    ));
+    let next = assert_agent_success(&run_json(binary, project, &strings(&["agent", "next"])));
+    assert_eq!(next["next_actions"][0]["id"], "exec.start");
+    let started = assert_success(&run_agent_action(binary, project, &next["next_actions"][0]));
     assert_eq!(started["revision"], 5);
     let checkpoint = exec_arguments(
         &["checkpoint"],
@@ -597,17 +599,7 @@ fn run_checks_and_finish(binary: &Path, project: &Path, plan_id: &str) {
             .iter()
             .all(|action| action["action"] != "git.commit")
     }));
-    let bound = assert_success(&run_json(
-        binary,
-        project,
-        &strings(&["git", "bind", "--plan", plan_id, "--current"]),
-    ));
-    assert_eq!(bound["binding"]["plan_id"], plan_id);
-    let committed = assert_success(&run_json(
-        binary,
-        project,
-        &strings(&["git", "commit", "--plan", plan_id, "--task", "T1"]),
-    ));
+    let committed = assert_success(&run_agent_action(binary, project, &next["next_actions"][0]));
     assert_eq!(committed["plan_revision"], 15);
     assert_eq!(
         committed["completion"]["message"],
@@ -1055,6 +1047,27 @@ fn handle_connection(
 
 fn run_json(binary: &Path, root: &Path, command: &[String]) -> Output {
     run_with_global_flags(binary, root, &["--format", "json", "--no-input"], command)
+}
+
+fn run_agent_action(binary: &Path, root: &Path, action: &Value) -> Output {
+    let arguments = action["argv"]
+        .as_array()
+        .expect("Agent action argv should be an array")
+        .iter()
+        .map(|argument| {
+            argument
+                .as_str()
+                .expect("Agent action argument should be a string")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(arguments.first().map(String::as_str), Some("mino"));
+    Command::new(binary)
+        .args(&arguments[1..])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .output()
+        .expect("Agent action should run")
 }
 
 fn run_with_global_flags(binary: &Path, root: &Path, flags: &[&str], command: &[String]) -> Output {

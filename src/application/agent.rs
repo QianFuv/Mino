@@ -457,7 +457,7 @@ fn build_agent_context_with_selection(
             format!("Project scan state is malformed: {error}"),
         )
     })?;
-    let guidance = guidance(root, plan)?;
+    let guidance = guidance(root, plan, git.as_ref())?;
     let has_alternatives = serialized_selection
         .as_ref()
         .is_some_and(|selection| !selection.alternatives.is_empty());
@@ -559,14 +559,18 @@ struct Guidance {
     next_actions: Vec<NextAction>,
 }
 
-fn guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
+fn guidance(
+    root: &Path,
+    plan: &Plan,
+    git: Option<&AgentGitContext>,
+) -> Result<Guidance, MinoError> {
     if plan.has_pending_amendment() {
         return Ok(pending_amendment_guidance(plan));
     }
     match plan.status() {
         PlanStatus::Draft => draft_guidance(root, plan),
-        PlanStatus::Ready => ready_guidance(root, plan),
-        PlanStatus::InProgress => Ok(in_progress_guidance(plan)),
+        PlanStatus::Ready => ready_guidance(root, plan, git),
+        PlanStatus::InProgress => Ok(in_progress_guidance(plan, git)),
         PlanStatus::Blocked if plan.is_blocked_for_material_review() => {
             Ok(material_review_blocked_guidance(plan))
         }
@@ -865,7 +869,11 @@ const fn is_false(value: &bool) -> bool {
     !*value
 }
 
-fn ready_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
+fn ready_guidance(
+    root: &Path,
+    plan: &Plan,
+    git: Option<&AgentGitContext>,
+) -> Result<Guidance, MinoError> {
     let has_open_deviation = plan
         .execution_state()
         .map_err(|error| {
@@ -935,26 +943,39 @@ fn ready_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
             next_actions: Vec::new(),
         });
     }
-    let next_actions = first_incomplete_task(plan)
-        .map(|task_id| vec![start_action(plan, task_id)])
-        .unwrap_or_default();
     let mut allowed_actions = action_ids(&[
         "plan.show",
         "plan.validate",
         "plan.review",
         "plan.amend.propose",
-        "exec.start",
         "standards.conflict.list",
         "standards.conflict.refresh",
         "standards.conflict.resolve",
     ]);
+    let requires_binding = has_automatic_git_flow(plan) && !has_current_plan_binding(plan, git);
+    let next_actions = if requires_binding {
+        allowed_actions.insert(4, "git.bind".to_owned());
+        vec![bind_action(plan)]
+    } else {
+        allowed_actions.insert(4, "exec.start".to_owned());
+        first_incomplete_task(plan)
+            .map(|task_id| vec![start_action(plan, task_id)])
+            .unwrap_or_default()
+    };
     append_ready_deviation_actions(&mut allowed_actions, has_open_deviation);
+    let mut blocked_actions = vec![blocked(
+        "git.commit",
+        "No task has completed its verification and commit gate",
+    )];
+    if requires_binding {
+        blocked_actions.push(blocked(
+            "exec.start",
+            "Approved Git Flow requires a current same-plan worktree binding",
+        ));
+    }
     Ok(Guidance {
         allowed_actions,
-        blocked_actions: vec![blocked(
-            "git.commit",
-            "No task has completed its verification and commit gate",
-        )],
+        blocked_actions,
         approval_required: false,
         next_actions,
     })
@@ -969,14 +990,15 @@ fn append_ready_deviation_actions(actions: &mut Vec<String>, has_open_deviation:
     }
 }
 
-fn in_progress_guidance(plan: &Plan) -> Guidance {
+fn in_progress_guidance(plan: &Plan, git: Option<&AgentGitContext>) -> Guidance {
     let active = plan
         .tasks()
         .iter()
         .find(|task| task.status() == TaskStatus::InProgress);
     let can_commit = pending_commit_task(plan).is_some();
-    let has_automatic_commit_consent = plan.git_readiness().git_flow_enabled()
-        && plan.git_readiness().git_flow_consent() == crate::domain::GitFlowConsent::Approved;
+    let has_automatic_commit_consent = has_automatic_git_flow(plan);
+    let requires_binding =
+        can_commit && has_automatic_commit_consent && !has_current_plan_binding(plan, git);
     let (mut allowed_actions, next_actions) = if let Some(task) = active {
         let next_actions = next_execution_check(plan).map_or_else(
             || {
@@ -996,7 +1018,17 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
         );
         (in_progress_task_actions(), next_actions)
     } else if let Some(task_id) = pending_commit_task(plan) {
-        if has_automatic_commit_consent {
+        if requires_binding {
+            (
+                action_ids(&[
+                    "git.bind",
+                    "git.commit.record-manual",
+                    "git.gate.skip",
+                    "exec.block",
+                ]),
+                vec![bind_action(plan)],
+            )
+        } else if has_automatic_commit_consent {
             (
                 action_ids(&[
                     "git.commit",
@@ -1041,7 +1073,12 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
         )
     };
     allowed_actions.push("plan.amend.propose".to_owned());
-    let mut blocked_actions = if can_commit && has_automatic_commit_consent {
+    let mut blocked_actions = if requires_binding {
+        vec![blocked(
+            "git.commit",
+            "Task commit requires a current same-plan worktree binding",
+        )]
+    } else if can_commit && has_automatic_commit_consent {
         Vec::new()
     } else if can_commit {
         vec![blocked(
@@ -1066,6 +1103,18 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
         approval_required: can_commit && !has_automatic_commit_consent,
         next_actions,
     }
+}
+
+fn has_automatic_git_flow(plan: &Plan) -> bool {
+    plan.git_readiness().git_flow_enabled()
+        && plan.git_readiness().git_flow_consent() == crate::domain::GitFlowConsent::Approved
+}
+
+fn has_current_plan_binding(plan: &Plan, git: Option<&AgentGitContext>) -> bool {
+    git.is_some_and(|git| {
+        git.binding_status == ActiveBindingStatus::Current
+            && git.bound_plan.as_ref() == Some(plan.id())
+    })
 }
 
 fn in_progress_task_actions() -> Vec<String> {
@@ -1191,6 +1240,23 @@ fn commit_action(plan: &Plan, task_id: &TaskId) -> NextAction {
             plan.id().to_string(),
             "--task".to_owned(),
             task_id.to_string(),
+            "--format".to_owned(),
+            "json".to_owned(),
+            "--no-input".to_owned(),
+        ],
+    }
+}
+
+fn bind_action(plan: &Plan) -> NextAction {
+    NextAction {
+        id: "git.bind".to_owned(),
+        argv: vec![
+            "mino".to_owned(),
+            "git".to_owned(),
+            "bind".to_owned(),
+            "--plan".to_owned(),
+            plan.id().to_string(),
+            "--current".to_owned(),
             "--format".to_owned(),
             "json".to_owned(),
             "--no-input".to_owned(),

@@ -8,10 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use mino::application::{AGENT_EXECUTOR_IDENTITY, agent::build_agent_context};
 use mino::domain::{
-    AmendmentPatch, Approval, CheckId, CriterionId, DeviationClassification, DraftCriterionInput,
-    DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput, DraftTaskInput,
-    DraftVerificationInput, EvidenceId, FileChange, GitFlowConsent, GitReadiness, Plan,
-    PlanDraftSeed, PlanId, StandardSelection, TaskId, Timestamp, VerificationCheck,
+    AmendmentPatch, Approval, CheckId, CriterionId, DeviationClassification, DraftCommitGateInput,
+    DraftCriterionInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,
+    DraftTaskInput, DraftVerificationInput, EvidenceId, FileChange, GitFlowConsent, GitReadiness,
+    Plan, PlanDraftSeed, PlanId, StandardSelection, TaskId, Timestamp, VerificationCheck,
 };
 use mino::git::{ActiveBindingStore, GitAdapter};
 use mino::project::initialize;
@@ -84,6 +84,23 @@ fn evidence_id(value: &str) -> EvidenceId {
 }
 
 fn configured_draft() -> Plan {
+    configured_draft_with_git(
+        GitReadiness::detected(
+            "Missing",
+            "Not Applicable",
+            None,
+            None,
+            "Not Applicable: lifecycle fixture",
+            false,
+        ),
+        None,
+    )
+}
+
+fn configured_draft_with_git(
+    git_readiness: GitReadiness,
+    commit_gate: Option<DraftCommitGateInput>,
+) -> Plan {
     let catalog = EmbeddedCatalog::load().expect("embedded standards should load");
     let common = catalog
         .package("common")
@@ -96,14 +113,7 @@ fn configured_draft() -> Plan {
             original_request: "Build Agent context fixtures".to_owned(),
             branch: None,
             markdown_path: "docs/plan/2026-07-26-agent-fixture.md".to_owned(),
-            git_readiness: GitReadiness::detected(
-                "Missing",
-                "Not Applicable",
-                None,
-                None,
-                "Not Applicable: lifecycle fixture",
-                false,
-            ),
+            git_readiness,
             standards: vec![StandardSelection::new(
                 common.package_id(),
                 common.version(),
@@ -166,12 +176,63 @@ fn configured_draft() -> Plan {
                 expected_exit_code: 0,
                 required: true,
             }],
-            commit_gate: None,
+            commit_gate,
         },
         timestamp(2),
     )
     .expect("task should be added");
     plan
+}
+
+fn initialize_git_flow_baseline(project: &TestProject) -> GitReadiness {
+    let initialized = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(project.path())
+        .output()
+        .expect("Git should initialize the Agent fixture");
+    assert!(initialized.status.success());
+    for (key, value) in [
+        ("user.name", "Mino Agent Test"),
+        ("user.email", "mino-agent@example.invalid"),
+    ] {
+        let configured = Command::new("git")
+            .args(["config", key, value])
+            .current_dir(project.path())
+            .output()
+            .expect("Git identity should configure");
+        assert!(configured.status.success());
+    }
+    fs::write(
+        project.path().join(".git/info/exclude"),
+        ".agents/\n.mino/\n",
+    )
+    .expect("Mino state should be excluded from the Git fixture");
+    fs::write(project.path().join("fixture.txt"), "baseline\n")
+        .expect("baseline fixture should be written");
+    let staged = Command::new("git")
+        .args(["add", "--", "fixture.txt"])
+        .current_dir(project.path())
+        .output()
+        .expect("baseline fixture should stage");
+    assert!(staged.status.success());
+    let committed = Command::new("git")
+        .args(["commit", "--quiet", "-m", "chore: establish agent baseline"])
+        .current_dir(project.path())
+        .output()
+        .expect("baseline fixture should commit");
+    assert!(committed.status.success());
+    let facts = GitAdapter::new(project.path())
+        .inspect()
+        .expect("Git baseline facts should inspect");
+    assert!(facts.is_clean);
+    GitReadiness::detected(
+        "Present",
+        "Clean",
+        facts.branch,
+        facts.head,
+        "Clean: git status --short returned empty",
+        true,
+    )
 }
 
 fn lifecycle_contexts() -> Vec<(&'static str, Option<Plan>)> {
@@ -324,6 +385,101 @@ fn every_lifecycle_state_matches_its_agent_context_golden() {
         .expect("golden should be JSON");
         assert_eq!(actual, expected, "Agent context golden {name} changed");
     }
+}
+
+#[test]
+fn automatic_git_flow_requires_current_plan_binding_before_start_and_commit() {
+    let project = TestProject::new("git-binding-guidance");
+    let git_readiness = initialize_git_flow_baseline(&project);
+    let mut plan = configured_draft_with_git(
+        git_readiness,
+        Some(DraftCommitGateInput {
+            required: true,
+            planned_message: "test(agent): verify binding guidance".to_owned(),
+            scope: vec!["fixture.txt".to_owned()],
+        }),
+    );
+    plan.finalize(timestamp(3)).expect("plan should finalize");
+    plan.record_approval(Approval::plan(
+        "user",
+        "chat:approval",
+        timestamp(4),
+        GitFlowConsent::Approved,
+    ))
+    .expect("plan should be approved");
+
+    let unbound_ready =
+        build_agent_context(project.path(), Some(&plan)).expect("Ready context should build");
+    assert_eq!(unbound_ready.next_actions[0].id, "git.bind");
+    assert!(
+        unbound_ready
+            .allowed_actions
+            .contains(&"git.bind".to_owned())
+    );
+    assert!(
+        !unbound_ready
+            .allowed_actions
+            .contains(&"exec.start".to_owned())
+    );
+
+    let facts = GitAdapter::new(project.path())
+        .inspect()
+        .expect("Git facts should inspect");
+    ActiveBindingStore::new(project.path())
+        .bind(&facts, plan.id().clone(), plan.revision(), timestamp(5))
+        .expect("current plan should bind");
+    let bound_ready =
+        build_agent_context(project.path(), Some(&plan)).expect("bound Ready context should build");
+    assert_eq!(bound_ready.next_actions[0].id, "exec.start");
+    assert!(
+        bound_ready
+            .allowed_actions
+            .contains(&"exec.start".to_owned())
+    );
+
+    plan.start_task(&task_id(), timestamp(6))
+        .expect("task should start");
+    plan.record_task_criterion_pass(
+        &task_id(),
+        &criterion_id(),
+        evidence_id("E0001"),
+        timestamp(7),
+    )
+    .expect("criterion should pass");
+    plan.record_task_check_pass(
+        &task_id(),
+        &check_id("TASK-V1"),
+        evidence_id("E0002"),
+        timestamp(8),
+    )
+    .expect("task check should pass");
+    plan.complete_task(&task_id(), timestamp(9))
+        .expect("task should complete");
+
+    let bound_commit = build_agent_context(project.path(), Some(&plan))
+        .expect("bound commit context should build");
+    assert_eq!(bound_commit.next_actions[0].id, "git.commit");
+    fs::remove_file(ActiveBindingStore::new(project.path()).path())
+        .expect("binding should be removed for the missing-binding fixture");
+    let unbound_commit = build_agent_context(project.path(), Some(&plan))
+        .expect("unbound commit context should build");
+    assert_eq!(unbound_commit.next_actions[0].id, "git.bind");
+    assert!(
+        unbound_commit
+            .allowed_actions
+            .contains(&"git.bind".to_owned())
+    );
+    assert!(
+        !unbound_commit
+            .allowed_actions
+            .contains(&"git.commit".to_owned())
+    );
+    assert!(
+        unbound_commit
+            .blocked_actions
+            .iter()
+            .any(|action| action.action == "git.commit")
+    );
 }
 
 #[test]
