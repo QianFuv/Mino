@@ -97,58 +97,80 @@ fn derive_next_actions(plan: &Plan, findings: &[ValidationFinding]) -> Vec<NextA
     if findings.iter().all(|finding| !finding.blocking) {
         return Vec::new();
     }
+    if let Some(action) = conflict_next_action(plan, findings) {
+        return vec![action];
+    }
     let mut actions = Vec::new();
-    actions.extend(conflict_next_action(plan, findings));
-    if findings.iter().any(|finding| {
-        (finding.id.starts_with("POLICY-STANDARD")
-            && !finding.id.starts_with("POLICY-STANDARD-CONFLICT"))
-            || finding.id == "POLICY-TOOL-UNAVAILABLE"
-    }) {
-        let mut argv = vec![
+    if findings.iter().any(requires_standards_reconciliation) {
+        actions.push(standards_apply_action(plan));
+    }
+    if plan.status() == crate::domain::PlanStatus::Draft
+        && findings.iter().any(requires_authored_remediation)
+    {
+        actions.push(plan_apply_action(plan));
+    }
+    actions
+}
+
+fn requires_standards_reconciliation(finding: &ValidationFinding) -> bool {
+    finding.blocking
+        && ((finding.id.starts_with("POLICY-STANDARD-")
+            && !finding.id.starts_with("POLICY-STANDARD-CONFLICT-"))
+            || finding.id == "POLICY-TOOL-UNAVAILABLE")
+}
+
+fn requires_authored_remediation(finding: &ValidationFinding) -> bool {
+    finding.blocking
+        && !requires_standards_reconciliation(finding)
+        && finding.id != "POLICY-SCAN-INCOMPLETE"
+}
+
+fn standards_apply_action(plan: &Plan) -> NextAction {
+    NextAction {
+        id: "standards.apply".to_owned(),
+        argv: vec![
             "mino".to_owned(),
             "standards".to_owned(),
-            "recommend".to_owned(),
-        ];
-        for entry in plan.approach().file_map() {
-            argv.extend(["--path".to_owned(), entry.path().to_owned()]);
-        }
-        argv.extend([
+            "apply".to_owned(),
+            "--recommended".to_owned(),
+            "--seed-verification".to_owned(),
+            "--plan".to_owned(),
+            plan.id().to_string(),
+            "--expect-revision".to_owned(),
+            plan.revision().to_string(),
+            "--request-id".to_owned(),
+            derived_request_id(plan, "standards.apply"),
+            "--actor".to_owned(),
+            AGENT_EXECUTOR_IDENTITY.to_owned(),
             "--format".to_owned(),
             "json".to_owned(),
             "--no-input".to_owned(),
-        ]);
-        actions.push(NextAction {
-            id: "standards.recommend".to_owned(),
-            argv,
-        });
+        ],
     }
-    if findings
-        .iter()
-        .any(|finding| !finding.id.starts_with("POLICY-STANDARD-CONFLICT"))
-    {
-        actions.push(NextAction {
-            id: "plan.apply".to_owned(),
-            argv: vec![
-                "mino".to_owned(),
-                "plan".to_owned(),
-                "apply".to_owned(),
-                "--plan".to_owned(),
-                plan.id().to_string(),
-                "--file".to_owned(),
-                "draft.yaml".to_owned(),
-                "--expect-revision".to_owned(),
-                plan.revision().to_string(),
-                "--request-id".to_owned(),
-                derived_request_id(plan, "plan.apply.validation"),
-                "--actor".to_owned(),
-                AGENT_EXECUTOR_IDENTITY.to_owned(),
-                "--format".to_owned(),
-                "json".to_owned(),
-                "--no-input".to_owned(),
-            ],
-        });
+}
+
+fn plan_apply_action(plan: &Plan) -> NextAction {
+    NextAction {
+        id: "plan.apply".to_owned(),
+        argv: vec![
+            "mino".to_owned(),
+            "plan".to_owned(),
+            "apply".to_owned(),
+            "--plan".to_owned(),
+            plan.id().to_string(),
+            "--file".to_owned(),
+            "draft.yaml".to_owned(),
+            "--expect-revision".to_owned(),
+            plan.revision().to_string(),
+            "--request-id".to_owned(),
+            derived_request_id(plan, "plan.apply.validation"),
+            "--actor".to_owned(),
+            AGENT_EXECUTOR_IDENTITY.to_owned(),
+            "--format".to_owned(),
+            "json".to_owned(),
+            "--no-input".to_owned(),
+        ],
     }
-    actions
 }
 
 fn conflict_next_action(plan: &Plan, findings: &[ValidationFinding]) -> Option<NextAction> {

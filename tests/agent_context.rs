@@ -361,6 +361,16 @@ fn assert_agent_action_identity(actions: &[mino::NextAction]) {
     }
 }
 
+fn assert_next_actions_are_allowed(context: &mino::application::agent::AgentContext) {
+    for action in &context.next_actions {
+        assert!(
+            context.allowed_actions.contains(&action.id),
+            "next action {} must also be allowed",
+            action.id
+        );
+    }
+}
+
 #[test]
 fn every_lifecycle_state_matches_its_agent_context_golden() {
     let project = TestProject::new("goldens");
@@ -378,6 +388,7 @@ fn every_lifecycle_state_matches_its_agent_context_golden() {
         let context = build_agent_context(root, plan.as_ref()).expect("context should build");
         assert_eq!(context.executor_identity, AGENT_EXECUTOR_IDENTITY);
         assert_agent_action_identity(&context.next_actions);
+        assert_next_actions_are_allowed(&context);
         let actual = normalized(serde_json::to_value(context).expect("context should serialize"));
         let expected: Value = serde_json::from_str(
             &fs::read_to_string(fixture_path(name)).expect("golden should be readable"),
@@ -410,6 +421,7 @@ fn automatic_git_flow_requires_current_plan_binding_before_start_and_commit() {
 
     let unbound_ready =
         build_agent_context(project.path(), Some(&plan)).expect("Ready context should build");
+    assert_next_actions_are_allowed(&unbound_ready);
     assert_eq!(unbound_ready.next_actions[0].id, "git.bind");
     assert!(
         unbound_ready
@@ -430,6 +442,7 @@ fn automatic_git_flow_requires_current_plan_binding_before_start_and_commit() {
         .expect("current plan should bind");
     let bound_ready =
         build_agent_context(project.path(), Some(&plan)).expect("bound Ready context should build");
+    assert_next_actions_are_allowed(&bound_ready);
     assert_eq!(bound_ready.next_actions[0].id, "exec.start");
     assert!(
         bound_ready
@@ -458,11 +471,13 @@ fn automatic_git_flow_requires_current_plan_binding_before_start_and_commit() {
 
     let bound_commit = build_agent_context(project.path(), Some(&plan))
         .expect("bound commit context should build");
+    assert_next_actions_are_allowed(&bound_commit);
     assert_eq!(bound_commit.next_actions[0].id, "git.commit");
     fs::remove_file(ActiveBindingStore::new(project.path()).path())
         .expect("binding should be removed for the missing-binding fixture");
     let unbound_commit = build_agent_context(project.path(), Some(&plan))
         .expect("unbound commit context should build");
+    assert_next_actions_are_allowed(&unbound_commit);
     assert_eq!(unbound_commit.next_actions[0].id, "git.bind");
     assert!(
         unbound_commit

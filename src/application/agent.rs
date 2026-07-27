@@ -895,6 +895,7 @@ fn ready_guidance(
             "plan.show",
             "plan.validate",
             "plan.amend.propose",
+            "standards.apply",
             "standards.conflict.list",
             "standards.conflict.refresh",
             "standards.conflict.resolve",

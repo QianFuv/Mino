@@ -5,10 +5,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mino::domain::{GitReadiness, Plan, PlanDraftSeed, PlanId, TaskId, Timestamp};
+use mino::domain::{
+    GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId, RequestId, TaskId, Timestamp,
+};
 use mino::input::yaml;
 use mino::project::initialize;
-use mino::store::PlanStore;
+use mino::render::{render_plan, write_projection};
+use mino::store::{MutationRequest, PlanStore};
 use mino::validation::validate_plan;
 use serde_json::Value;
 
@@ -73,6 +76,27 @@ fn run_mino(arguments: &[String]) -> Output {
         .expect("Mino binary should run")
 }
 
+fn run_canonical_action(project: &TestProject, action: &Value) -> Output {
+    let arguments = action["argv"]
+        .as_array()
+        .expect("canonical argv should be an array")
+        .iter()
+        .map(|argument| {
+            argument
+                .as_str()
+                .expect("canonical argument should be text")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(arguments.first().map(String::as_str), Some("mino"));
+    Command::new(env!("CARGO_BIN_EXE_mino"))
+        .args(&arguments[1..])
+        .current_dir(project.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("canonical action should run")
+}
+
 fn base_arguments(project: &TestProject) -> Vec<String> {
     vec![
         "--root".to_owned(),
@@ -127,6 +151,10 @@ fn create_plan(project: &TestProject, name: &str, request_number: u64) -> String
 }
 
 fn apply_fixture(project: &TestProject, plan_id: &str, fixture: &str, request_number: u64) {
+    apply_document(project, plan_id, &fixture_path(fixture), request_number);
+}
+
+fn apply_document(project: &TestProject, plan_id: &str, path: &Path, request_number: u64) {
     let mut arguments = base_arguments(project);
     arguments.extend([
         "plan".to_owned(),
@@ -140,7 +168,7 @@ fn apply_fixture(project: &TestProject, plan_id: &str, fixture: &str, request_nu
         "--actor".to_owned(),
         "codex".to_owned(),
         "--file".to_owned(),
-        fixture_path(fixture).to_string_lossy().into_owned(),
+        path.to_string_lossy().into_owned(),
     ]);
     let output = run_mino(&arguments);
     assert!(
@@ -169,6 +197,22 @@ fn finding_ids(value: &Value) -> Vec<&str> {
         .iter()
         .map(|finding| finding["id"].as_str().expect("finding ID should be text"))
         .collect()
+}
+
+fn assert_agent_next_actions_are_allowed(context: &Value) {
+    let allowed = context["allowed_actions"]
+        .as_array()
+        .expect("allowed actions should be an array");
+    for action in context["next_actions"]
+        .as_array()
+        .expect("next actions should be an array")
+    {
+        assert!(
+            allowed.contains(&action["id"]),
+            "next action {} must also be allowed",
+            action["id"]
+        );
+    }
 }
 
 fn assert_fixed_layer_order(value: &Value) {
@@ -363,7 +407,7 @@ fn graph_validation_reports_missing_ordering_and_cycle_defects() {
 }
 
 #[test]
-fn policy_validation_reports_commit_scope_and_missing_language_standards() {
+fn draft_agent_loop_routes_third_file_map_language_to_standards_apply() {
     let project = TestProject::new("policy");
     let plan_id = create_plan(&project, "Policy defects", 50);
     apply_fixture(&project, &plan_id, "policy-invalid.yaml", 51);
@@ -376,9 +420,247 @@ fn policy_validation_reports_commit_scope_and_missing_language_standards() {
     assert!(ids.contains(&"POLICY-FILE-MAP-OUTSIDE-COMMIT-SCOPE"));
     assert!(ids.contains(&"POLICY-STANDARD-REQUIRED"));
     assert!(ids.contains(&"POLICY-STANDARD-CHECK-MISSING"));
-    assert_eq!(value["next_actions"][0]["id"], "standards.recommend");
+    assert_eq!(value["next_actions"][0]["id"], "standards.apply");
     assert_eq!(value["next_actions"][1]["id"], "plan.apply");
+    let standards_action = &value["next_actions"][0];
+    let argv = standards_action["argv"]
+        .as_array()
+        .expect("standards apply argv should be an array");
+    for expected in [
+        "--recommended",
+        "--seed-verification",
+        "--plan",
+        "--expect-revision",
+        "--request-id",
+        "--actor",
+        "--format",
+        "--no-input",
+    ] {
+        assert!(argv.contains(&Value::from(expected)));
+    }
+    assert!(!argv.contains(&Value::from("recommend")));
+    let mut context_arguments = base_arguments(&project);
+    context_arguments.extend(["agent".to_owned(), "context".to_owned()]);
+    let context_output = run_mino(&context_arguments);
+    assert!(context_output.status.success());
+    let context = parse_json(&context_output);
+    assert_eq!(&context["next_actions"][0], standards_action);
+    assert_agent_next_actions_are_allowed(&context);
+    let applied = run_canonical_action(&project, &context["next_actions"][0]);
+    assert!(
+        applied.status.success(),
+        "standards apply stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&applied.stdout),
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let reconciled = PlanStore::new(project.path())
+        .load_plan(&PlanId::parse(&plan_id).expect("plan ID should parse"))
+        .expect("reconciled Draft should load");
+    assert!(
+        reconciled
+            .standards()
+            .iter()
+            .any(|standard| standard.package_id() == "python")
+    );
+    let after = parse_json(&validate(&project, &plan_id));
+    let after_ids = finding_ids(&after);
+    assert!(!after_ids.contains(&"POLICY-STANDARD-REQUIRED"));
+    assert!(!after_ids.contains(&"POLICY-STANDARD-CHECK-MISSING"));
+    assert!(!after_ids.contains(&"POLICY-STANDARD-CHECK-MISMATCH"));
+    assert!(after["next_actions"].as_array().is_some_and(|actions| {
+        actions
+            .iter()
+            .all(|action| action["id"] != "standards.recommend")
+    }));
     assert_fixed_layer_order(&value);
+}
+
+#[test]
+fn draft_agent_loop_reconciles_third_file_map_language_and_finalizes() {
+    let project = TestProject::new("draft-reconciliation");
+    fs::remove_file(project.path().join("Cargo.toml"))
+        .expect("initial Rust manifest should be removed");
+    fs::remove_dir_all(project.path().join("src")).expect("initial Rust source should be removed");
+    fs::create_dir(project.path().join("tools")).expect("Python source directory should exist");
+    fs::write(project.path().join("tools/task.py"), "VALUE = 1\n")
+        .expect("initial Python source should be written");
+    let plan_id = create_plan(&project, "Draft standards reconciliation", 55);
+    apply_fixture(&project, &plan_id, "complete.yaml", 56);
+
+    let mut context_arguments = base_arguments(&project);
+    context_arguments.extend(["agent".to_owned(), "context".to_owned()]);
+    let context_output = run_mino(&context_arguments);
+    assert!(context_output.status.success());
+    let context = parse_json(&context_output);
+    assert_eq!(context["next_actions"][0]["id"], "standards.apply");
+    assert_agent_next_actions_are_allowed(&context);
+    let applied = run_canonical_action(&project, &context["next_actions"][0]);
+    assert!(
+        applied.status.success(),
+        "Draft standards apply stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&applied.stdout),
+        String::from_utf8_lossy(&applied.stderr)
+    );
+
+    let context_output = run_mino(&context_arguments);
+    assert!(context_output.status.success());
+    let context = parse_json(&context_output);
+    let validation = parse_json(&validate(&project, &plan_id));
+    assert_eq!(
+        context["next_actions"][0]["id"], "plan.finalize",
+        "post-reconciliation validation: {validation:#}"
+    );
+    assert_agent_next_actions_are_allowed(&context);
+    let finalized = run_canonical_action(&project, &context["next_actions"][0]);
+    assert!(
+        finalized.status.success(),
+        "Draft finalize stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&finalized.stdout),
+        String::from_utf8_lossy(&finalized.stderr)
+    );
+    let plan = PlanStore::new(project.path())
+        .load_plan(&PlanId::parse(&plan_id).expect("plan ID should parse"))
+        .expect("finalized plan should load");
+    assert_eq!(plan.status(), mino::domain::PlanStatus::Ready);
+}
+
+#[test]
+fn ready_agent_loop_reconciles_standards_and_invalidates_approval() {
+    let project = TestProject::new("ready-reconciliation");
+    let plan_id = create_plan(&project, "Ready standards drift", 60);
+    apply_fixture(&project, &plan_id, "complete.yaml", 61);
+
+    let mut finalize = base_arguments(&project);
+    finalize.extend([
+        "plan".to_owned(),
+        "finalize".to_owned(),
+        "--plan".to_owned(),
+        plan_id.clone(),
+        "--expect-revision".to_owned(),
+        "2".to_owned(),
+        "--request-id".to_owned(),
+        request_id(62),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+    ]);
+    let finalized = run_mino(&finalize);
+    assert!(finalized.status.success());
+
+    let mut approve = base_arguments(&project);
+    approve.extend([
+        "plan".to_owned(),
+        "approve".to_owned(),
+        "--plan".to_owned(),
+        plan_id.clone(),
+        "--expect-revision".to_owned(),
+        "3".to_owned(),
+        "--request-id".to_owned(),
+        request_id(63),
+        "--actor".to_owned(),
+        "user".to_owned(),
+        "--approval-ref".to_owned(),
+        "chat:ready-standards".to_owned(),
+        "--git-flow-consent".to_owned(),
+        "disabled".to_owned(),
+    ]);
+    let approved = run_mino(&approve);
+    assert!(approved.status.success());
+
+    let typed_id = PlanId::parse(&plan_id).expect("plan ID should parse");
+    let store = PlanStore::new(project.path());
+    let prior = store
+        .load_plan(&typed_id)
+        .expect("approved plan should load");
+    assert!(prior.has_plan_approval());
+    let prior_rendered = render_plan(&prior).expect("approved plan should render");
+    let mut drifted_value = serde_json::to_value(&prior).expect("approved plan should serialize");
+    let checks = drifted_value["verification_plan"]
+        .as_array_mut()
+        .expect("verification plan should be an array");
+    let prior_check_count = checks.len();
+    checks.retain(|check| {
+        check["id"]
+            .as_str()
+            .is_none_or(|id| !id.starts_with("RUST-"))
+    });
+    assert!(checks.len() < prior_check_count);
+    drifted_value["revision"] = Value::from(5);
+    drifted_value["metadata"]["updated_at"] =
+        serde_json::to_value(Timestamp::now_utc()).expect("timestamp should serialize");
+    let drifted: Plan = serde_json::from_value(drifted_value)
+        .expect("policy-invalid Ready plan should deserialize");
+    store
+        .commit(
+            &typed_id,
+            MutationRequest::new(
+                4,
+                RequestId::parse(request_id(64)).expect("request ID should parse"),
+                "test",
+                vec!["test".to_owned(), "remove-catalog-check".to_owned()],
+                vec!["verification_plan".to_owned()],
+            )
+            .expect("mutation request should validate"),
+            move |plan| {
+                *plan = drifted.clone();
+                Ok(())
+            },
+        )
+        .expect("Ready standards drift should persist");
+    let drifted = store
+        .load_plan(&typed_id)
+        .expect("drifted plan should load");
+    let drifted_rendered = render_plan(&drifted).expect("drifted plan should render");
+    let projection = project.path().join(
+        drifted
+            .metadata()
+            .markdown_path()
+            .expect("projection path should exist"),
+    );
+    write_projection(&projection, &drifted_rendered, Some(&prior_rendered))
+        .expect("drifted projection should update");
+
+    let mut context_arguments = base_arguments(&project);
+    context_arguments.extend(["agent".to_owned(), "context".to_owned()]);
+    let context_output = run_mino(&context_arguments);
+    assert!(context_output.status.success());
+    let context = parse_json(&context_output);
+    assert_eq!(context["next_actions"][0]["id"], "standards.apply");
+    assert_agent_next_actions_are_allowed(&context);
+    assert!(
+        context["next_actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().all(|action| action["id"] != "plan.apply"))
+    );
+
+    let applied = run_canonical_action(&project, &context["next_actions"][0]);
+    assert!(
+        applied.status.success(),
+        "Ready standards apply stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&applied.stdout),
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let reconciled = store
+        .load_plan(&typed_id)
+        .expect("reconciled Ready plan should load");
+    assert_eq!(reconciled.status(), mino::domain::PlanStatus::Ready);
+    assert!(!reconciled.has_plan_approval());
+    assert_eq!(
+        reconciled.git_readiness().git_flow_consent(),
+        GitFlowConsent::Pending
+    );
+    assert!(
+        reconciled
+            .global_verification()
+            .iter()
+            .any(|check| check.id().as_str().starts_with("RUST-"))
+    );
+
+    let context_output = run_mino(&context_arguments);
+    assert!(context_output.status.success());
+    let context = parse_json(&context_output);
+    assert_agent_next_actions_are_allowed(&context);
+    assert_eq!(context["approval_required"], true);
+    assert_eq!(context["next_actions"], Value::Array(Vec::new()));
 }
 
 #[test]
