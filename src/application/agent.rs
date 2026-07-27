@@ -83,6 +83,7 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("plan.next", false, false),
     ("plan.outcome.set", true, false),
     ("plan.review", false, false),
+    ("plan.scan.accept", true, true),
     ("plan.scope.add", true, false),
     ("plan.scope.set", true, false),
     ("plan.show", false, false),
@@ -117,7 +118,7 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("review.record", true, false),
     ("review.resolve", true, false),
     ("review.rework", true, false),
-    ("standards.apply", false, false),
+    ("standards.apply", true, false),
     ("standards.catalog.build", true, false),
     ("standards.catalog.init", true, false),
     ("standards.catalog.validate", false, false),
@@ -203,6 +204,9 @@ pub struct AgentContext {
     pub blocked_actions: Vec<BlockedAction>,
     /// Exact selected standards package pins.
     pub standards: Vec<String>,
+    /// Whether truncated discovery still requires explicit acceptance.
+    #[serde(skip_serializing_if = "is_false")]
+    pub scan_incomplete: bool,
     /// Whether the Agent must stop for explicit human approval.
     pub approval_required: bool,
     /// Complete canonical commands that may be executed next.
@@ -368,6 +372,7 @@ pub fn build_agent_context(
             allowed_actions: vec!["plan.create".to_owned(), "project.import.legacy".to_owned()],
             blocked_actions: Vec::new(),
             standards: Vec::new(),
+            scan_incomplete: false,
             approval_required: false,
             next_actions: Vec::new(),
         });
@@ -383,6 +388,12 @@ pub fn build_agent_context(
         .iter()
         .map(|standard| format!("{}@{}", standard.package_id(), standard.version()))
         .collect();
+    let scan_incomplete = plan.scan_is_incomplete().map_err(|error| {
+        MinoError::new(
+            ErrorCategory::DriftDetected,
+            format!("Project scan state is malformed: {error}"),
+        )
+    })?;
     let guidance = guidance(root, plan)?;
     Ok(AgentContext {
         kind: AGENT_CONTEXT_KIND,
@@ -392,6 +403,7 @@ pub fn build_agent_context(
         allowed_actions: guidance.allowed_actions,
         blocked_actions: guidance.blocked_actions,
         standards,
+        scan_incomplete,
         approval_required: guidance.approval_required,
         next_actions: guidance.next_actions,
     })
@@ -652,6 +664,12 @@ fn review_guidance(plan: &Plan) -> Guidance {
 }
 
 fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
+    let requires_scan_acceptance = plan.scan_is_incomplete().map_err(|error| {
+        MinoError::new(
+            ErrorCategory::DriftDetected,
+            format!("Project scan state is malformed: {error}"),
+        )
+    })?;
     let missing = draft_missing(plan);
     let (next_actions, is_valid, blocking_count, requires_conflict_decision) = if missing.is_empty()
     {
@@ -711,10 +729,14 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
         "plan.verification.remove",
         "plan.validate",
         "plan.show",
+        "standards.apply",
         "standards.conflict.list",
         "standards.conflict.refresh",
         "standards.conflict.resolve",
     ]);
+    if requires_scan_acceptance {
+        allowed_actions.push("plan.scan.accept".to_owned());
+    }
     let mut blocked_actions = vec![
         blocked("plan.approve", "The plan must be Ready before approval"),
         blocked(
@@ -736,9 +758,14 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
     Ok(Guidance {
         allowed_actions,
         blocked_actions,
-        approval_required: requires_conflict_decision,
+        approval_required: requires_conflict_decision || requires_scan_acceptance,
         next_actions,
     })
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn ready_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {

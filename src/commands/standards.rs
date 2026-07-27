@@ -6,7 +6,9 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::application::plan::PlanMutationRequest;
-use crate::application::standards::{StandardsConflictReport, StandardsConflictService};
+use crate::application::standards::{
+    StandardsConflictReport, StandardsConflictService, StandardsPlanService,
+};
 use crate::commands::CommandResponse;
 use crate::domain::{PlanId, RequestId, Timestamp};
 use crate::project;
@@ -35,8 +37,20 @@ pub(crate) enum StandardsAction {
         #[arg(long)]
         seed_verification: bool,
         /// File-map path used for second-stage complete recommendations.
-        #[arg(long = "path")]
+        #[arg(long = "path", conflicts_with = "plan")]
         paths: Vec<PathBuf>,
+        /// Plan mutated atomically from its current authored File Map.
+        #[arg(long, requires_all = ["expect_revision", "request_id"])]
+        plan: Option<String>,
+        /// Required optimistic-concurrency revision for plan-scoped application.
+        #[arg(long, requires = "plan")]
+        expect_revision: Option<u64>,
+        /// Idempotency UUID for plan-scoped application.
+        #[arg(long, requires = "plan")]
+        request_id: Option<String>,
+        /// Actor recorded for plan-scoped application.
+        #[arg(long, default_value = "user")]
+        actor: String,
     },
     /// Explicitly download and verify every configured catalog package.
     Sync {
@@ -167,6 +181,10 @@ pub(crate) fn execute(start: &Path, action: StandardsAction) -> Result<CommandRe
             recommended,
             seed_verification,
             paths,
+            plan,
+            expect_revision,
+            request_id,
+            actor,
         } => {
             if !recommended || !seed_verification {
                 return Err(MinoError::new(
@@ -174,16 +192,26 @@ pub(crate) fn execute(start: &Path, action: StandardsAction) -> Result<CommandRe
                     "v0.1 standards apply requires --recommended and --seed-verification",
                 ));
             }
-            let catalog = EmbeddedCatalog::load()?;
-            let scan = project::scan(start)?;
-            let recommendation = if paths.is_empty() {
-                recommend_initial(&catalog, &scan)?
+            if let Some(plan) = plan {
+                let expect_revision = expect_revision.ok_or_else(|| {
+                    validation_error("Plan-scoped standards apply requires --expect-revision")
+                })?;
+                let request_id = request_id.ok_or_else(|| {
+                    validation_error("Plan-scoped standards apply requires --request-id")
+                })?;
+                execute_plan_apply(start, plan, expect_revision, request_id, actor)
             } else {
-                recommend_for_paths(&catalog, &scan, &paths)?
-            };
-            let application =
-                apply_recommendation(&scan.root, &catalog, &recommendation, &SystemToolProbe)?;
-            response("Standards application resolved.", application)
+                let catalog = EmbeddedCatalog::load()?;
+                let scan = project::scan(start)?;
+                let recommendation = if paths.is_empty() {
+                    recommend_initial(&catalog, &scan)?
+                } else {
+                    recommend_for_paths(&catalog, &scan, &paths)?
+                };
+                let application =
+                    apply_recommendation(&scan.root, &catalog, &recommendation, &SystemToolProbe)?;
+                response("Standards application resolved.", application)
+            }
         }
         StandardsAction::Sync { all } => {
             if !all {
@@ -200,6 +228,54 @@ pub(crate) fn execute(start: &Path, action: StandardsAction) -> Result<CommandRe
         StandardsAction::Catalog(arguments) => execute_catalog(arguments.action),
         StandardsAction::Conflict(arguments) => execute_conflict(start, arguments.action),
     }
+}
+
+fn execute_plan_apply(
+    start: &Path,
+    plan: String,
+    expect_revision: u64,
+    request_id: String,
+    actor: String,
+) -> Result<CommandResponse, MinoError> {
+    let plan_id = parse_plan_id(&plan)?;
+    let parsed_request_id = parse_request_id(&request_id)?;
+    let command = vec![
+        "mino".to_owned(),
+        "standards".to_owned(),
+        "apply".to_owned(),
+        "--recommended".to_owned(),
+        "--seed-verification".to_owned(),
+        "--plan".to_owned(),
+        plan,
+        "--expect-revision".to_owned(),
+        expect_revision.to_string(),
+        "--request-id".to_owned(),
+        request_id,
+        "--actor".to_owned(),
+        actor.clone(),
+    ];
+    let report = StandardsPlanService::discover(start)?.reconcile(PlanMutationRequest {
+        plan_id,
+        expected_revision: expect_revision,
+        request_id: parsed_request_id,
+        actor,
+        command,
+        updated_at: Timestamp::now_utc(),
+    })?;
+    let complete = !report.project_scan.is_incomplete();
+    let missing = if complete {
+        Vec::new()
+    } else {
+        vec!["scan.acceptance".to_owned()]
+    };
+    let payload = serde_json::to_value(report).map_err(|error| serialization_error(&error))?;
+    Ok(CommandResponse {
+        message: "Plan standards reconciled.".to_owned(),
+        complete,
+        payload,
+        missing,
+        next_actions: Vec::new(),
+    })
 }
 
 fn execute_catalog(action: CatalogAction) -> Result<CommandResponse, MinoError> {

@@ -21,6 +21,8 @@ use super::{
     TaskStatus, Timestamp, VerificationCheck, WorkspaceFingerprint, WorkspaceProtocolState,
 };
 
+const PROJECT_SCAN_EXTENSION_KEY: &str = "project_scan";
+
 /// Human and repository metadata associated with a plan.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -348,6 +350,219 @@ impl StandardSelection {
     #[must_use]
     pub fn source(&self) -> &str {
         &self.source
+    }
+}
+
+/// Explicit acceptance of one exact truncated project scan.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectScanAcceptance {
+    scan_digest: String,
+    actor: String,
+    reference: String,
+    reason: String,
+    accepted_at: Timestamp,
+}
+
+/// Persisted digest, resource metrics, and completeness state for project discovery.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectScanSummary {
+    digest: String,
+    files_scanned: u64,
+    directories_excluded: u64,
+    symlinks_skipped: u64,
+    bytes_read: u64,
+    truncated: bool,
+    truncation_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    acceptance: Option<ProjectScanAcceptance>,
+}
+
+impl ProjectScanSummary {
+    /// Creates one unaccepted summary for an exact deterministic project scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error for a malformed digest or inconsistent
+    /// truncation fields.
+    pub fn new(
+        digest: String,
+        files_scanned: u64,
+        directories_excluded: u64,
+        symlinks_skipped: u64,
+        bytes_read: u64,
+        truncated: bool,
+        mut truncation_reasons: Vec<String>,
+    ) -> Result<Self, DomainError> {
+        truncation_reasons.sort();
+        truncation_reasons.dedup();
+        let summary = Self {
+            digest,
+            files_scanned,
+            directories_excluded,
+            symlinks_skipped,
+            bytes_read,
+            truncated,
+            truncation_reasons,
+            acceptance: None,
+        };
+        summary.validate()?;
+        Ok(summary)
+    }
+
+    /// Returns the canonical digest of the complete scan result.
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Returns the number of ordinary files considered by discovery.
+    #[must_use]
+    pub const fn files_scanned(&self) -> u64 {
+        self.files_scanned
+    }
+
+    /// Returns the number of generated or cache directories excluded.
+    #[must_use]
+    pub const fn directories_excluded(&self) -> u64 {
+        self.directories_excluded
+    }
+
+    /// Returns the number of symbolic links skipped.
+    #[must_use]
+    pub const fn symlinks_skipped(&self) -> u64 {
+        self.symlinks_skipped
+    }
+
+    /// Returns the aggregate bytes read for scan evidence.
+    #[must_use]
+    pub const fn bytes_read(&self) -> u64 {
+        self.bytes_read
+    }
+
+    /// Returns whether one or more scan resource budgets truncated discovery.
+    #[must_use]
+    pub const fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// Returns stable sorted truncation reason codes.
+    #[must_use]
+    pub fn truncation_reasons(&self) -> &[String] {
+        &self.truncation_reasons
+    }
+
+    /// Returns the acceptance bound to this exact digest when present.
+    #[must_use]
+    pub const fn acceptance(&self) -> Option<&ProjectScanAcceptance> {
+        self.acceptance.as_ref()
+    }
+
+    /// Returns whether a truncated scan still needs explicit acceptance.
+    #[must_use]
+    pub const fn is_incomplete(&self) -> bool {
+        self.truncated && self.acceptance.is_none()
+    }
+
+    fn accept(
+        &mut self,
+        actor: String,
+        reference: String,
+        reason: String,
+        accepted_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if !self.truncated || self.acceptance.is_some() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Only one unaccepted truncated project scan can be accepted",
+            ));
+        }
+        self.acceptance = Some(ProjectScanAcceptance {
+            scan_digest: self.digest.clone(),
+            actor,
+            reference,
+            reason,
+            accepted_at,
+        });
+        self.validate()
+    }
+
+    fn preserve_acceptance_from(&mut self, previous: &Self) {
+        if self.digest == previous.digest {
+            self.acceptance.clone_from(&previous.acceptance);
+        }
+    }
+
+    fn validate(&self) -> Result<(), DomainError> {
+        const REASONS: &[&str] = &[
+            "depth_limit",
+            "file_limit",
+            "per_file_byte_limit",
+            "total_byte_limit",
+        ];
+        let digest = self.digest.strip_prefix("sha256:");
+        let valid_digest = digest.is_some_and(|value| {
+            value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+        let reasons_are_valid = self
+            .truncation_reasons
+            .iter()
+            .all(|reason| REASONS.contains(&reason.as_str()))
+            && self
+                .truncation_reasons
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]);
+        let acceptance_is_valid = self.acceptance.as_ref().is_none_or(|acceptance| {
+            self.truncated
+                && acceptance.scan_digest == self.digest
+                && !acceptance.actor.trim().is_empty()
+                && !acceptance.reference.trim().is_empty()
+                && !acceptance.reason.trim().is_empty()
+        });
+        if !valid_digest
+            || !reasons_are_valid
+            || self.truncated == self.truncation_reasons.is_empty()
+            || !acceptance_is_valid
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Project scan summary is malformed or inconsistent",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ProjectScanAcceptance {
+    /// Returns the exact scan digest accepted by the user.
+    #[must_use]
+    pub fn scan_digest(&self) -> &str {
+        &self.scan_digest
+    }
+
+    /// Returns the actor who accepted partial discovery.
+    #[must_use]
+    pub fn actor(&self) -> &str {
+        &self.actor
+    }
+
+    /// Returns the auditable decision reference.
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+
+    /// Returns why the partial scan was accepted.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    /// Returns when partial discovery was accepted.
+    #[must_use]
+    pub const fn accepted_at(&self) -> &Timestamp {
+        &self.accepted_at
     }
 }
 
@@ -986,6 +1201,84 @@ impl Plan {
     #[must_use]
     pub fn standards(&self) -> &[StandardSelection] {
         &self.standards
+    }
+
+    /// Returns the persisted project-scan summary when this plan was seeded by discovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when the extension payload is malformed.
+    pub fn project_scan_summary(&self) -> Result<Option<ProjectScanSummary>, DomainError> {
+        self.extensions
+            .get(PROJECT_SCAN_EXTENSION_KEY)
+            .map(|value| {
+                serde_json::from_value::<ProjectScanSummary>(value.clone()).map_err(|error| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Project scan extension is malformed: {error}"),
+                    )
+                })
+            })
+            .transpose()
+    }
+
+    /// Returns whether current project discovery was truncated and remains unaccepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when the extension payload is malformed.
+    pub fn scan_is_incomplete(&self) -> Result<bool, DomainError> {
+        Ok(self
+            .project_scan_summary()?
+            .as_ref()
+            .is_some_and(ProjectScanSummary::is_incomplete))
+    }
+
+    pub(crate) fn record_initial_project_scan(
+        &mut self,
+        summary: &ProjectScanSummary,
+    ) -> Result<(), DomainError> {
+        if self.status != PlanStatus::Draft
+            || self.revision != 1
+            || self.extensions.contains_key(PROJECT_SCAN_EXTENSION_KEY)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Initial project scan can be recorded only once on a revision-one Draft",
+            ));
+        }
+        summary.validate()?;
+        self.store_project_scan_summary(summary)?;
+        self.validate_invariants()
+    }
+
+    /// Accepts the current exact truncated scan so Draft authoring may continue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan is Draft and its current scan is
+    /// truncated, unaccepted, and supplied with complete audit fields.
+    pub fn accept_project_scan(
+        &mut self,
+        actor: String,
+        decision_reference: String,
+        reason: String,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.require_status(PlanStatus::Draft, "accept partial project scan")?;
+        let mut summary = self.project_scan_summary()?.ok_or_else(|| {
+            DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "The plan has no persisted project scan to accept",
+            )
+        })?;
+        summary.accept(actor, decision_reference, reason, updated_at.clone())?;
+        let mut candidate = self.clone();
+        candidate.store_project_scan_summary(&summary)?;
+        candidate.record_revision(candidate.next_revision()?, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
     }
 
     /// Returns captured Git readiness and consent facts.
@@ -3002,6 +3295,165 @@ impl Plan {
         Ok(())
     }
 
+    /// Reconciles embedded standards, their catalog-owned checks, project scan
+    /// evidence, and detected conflict snapshots in one plan revision.
+    ///
+    /// Unchanged check definitions retain their current status and evidence.
+    /// Changed or newly required definitions replace prior catalog checks with
+    /// fresh Pending checks. Custom standards and global checks are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an illegal lifecycle state, malformed or duplicate
+    /// catalog inputs, a collision with task-owned checks, or a semantic no-op.
+    pub fn reconcile_standards(
+        &mut self,
+        embedded_standards: Vec<StandardSelection>,
+        catalog_check_ids: &BTreeSet<CheckId>,
+        catalog_checks: Vec<VerificationCheck>,
+        scan_summary: ProjectScanSummary,
+        conflict_state: &StandardsConflictState,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        conflict_state.validate()?;
+        let mut candidate = self.preview_standards_reconciliation(
+            embedded_standards,
+            catalog_check_ids,
+            catalog_checks,
+            scan_summary,
+        )?;
+        candidate.store_standards_conflicts(conflict_state)?;
+        if candidate.standards == self.standards
+            && candidate.global_verification == self.global_verification
+            && candidate.project_scan_summary()? == self.project_scan_summary()?
+            && candidate.standards_conflict_state()? == self.standards_conflict_state()?
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Standards reconciliation made no semantic change",
+            ));
+        }
+        if candidate.status == PlanStatus::Ready {
+            candidate.invalidate_plan_approval();
+        }
+        candidate.record_revision(candidate.next_revision()?, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    pub(crate) fn preview_standards_reconciliation(
+        &self,
+        mut embedded_standards: Vec<StandardSelection>,
+        catalog_check_ids: &BTreeSet<CheckId>,
+        mut catalog_checks: Vec<VerificationCheck>,
+        mut scan_summary: ProjectScanSummary,
+    ) -> Result<Self, DomainError> {
+        self.ensure_no_pending_amendment("reconcile standards")?;
+        if !matches!(self.status, PlanStatus::Draft | PlanStatus::Ready) {
+            return Err(self.invalid_transition("reconcile standards"));
+        }
+        scan_summary.validate()?;
+        if let Some(previous) = self.project_scan_summary()? {
+            scan_summary.preserve_acceptance_from(&previous);
+        }
+        if embedded_standards
+            .iter()
+            .any(|standard| standard.source() != "embedded")
+            || embedded_standards
+                .iter()
+                .map(StandardSelection::package_id)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != embedded_standards.len()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Reconciled embedded standards must have unique package identifiers",
+            ));
+        }
+        if catalog_checks
+            .iter()
+            .any(|check| !catalog_check_ids.contains(check.id()))
+            || catalog_checks
+                .iter()
+                .map(VerificationCheck::id)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != catalog_checks.len()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Reconciled catalog checks must have unique catalog-owned identifiers",
+            ));
+        }
+        if self.tasks.iter().any(|task| {
+            task.verification_checks()
+                .iter()
+                .any(|check| catalog_check_ids.contains(check.id()))
+        }) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Catalog-owned verification checks must remain global",
+            ));
+        }
+
+        let mut standards = self
+            .standards
+            .iter()
+            .filter(|standard| standard.source() != "embedded")
+            .cloned()
+            .collect::<Vec<_>>();
+        standards.append(&mut embedded_standards);
+        standards.sort_by(|left, right| {
+            left.package_id()
+                .cmp(right.package_id())
+                .then_with(|| left.source().cmp(right.source()))
+        });
+        if standards
+            .iter()
+            .map(StandardSelection::package_id)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != standards.len()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Reconciled standards collide with a non-embedded package selection",
+            ));
+        }
+
+        let current_catalog_checks = self
+            .global_verification
+            .iter()
+            .filter(|check| catalog_check_ids.contains(check.id()))
+            .map(|check| (check.id().clone(), check))
+            .collect::<BTreeMap<_, _>>();
+        let mut global_verification = self
+            .global_verification
+            .iter()
+            .filter(|check| !catalog_check_ids.contains(check.id()))
+            .cloned()
+            .collect::<Vec<_>>();
+        catalog_checks.sort_by(|left, right| left.id().cmp(right.id()));
+        for check in catalog_checks {
+            let retained = current_catalog_checks.get(check.id()).filter(|current| {
+                current.command() == check.command()
+                    && current.cwd() == check.cwd()
+                    && current.expected_exit_code() == check.expected_exit_code()
+                    && current.is_required() == check.is_required()
+            });
+            global_verification.push(retained.map_or(check, |current| (*current).clone()));
+        }
+        global_verification.sort_by(|left, right| left.id().cmp(right.id()));
+
+        let mut candidate = self.clone();
+        candidate.standards = standards;
+        candidate.global_verification = global_verification;
+        candidate.store_project_scan_summary(&scan_summary)?;
+        Ok(candidate)
+    }
+
     /// Leases one task or global verification check for external execution.
     ///
     /// # Errors
@@ -3918,6 +4370,9 @@ impl Plan {
         self.validate_global_verification()?;
         self.validate_amendment_state()?;
         self.final_outcome.validate()?;
+        if let Some(summary) = self.project_scan_summary()? {
+            summary.validate()?;
+        }
         self.validate_review_state()?;
         self.validate_execution_state()?;
         let task_ids = self.tasks.iter().map(Task::id).collect::<BTreeSet<_>>();
@@ -3942,6 +4397,22 @@ impl Plan {
         })?;
         self.extensions
             .insert(STANDARDS_CONFLICT_EXTENSION_KEY.to_owned(), value);
+        Ok(())
+    }
+
+    fn store_project_scan_summary(
+        &mut self,
+        summary: &ProjectScanSummary,
+    ) -> Result<(), DomainError> {
+        summary.validate()?;
+        let value = serde_json::to_value(summary).map_err(|error| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Failed to encode project scan extension: {error}"),
+            )
+        })?;
+        self.extensions
+            .insert(PROJECT_SCAN_EXTENSION_KEY.to_owned(), value);
         Ok(())
     }
 

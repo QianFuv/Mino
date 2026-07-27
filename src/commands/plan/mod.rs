@@ -56,6 +56,8 @@ pub(crate) enum PlanAction {
     Summary(SummaryArguments),
     /// Record the verified execution result and residual risk.
     Outcome(OutcomeArguments),
+    /// Inspect or explicitly accept persisted project-scan completeness.
+    Scan(ScanArguments),
     /// Add current-state references while Draft.
     Context(ContextArguments),
     /// Set or append explicit plan scope boundaries.
@@ -194,6 +196,30 @@ struct SummarySetArguments {
 pub(crate) struct OutcomeArguments {
     #[command(subcommand)]
     action: OutcomeAction,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ScanArguments {
+    #[command(subcommand)]
+    action: ScanAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum ScanAction {
+    /// Accept the exact current truncated scan with an auditable decision.
+    Accept(ScanAcceptArguments),
+}
+
+#[derive(Debug, Args)]
+struct ScanAcceptArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    /// Auditable user decision or approval reference.
+    #[arg(long)]
+    decision_ref: String,
+    /// Non-empty reason for accepting partial discovery.
+    #[arg(long, allow_hyphen_values = true)]
+    reason: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -756,6 +782,9 @@ pub(crate) fn execute(
         PlanAction::Outcome(arguments) => match arguments.action {
             OutcomeAction::Set(arguments) => execute_outcome(&service, arguments),
         },
+        PlanAction::Scan(arguments) => match arguments.action {
+            ScanAction::Accept(arguments) => execute_scan_accept(&service, arguments),
+        },
         PlanAction::Context(arguments) => match arguments.action {
             ContextAction::Add(arguments) => execute_context(&service, arguments),
         },
@@ -1035,6 +1064,32 @@ fn execute_outcome(
         arguments.follow_ups,
     )?;
     operation_response(service, "Final Outcome recorded.", report)
+}
+
+fn execute_scan_accept(
+    service: &PlanService,
+    arguments: ScanAcceptArguments,
+) -> Result<CommandResponse, MinoError> {
+    let command = mutation_command(
+        &["scan", "accept"],
+        &arguments.mutation,
+        vec![
+            "--decision-ref".to_owned(),
+            arguments.decision_ref.clone(),
+            "--reason".to_owned(),
+            arguments.reason.clone(),
+        ],
+    );
+    let request = PlanMutationRequest {
+        plan_id: parse_plan_id(&arguments.mutation.plan)?,
+        expected_revision: arguments.mutation.expect_revision,
+        request_id: parse_request_id(&arguments.mutation.request_id)?,
+        actor: arguments.mutation.actor,
+        command,
+        updated_at: Timestamp::now_utc(),
+    };
+    let report = service.accept_scan(request, arguments.decision_ref, arguments.reason)?;
+    operation_response(service, "Project scan acceptance recorded.", report)
 }
 
 fn execute_context(

@@ -76,6 +76,7 @@ fn render_document(plan: &Value, state_hash: &str) -> String {
     render_interfaces(&mut output, plan);
     render_edge_cases(&mut output, plan);
     render_standards(&mut output, plan);
+    render_project_scan(&mut output, plan);
     render_standards_conflicts(&mut output, plan);
     render_git_readiness(&mut output, plan);
     render_task_order(&mut output, plan);
@@ -257,6 +258,47 @@ fn render_standards(output: &mut String, plan: &Value) {
         })
         .collect::<Vec<_>>();
     write_optional_table(output, &["Package", "Version", "Digest", "Source"], rows);
+}
+
+fn render_project_scan(output: &mut String, plan: &Value) {
+    let scan = &plan["extensions"]["project_scan"];
+    if scan.is_null() {
+        return;
+    }
+    output.push_str("\n## Project Scan\n\n");
+    write_table(
+        output,
+        &["Field", "Value"],
+        vec![
+            row("Digest", &scalar(&scan["digest"])),
+            row("Files Scanned", &scalar(&scan["files_scanned"])),
+            row(
+                "Directories Excluded",
+                &scalar(&scan["directories_excluded"]),
+            ),
+            row("Symlinks Skipped", &scalar(&scan["symlinks_skipped"])),
+            row("Bytes Read", &scalar(&scan["bytes_read"])),
+            row("Truncated", &scalar(&scan["truncated"])),
+            row("Truncation Reasons", &joined(&scan["truncation_reasons"])),
+        ],
+    );
+    output.push_str("\n### Scan Acceptance\n\n");
+    let acceptance = &scan["acceptance"];
+    if acceptance.is_null() {
+        output.push_str("_Not required or not yet accepted._\n");
+        return;
+    }
+    write_table(
+        output,
+        &["Field", "Value"],
+        vec![
+            row("Scan Digest", &scalar(&acceptance["scan_digest"])),
+            row("Actor", &scalar(&acceptance["actor"])),
+            row("Reference", &scalar(&acceptance["reference"])),
+            row("Reason", &scalar(&acceptance["reason"])),
+            row("Accepted At", &scalar(&acceptance["accepted_at"])),
+        ],
+    );
 }
 
 fn render_standards_conflicts(output: &mut String, plan: &Value) {
@@ -770,6 +812,7 @@ fn render_extensions(output: &mut String, plan: &Value) {
     output.push_str("\n## Extensions\n\n");
     let mut extensions = plan["extensions"].as_object().cloned().unwrap_or_default();
     extensions.remove("execution");
+    extensions.remove("project_scan");
     extensions.remove("standards_conflicts");
     if extensions.is_empty() {
         output.push_str("_None._\n");

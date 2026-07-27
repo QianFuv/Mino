@@ -112,6 +112,16 @@ fn monorepo_rankings_match_documented_weights_and_are_stable() {
     let first = scan_root(&fixture("monorepo")).expect("monorepo should scan");
     let second = scan_root(&fixture("monorepo")).expect("repeated monorepo should scan");
     assert_eq!(first, second);
+    assert_eq!(
+        first.digest().expect("scan digest should be computed"),
+        second.digest().expect("repeated digest should be computed")
+    );
+    assert!(
+        first
+            .digest()
+            .expect("scan digest should be computed")
+            .starts_with("sha256:")
+    );
     assert_eq!(first.files_scanned, 13);
     assert_eq!(first.directories_excluded, 2);
     assert_eq!(first.symlinks_skipped, 0);

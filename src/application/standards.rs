@@ -1,14 +1,20 @@
-//! Revision-checked standards-conflict inspection, refresh, and resolution.
+//! Revision-checked standards reconciliation, conflict inspection, and resolution.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde::Serialize;
 
-use crate::application::plan::{PlanMutationRequest, PlanOperationReport, PlanService};
-use crate::domain::{PlanId, PlanStatus};
+use crate::application::plan::{
+    PlanMutationRequest, PlanOperationReport, PlanService, summarize_project_scan,
+};
+use crate::domain::{
+    CheckId, PlanId, PlanStatus, ProjectScanSummary, StandardSelection, VerificationCheck,
+};
 use crate::standards::{
-    AssessedStandardConflict, LocalStandardsSource, StandardsConflictAssessment,
-    assess_standard_conflicts, detect_standard_conflicts,
+    AssessedStandardConflict, EmbeddedCatalog, LocalStandardsSource, StandardsConflictAssessment,
+    SystemToolProbe, ToolProbe, apply_recommendation, assess_standard_conflicts,
+    detect_standard_conflicts, recommend_for_paths, recommend_initial,
 };
 use crate::{ErrorCategory, MinoError};
 
@@ -42,6 +48,215 @@ pub struct StandardsConflictOperationReport {
     pub operation: PlanOperationReport,
     /// Current post-mutation conflict report.
     pub standards_conflicts: StandardsConflictReport,
+}
+
+/// Atomic plan mutation result followed by its persisted scan and selections.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StandardsPlanOperationReport {
+    /// Revision and digest result from the normal plan transaction.
+    #[serde(flatten)]
+    pub operation: PlanOperationReport,
+    /// Exact persisted scan summary used for the recommendation.
+    pub project_scan: ProjectScanSummary,
+    /// Current exact package selections in stable order.
+    pub standards: Vec<String>,
+    /// Current global verification identifiers in stable order.
+    pub verification_checks: Vec<String>,
+}
+
+/// Application boundary for second-stage plan-scoped standards reconciliation.
+#[derive(Clone, Debug)]
+pub struct StandardsPlanService {
+    plans: PlanService,
+}
+
+impl StandardsPlanService {
+    /// Discovers an initialized project and creates its reconciliation service.
+    ///
+    /// # Errors
+    ///
+    /// Returns an environment error when no initialized project can be discovered.
+    pub fn discover(start: &Path) -> Result<Self, MinoError> {
+        Ok(Self {
+            plans: PlanService::discover(start)?,
+        })
+    }
+
+    /// Reconciles current File Map languages using the bounded system probe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale revisions, malformed sources, illegal plan
+    /// state, probe/application failures, or storage and projection failures.
+    pub fn reconcile(
+        &self,
+        request: PlanMutationRequest,
+    ) -> Result<StandardsPlanOperationReport, MinoError> {
+        self.reconcile_with_probe(request, &SystemToolProbe)
+    }
+
+    /// Reconciles current File Map languages with a caller-provided tool probe.
+    ///
+    /// Exact request replay is resolved before any scan or external probe runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale revisions, malformed sources, illegal plan
+    /// state, probe/application failures, or storage and projection failures.
+    pub fn reconcile_with_probe<P: ToolProbe>(
+        &self,
+        request: PlanMutationRequest,
+        probe: &P,
+    ) -> Result<StandardsPlanOperationReport, MinoError> {
+        let current = self.plans.load_verified(&request.plan_id)?;
+        if current.revision() != request.expected_revision {
+            let operation = self
+                .plans
+                .replay_semantic(request, standards_changed_fields())?;
+            return self.operation_report(operation);
+        }
+
+        let scan = crate::project::scan(self.plans.root())?;
+        let scan_summary = summarize_project_scan(&scan)?;
+        let catalog = EmbeddedCatalog::load()?;
+        let paths = current
+            .approach()
+            .file_map()
+            .iter()
+            .map(|entry| std::path::PathBuf::from(entry.path()))
+            .collect::<Vec<_>>();
+        let recommendation = if paths.is_empty() {
+            recommend_initial(&catalog, &scan)?
+        } else {
+            recommend_for_paths(&catalog, &scan, &paths)?
+        };
+        let application =
+            apply_recommendation(self.plans.root(), &catalog, &recommendation, probe)?;
+        let standards = application
+            .standards
+            .into_iter()
+            .map(|standard| {
+                StandardSelection::new(
+                    standard.package_id,
+                    standard.version,
+                    standard.digest,
+                    "embedded",
+                )
+            })
+            .collect::<Vec<_>>();
+        let checks = application
+            .checks
+            .into_iter()
+            .map(|check| {
+                Ok(VerificationCheck::new(
+                    CheckId::parse(check.id).map_err(|error| domain_error(&error))?,
+                    check.argv,
+                    protocol_path(&check.cwd)?,
+                    0,
+                    check.required,
+                ))
+            })
+            .collect::<Result<Vec<_>, MinoError>>()?;
+        let catalog_check_ids = catalog
+            .packages()
+            .iter()
+            .flat_map(crate::standards::StandardsPackage::checks)
+            .map(|check| CheckId::parse(check.id.clone()).map_err(|error| domain_error(&error)))
+            .collect::<Result<BTreeSet<_>, MinoError>>()?;
+        let prior_conflicts = current
+            .standards_conflict_state()
+            .map_err(|error| domain_error(&error))?;
+        let preview = current
+            .preview_standards_reconciliation(
+                standards.clone(),
+                &catalog_check_ids,
+                checks.clone(),
+                scan_summary.clone(),
+            )
+            .map_err(|error| domain_error(&error))?;
+        let detected = detect_standard_conflicts(self.plans.root(), &preview)?;
+        let refreshed_conflicts = prior_conflicts
+            .refreshed(detected.conflicts)
+            .map_err(|error| domain_error(&error))?;
+        let operation = self.plans.commit_semantic(
+            request,
+            standards_changed_fields(),
+            |_| Ok(None),
+            move |plan, at| {
+                plan.reconcile_standards(
+                    standards.clone(),
+                    &catalog_check_ids,
+                    checks.clone(),
+                    scan_summary.clone(),
+                    &refreshed_conflicts,
+                    at,
+                )
+            },
+        )?;
+        self.operation_report(operation)
+    }
+
+    fn operation_report(
+        &self,
+        operation: PlanOperationReport,
+    ) -> Result<StandardsPlanOperationReport, MinoError> {
+        let plan = self.plans.load_verified(&operation.plan_id)?;
+        let project_scan = plan
+            .project_scan_summary()
+            .map_err(|error| domain_error(&error))?
+            .ok_or_else(|| {
+                MinoError::new(
+                    ErrorCategory::DriftDetected,
+                    "Reconciled plan has no persisted project scan",
+                )
+            })?;
+        let standards = plan
+            .standards()
+            .iter()
+            .map(|standard| {
+                format!(
+                    "{}@{}#{}",
+                    standard.package_id(),
+                    standard.version(),
+                    standard.digest()
+                )
+            })
+            .collect();
+        let verification_checks = plan
+            .global_verification()
+            .iter()
+            .map(|check| check.id().to_string())
+            .collect();
+        Ok(StandardsPlanOperationReport {
+            operation,
+            project_scan,
+            standards,
+            verification_checks,
+        })
+    }
+}
+
+fn standards_changed_fields() -> Vec<String> {
+    vec![
+        "standards".to_owned(),
+        "verification_plan".to_owned(),
+        "extensions.project_scan".to_owned(),
+        "extensions.standards_conflicts".to_owned(),
+        "approvals".to_owned(),
+        "git_readiness.approved_at".to_owned(),
+        "git_readiness.git_flow_consent".to_owned(),
+    ]
+}
+
+fn protocol_path(path: &Path) -> Result<String, MinoError> {
+    path.to_str()
+        .map(|value| value.replace('\\', "/"))
+        .ok_or_else(|| {
+            MinoError::new(
+                ErrorCategory::IncompleteOrValidation,
+                format!("Verification path {} is not UTF-8", path.display()),
+            )
+        })
 }
 
 /// Application boundary for plan-scoped standards conflict decisions.

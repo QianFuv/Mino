@@ -86,6 +86,7 @@
 | `mino plan review` | 否 | 返回绑定当前 revision 与状态哈希的审批摘要。 |
 | `mino plan approve` | 是，审批边界 | 记录显式计划批准，并记录 Approved 或 Disabled Git Flow consent。 |
 | `mino plan outcome set` | 是 | 在任务、commit gate 与全局检查完成后写入非空 summary、显式 remaining risk 和可选 follow-up；Review 产生的 follow-up 自动保留来源 `REV-n`。 |
+| `mino plan scan accept` | 是，审批边界 | 接受当前精确扫描摘要；仅适用于仍未接受的截断扫描，保存 scan digest、actor、decision reference、reason 与时间。 |
 
 直接 authored 修改只允许发生在 Draft。没有持久化 ID 的列表使用 1-based 位置，并始终与 `--expect-revision` 一起校验；已有 Task、Criterion 或 Check ID 的实体使用稳定 ID。位置过期、目标缺失、依赖顺序被破坏或替换定义不完整时，状态、revision 和投影都保持不变。Ready 或 In Progress 计划必须使用类型化 amendment；任意 JSON path、未知字段和 execution state 字段都会被拒绝。Ready 计划发生 authored 变化后，其旧批准不再有效。
 
@@ -119,7 +120,7 @@ fork 只读取经过审计的不可变 source snapshot。新计划保留原始�
 |---|---|---|
 | `mino standards detect` | 无 | 从 scanner evidence 返回受支持语言。 |
 | `mino standards recommend` | 无 | 推荐 Common 和适用语言包，可按 File Map 缩小范围。 |
-| `mino standards apply` | 无 | 解析精确 package、rule 和 check；当前要求 `--recommended --seed-verification`。 |
+| `mino standards apply` | 可选：计划 | 始终要求 `--recommended --seed-verification`。没有 `--plan` 时只读解析；带 `--plan --expect-revision --request-id` 时从完整 File Map 重扫，原子写回内嵌 package、catalog-owned check、扫描摘要和 conflict snapshot，并保留自定义 check。 |
 | `mino standards sync` | cache 与 lock | 显式获取并激活摘要校验的目录；当前要求 `--all`。 |
 | `mino standards catalog init` | source tree | 在 DNS-like namespace 与 HTTPS base URL 下原子创建惰性示例；不覆盖现有路径。 |
 | `mino standards catalog validate` | 无 | 校验路径、SemVer、namespace、TOML、大小和规范身份。 |
@@ -128,7 +129,9 @@ fork 只读取经过审计的不可变 source snapshot。新计划保留原始�
 | `mino standards conflict refresh` | 计划 | 把当前候选集合的指纹写入计划，不选择值。 |
 | `mino standards conflict resolve` | 计划，审批边界 | 选择一个当前候选，并记录理由与可审计决策引用。 |
 
-detect、recommend 和 apply 只使用内嵌或已缓存数据；只有 sync 使用配置的网络目录。冲突优先级依次为当前用户要求、仓库规则或本地声明、项目配置、语言包、Common。最高优先级默认值只用于展示，不会被静默应用。所有当前冲突都必须有与来源指纹绑定的显式选择，计划才能通过校验。
+detect、recommend 和 apply 只使用内嵌或已缓存数据；只有 sync 使用配置的网络目录。plan-scoped apply 会用嵌入目录识别所有 catalog-owned check：定义不变时保留现有状态与证据，定义变化或新加入时以无证据 Pending check 替换；不属于目录的自定义 check 不受影响。冲突优先级依次为当前用户要求、仓库规则或本地声明、项目配置、语言包、Common。最高优先级默认值只用于展示，不会被静默应用。所有当前冲突都必须有与来源指纹绑定的显式选择，计划才能通过校验。
+
+`plan create` 和 plan-scoped apply 都保存扫描 SHA-256、文件/目录/符号链接/字节计数以及稳定截断原因。截断扫描在 `agent context` 中返回 `scan_incomplete: true`，使 validate/finalize 保持阻塞且不会伪造完整扫描；`plan scan accept` 只接受该精确摘要。后续扫描摘要发生变化时，旧接受不会迁移到新的 digest。
 
 目录 authoring 完全离线且仅接受数据文件。生成的 `catalog.toml` 延续既有 sync schema，补充的 `mino.team-catalog-manifest/v1` 保存 package、文件、目录树和大小身份，不允许可执行 payload。
 
@@ -136,7 +139,7 @@ detect、recommend 和 apply 只使用内嵌或已缓存数据；只有 sync 使
 
 | 命令 | 返回内容 |
 |---|---|
-| `mino agent context` | 完整项目、Git、活动计划、allowed/blocked actions、审批状态和规范 next argv。 |
+| `mino agent context` | 完整项目、Git、活动计划、扫描完整性、allowed/blocked actions、审批状态和规范 next argv。 |
 | `mino agent next` | 聚焦当前计划、审批边界、blocked actions 和下一步。 |
 | `mino agent capabilities` | 静态能力清单，以及调用和 mutation 约束。 |
 

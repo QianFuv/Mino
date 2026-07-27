@@ -43,6 +43,7 @@
     "plan.verification.remove",
     "plan.validate",
     "plan.show",
+    "standards.apply",
     "standards.conflict.list",
     "standards.conflict.refresh",
     "standards.conflict.resolve"

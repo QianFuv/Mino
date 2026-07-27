@@ -22,10 +22,31 @@ pub(crate) fn validate(
     plan: &Plan,
     findings: &mut Vec<ValidationFinding>,
 ) -> Result<(), MinoError> {
+    validate_project_scan(plan, findings)?;
     validate_git(plan, findings);
     validate_commit_gates(plan, findings);
     validate_approval(plan, findings);
     validate_standards(root, plan, findings)
+}
+
+fn validate_project_scan(
+    plan: &Plan,
+    findings: &mut Vec<ValidationFinding>,
+) -> Result<(), MinoError> {
+    if plan.scan_is_incomplete().map_err(|error| {
+        MinoError::new(
+            crate::ErrorCategory::DriftDetected,
+            format!("Project scan state is malformed: {error}"),
+        )
+    })? {
+        findings.push(ValidationFinding::error(
+            "POLICY-SCAN-INCOMPLETE",
+            ValidationLayer::Policy,
+            "extensions.project_scan.acceptance",
+            "Project discovery was truncated and requires explicit acceptance of the exact scan digest",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_git(plan: &Plan, findings: &mut Vec<ValidationFinding>) {

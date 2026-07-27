@@ -1135,3 +1135,96 @@ fn storage_rejects_same_create_request_for_different_initial_bytes() {
         .expect_err("different initial bytes must not replay");
     assert_eq!(conflict.kind(), StoreErrorKind::RequestConflict);
 }
+
+#[test]
+fn truncated_scan_requires_digest_bound_acceptance_before_authoring_can_advance() {
+    let project = TestProject::new("truncated-scan");
+    let huge_source = project.path().join("huge.js");
+    fs::File::create(&huge_source)
+        .expect("large source should be created")
+        .set_len(4 * 1024 * 1024 + 1)
+        .expect("large source should exceed the per-file scan budget");
+    let request_file = project.path().join("truncated-request.md");
+    fs::write(
+        &request_file,
+        "Plan from an explicitly accepted partial scan.\n",
+    )
+    .expect("request fixture should be written");
+    let created = parse_success(&run_mino(&create_arguments(
+        &project,
+        "Truncated scan acceptance",
+        &request_file,
+        60,
+    )));
+    let plan_id = plan_id_from(&created);
+    assert_eq!(created["missing"][0], "scan.acceptance");
+    assert_eq!(created["next_actions"], serde_json::json!([]));
+    let initial = load_plan(&project, &plan_id);
+    let summary = initial
+        .project_scan_summary()
+        .expect("scan summary should decode")
+        .expect("scan summary should be persisted");
+    assert!(summary.is_incomplete());
+    assert_eq!(summary.truncation_reasons(), ["per_file_byte_limit"]);
+    assert!(summary.digest().starts_with("sha256:"));
+    assert!(
+        fs::read_to_string(projection_path(&project, &plan_id))
+            .expect("projection should be readable")
+            .contains("## Project Scan")
+    );
+
+    let mut context_arguments = base_arguments(&project);
+    context_arguments.extend(["agent".to_owned(), "context".to_owned()]);
+    let context = parse_success(&run_mino(&context_arguments));
+    assert_eq!(context["scan_incomplete"], true);
+    assert_eq!(context["approval_required"], true);
+    assert!(
+        context["allowed_actions"]
+            .as_array()
+            .is_some_and(|actions| actions.contains(&Value::from("plan.scan.accept")))
+    );
+
+    let mut validate_arguments = base_arguments(&project);
+    validate_arguments.extend([
+        "plan".to_owned(),
+        "validate".to_owned(),
+        "--plan".to_owned(),
+        plan_id.clone(),
+    ]);
+    let validation_output = run_mino(&validate_arguments);
+    assert_eq!(validation_output.status.code(), Some(2));
+    let validation: Value = serde_json::from_slice(&validation_output.stdout)
+        .expect("validation failure should be JSON");
+    assert!(validation["findings"].as_array().is_some_and(|findings| {
+        findings
+            .iter()
+            .any(|finding| finding["id"] == "POLICY-SCAN-INCOMPLETE")
+    }));
+
+    let mut acceptance = mutation_arguments(&project, &["plan", "scan", "accept"], &plan_id, 1, 61);
+    acceptance.extend([
+        "--decision-ref".to_owned(),
+        "chat:accept-partial-scan".to_owned(),
+        "--reason".to_owned(),
+        "The bounded scan is sufficient for this plan".to_owned(),
+    ]);
+    let accepted = parse_success(&run_mino(&acceptance));
+    assert_eq!(accepted["revision"], 2);
+    assert_eq!(accepted["missing"][0], "summary");
+    assert_eq!(accepted["next_actions"][0]["id"], "plan.summary.set");
+    let replayed = parse_success(&run_mino(&acceptance));
+    assert_eq!(replayed["revision"], 2);
+    assert_eq!(replayed["replayed"], true);
+
+    let accepted_plan = load_plan(&project, &plan_id);
+    let accepted_summary = accepted_plan
+        .project_scan_summary()
+        .expect("accepted scan summary should decode")
+        .expect("accepted scan summary should remain persisted");
+    let audit = accepted_summary
+        .acceptance()
+        .expect("scan acceptance should be recorded");
+    assert_eq!(audit.scan_digest(), accepted_summary.digest());
+    assert_eq!(audit.actor(), "codex");
+    assert_eq!(audit.reference(), "chat:accept-partial-scan");
+}

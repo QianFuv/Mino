@@ -6,7 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mino::project::{Language, scan_root};
+use mino::application::plan::{CreatePlanRequest, DraftMutation, PlanMutationRequest, PlanService};
+use mino::application::standards::StandardsPlanService;
+use mino::domain::{
+    CheckId, CheckStatus, DraftCriterionInput, DraftFileInput, DraftTaskInput,
+    DraftVerificationInput, FileChange, Plan, RequestId, TaskId, Timestamp,
+};
+use mino::project::{Language, initialize, scan_root};
 use mino::standards::{
     CommandSource, EmbeddedCatalog, ResolvedCheckStatus, ToolProbe, ToolProbeOutcome,
     apply_recommendation, recommend_for_paths, recommend_initial,
@@ -77,6 +83,23 @@ impl ToolProbe for OutcomeProbe {
     fn probe(&self, _tool: &str, _working_directory: &Path) -> ToolProbeOutcome {
         self.0
     }
+}
+
+struct PanicProbe;
+
+impl ToolProbe for PanicProbe {
+    fn probe(&self, _tool: &str, _working_directory: &Path) -> ToolProbeOutcome {
+        panic!("exact replay must not probe the host environment")
+    }
+}
+
+fn request_id(number: u64) -> RequestId {
+    RequestId::parse(format!("00000000-0000-0000-0000-{number:012}"))
+        .expect("request ID should parse")
+}
+
+fn timestamp(minute: u8) -> Timestamp {
+    Timestamp::parse(format!("2026-07-27T10:{minute:02}:00Z")).expect("timestamp should parse")
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -378,4 +401,213 @@ fn standards_cli_detects_recommends_and_requires_explicit_apply_flags() {
             .as_array()
             .is_some_and(|checks| !checks.is_empty())
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn plan_scoped_apply_reconciles_file_map_languages_and_replays_without_probing() {
+    let project = TestProject::new("plan-reconcile");
+    fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname='plan-reconcile'\nversion='0.1.0'\n",
+    )
+    .expect("manifest should be written");
+    fs::create_dir(project.path().join("src")).expect("source directory should be created");
+    fs::write(project.path().join("src/lib.rs"), "pub fn value() {}\n")
+        .expect("Rust source should be written");
+    initialize(project.path()).expect("project should initialize");
+    let plans = PlanService::discover(project.path()).expect("plan service should discover");
+    let created = plans
+        .create(CreatePlanRequest {
+            name: "Reconcile standards".to_owned(),
+            trigger: "durable".to_owned(),
+            original_request: "Add a Python tool without losing custom checks.".to_owned(),
+            request_id: request_id(1),
+            actor: "codex".to_owned(),
+            command: vec!["mino".to_owned(), "plan".to_owned(), "create".to_owned()],
+            created_at: timestamp(0),
+        })
+        .expect("plan should be created");
+    plans
+        .mutate(
+            PlanMutationRequest {
+                plan_id: created.plan_id.clone(),
+                expected_revision: 1,
+                request_id: request_id(2),
+                actor: "codex".to_owned(),
+                command: vec!["mino".to_owned(), "plan".to_owned(), "task".to_owned()],
+                updated_at: timestamp(1),
+            },
+            &DraftMutation::Task(DraftTaskInput {
+                id: Some(TaskId::parse("T1").expect("task ID should parse")),
+                title: "Add the Python tool".to_owned(),
+                depends_on: Vec::new(),
+                steps: vec!["Implement the tool".to_owned()],
+                files: vec![DraftFileInput {
+                    path: "tools/task.py".to_owned(),
+                    change: FileChange::Create,
+                    reason: "Own the new language boundary".to_owned(),
+                }],
+                acceptance_criteria: vec![DraftCriterionInput {
+                    id: None,
+                    description: "The tool runs deterministically".to_owned(),
+                }],
+                verification: vec![DraftVerificationInput {
+                    id: CheckId::parse("TASK-CUSTOM").expect("check ID should parse"),
+                    command: vec!["python".to_owned(), "-m".to_owned(), "pytest".to_owned()],
+                    cwd: ".".to_owned(),
+                    expected_exit_code: 0,
+                    required: true,
+                }],
+                commit_gate: None,
+            }),
+        )
+        .expect("task should be authored");
+    plans
+        .mutate(
+            PlanMutationRequest {
+                plan_id: created.plan_id.clone(),
+                expected_revision: 2,
+                request_id: request_id(3),
+                actor: "codex".to_owned(),
+                command: vec![
+                    "mino".to_owned(),
+                    "plan".to_owned(),
+                    "verification".to_owned(),
+                ],
+                updated_at: timestamp(2),
+            },
+            &DraftMutation::GlobalVerification(DraftVerificationInput {
+                id: CheckId::parse("CUSTOM-SMOKE").expect("check ID should parse"),
+                command: vec!["custom-smoke".to_owned()],
+                cwd: ".".to_owned(),
+                expected_exit_code: 0,
+                required: false,
+            }),
+        )
+        .expect("custom global check should be authored");
+
+    let request = PlanMutationRequest {
+        plan_id: created.plan_id.clone(),
+        expected_revision: 3,
+        request_id: request_id(4),
+        actor: "codex".to_owned(),
+        command: vec![
+            "mino".to_owned(),
+            "standards".to_owned(),
+            "apply".to_owned(),
+            "--recommended".to_owned(),
+            "--seed-verification".to_owned(),
+        ],
+        updated_at: timestamp(3),
+    };
+    let standards =
+        StandardsPlanService::discover(project.path()).expect("standards service should discover");
+    let applied = standards
+        .reconcile_with_probe(request.clone(), &FixedProbe::new(&["uv"]))
+        .expect("plan standards should reconcile");
+    assert_eq!(applied.operation.revision, 4);
+    assert!(!applied.operation.replayed);
+    let plan = plans
+        .load_verified(&created.plan_id)
+        .expect("reconciled plan should load");
+    assert_eq!(
+        plan.standards()
+            .iter()
+            .map(mino::domain::StandardSelection::package_id)
+            .collect::<Vec<_>>(),
+        vec!["common", "python"]
+    );
+    let check_ids = plan
+        .global_verification()
+        .iter()
+        .map(|check| check.id().as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(check_ids.contains("CUSTOM-SMOKE"));
+    assert!(check_ids.contains("PY-MYPY"));
+    assert!(!check_ids.contains("RUST-TEST"));
+
+    let replayed = standards
+        .reconcile_with_probe(request, &PanicProbe)
+        .expect("exact request should replay without a scan probe");
+    assert!(replayed.operation.replayed);
+    assert_eq!(replayed.operation.revision, 4);
+}
+
+#[test]
+fn changed_catalog_check_definitions_discard_old_passing_evidence() {
+    let project = TestProject::new("check-reset");
+    fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname='check-reset'\nversion='0.1.0'\n",
+    )
+    .expect("manifest should be written");
+    fs::create_dir(project.path().join("src")).expect("source directory should be created");
+    fs::write(project.path().join("src/lib.rs"), "pub fn value() {}\n")
+        .expect("Rust source should be written");
+    initialize(project.path()).expect("project should initialize");
+    let plans = PlanService::discover(project.path()).expect("plan service should discover");
+    let created = plans
+        .create(CreatePlanRequest {
+            name: "Reset changed checks".to_owned(),
+            trigger: "durable".to_owned(),
+            original_request: "Reset catalog evidence after definition drift.".to_owned(),
+            request_id: request_id(10),
+            actor: "codex".to_owned(),
+            command: vec!["mino".to_owned(), "plan".to_owned(), "create".to_owned()],
+            created_at: timestamp(10),
+        })
+        .expect("plan should be created");
+    let original = plans
+        .load_verified(&created.plan_id)
+        .expect("initial plan should load");
+    let desired_checks = original.global_verification().to_vec();
+    assert!(desired_checks.len() >= 2);
+    let changed_id = desired_checks[0].id().clone();
+    let retained_id = desired_checks[1].id().clone();
+    let mut value = serde_json::to_value(&original).expect("plan should serialize");
+    let checks = value["verification_plan"]
+        .as_array_mut()
+        .expect("verification plan should be an array");
+    checks[0]["status"] = Value::from("Passed");
+    checks[0]["evidence_refs"] = serde_json::json!(["E0001"]);
+    checks[0]["command"] = serde_json::json!(["changed-command"]);
+    checks[1]["status"] = Value::from("Passed");
+    checks[1]["evidence_refs"] = serde_json::json!(["E0002"]);
+    let mut drifted: Plan =
+        serde_json::from_value(value).expect("drifted plan should remain valid");
+    let catalog = EmbeddedCatalog::load().expect("catalog should load");
+    let catalog_check_ids = catalog
+        .packages()
+        .iter()
+        .flat_map(mino::standards::StandardsPackage::checks)
+        .map(|check| CheckId::parse(check.id.clone()).expect("catalog check ID should parse"))
+        .collect::<BTreeSet<_>>();
+    drifted
+        .reconcile_standards(
+            drifted.standards().to_vec(),
+            &catalog_check_ids,
+            desired_checks,
+            drifted
+                .project_scan_summary()
+                .expect("scan summary should decode")
+                .expect("scan summary should exist"),
+            &mino::domain::StandardsConflictState::default(),
+            timestamp(11),
+        )
+        .expect("changed catalog definition should reconcile");
+    let changed = drifted
+        .global_verification()
+        .iter()
+        .find(|check| check.id() == &changed_id)
+        .expect("changed check should remain selected");
+    assert_eq!(changed.status(), CheckStatus::Pending);
+    assert!(changed.evidence_refs().is_empty());
+    let retained = drifted
+        .global_verification()
+        .iter()
+        .find(|check| check.id() == &retained_id)
+        .expect("unchanged check should remain selected");
+    assert_eq!(retained.status(), CheckStatus::Passed);
+    assert_eq!(retained.evidence_refs()[0].as_str(), "E0002");
 }

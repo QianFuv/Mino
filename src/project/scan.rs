@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use ignore::WalkBuilder;
 use serde::Serialize;
 
+use crate::store::{canonical_json_bytes, sha256_digest};
 use crate::{ErrorCategory, MinoError};
 
 const MANIFEST_WEIGHT: u16 = 5_000;
@@ -140,6 +141,25 @@ pub struct ProjectScan {
     pub workspaces: Vec<WorkspaceScan>,
     /// Aggregate stable descending project rankings.
     pub languages: Vec<LanguageScore>,
+}
+
+impl ProjectScan {
+    /// Returns a SHA-256 digest over the canonical complete scan result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an environment error when the deterministic scan result cannot
+    /// be serialized as canonical JSON.
+    pub fn digest(&self) -> Result<String, MinoError> {
+        canonical_json_bytes(self)
+            .map(|bytes| sha256_digest(&bytes))
+            .map_err(|error| {
+                MinoError::new(
+                    ErrorCategory::EnvironmentUnavailable,
+                    format!("Failed to digest project scan: {error}"),
+                )
+            })
+    }
 }
 
 /// Positive resource limits applied to one project scan.

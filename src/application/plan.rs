@@ -8,8 +8,8 @@ use crate::domain::{
     CheckId, CriterionId, DraftContextInput, DraftCriterionInput, DraftDecisionInput,
     DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,
     DraftTaskInput, DraftTaskUpdateInput, DraftVerificationInput, GitReadiness, Plan,
-    PlanDraftSeed, PlanId, PlanStatus, RequestId, StandardSelection, TaskId, Timestamp,
-    VerificationCheck,
+    PlanDraftSeed, PlanId, PlanStatus, ProjectScanSummary, RequestId, StandardSelection, TaskId,
+    Timestamp, VerificationCheck,
 };
 use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitReadinessProbe};
 use crate::managed_fs::{
@@ -626,6 +626,34 @@ impl PlanService {
         )
     }
 
+    /// Accepts or idempotently replays acceptance of one exact truncated scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for stale revisions, a complete or already
+    /// accepted scan, incomplete audit fields, or persistence/projection failure.
+    pub fn accept_scan(
+        &self,
+        request: PlanMutationRequest,
+        decision_reference: String,
+        reason: String,
+    ) -> Result<PlanOperationReport, MinoError> {
+        let actor = request.actor.clone();
+        self.commit_semantic(
+            request,
+            vec!["extensions.project_scan.acceptance".to_owned()],
+            |_| Ok(None),
+            move |plan, at| {
+                plan.accept_project_scan(
+                    actor.clone(),
+                    decision_reference.clone(),
+                    reason.clone(),
+                    at,
+                )
+            },
+        )
+    }
+
     /// Commits one retry-safe semantic transition and updates its projection.
     pub(crate) fn commit_semantic<F, A>(
         &self,
@@ -1011,7 +1039,10 @@ impl PlanService {
             standards,
             verification_plan,
         };
-        let plan = Plan::from_draft_seed(seed, request.created_at.clone());
+        let mut plan = Plan::from_draft_seed(seed, request.created_at.clone());
+        let scan_summary = summarize_project_scan(&scan)?;
+        plan.record_initial_project_scan(&scan_summary)
+            .map_err(|error| domain_input_error(&error))?;
         plan.validate_invariants()
             .map_err(|error| domain_input_error(&error))?;
         Ok(plan)
@@ -1025,6 +1056,9 @@ pub fn draft_missing(plan: &Plan) -> Vec<String> {
         return Vec::new();
     }
     let mut missing = Vec::new();
+    if plan.scan_is_incomplete() == Ok(true) {
+        missing.push("scan.acceptance".to_owned());
+    }
     if plan.summary().trim().is_empty() {
         missing.push("summary".to_owned());
     }
@@ -1228,6 +1262,12 @@ pub(crate) fn draft_next_actions(plan: &Plan, missing: &[String]) -> Vec<NextAct
     if plan.status() != PlanStatus::Draft {
         return Vec::new();
     }
+    if missing
+        .first()
+        .is_some_and(|field| field == "scan.acceptance")
+    {
+        return Vec::new();
+    }
     let (id, argv) = if missing.first().is_some_and(|field| field == "summary") {
         (
             "plan.summary.set",
@@ -1287,6 +1327,21 @@ pub(crate) fn draft_next_actions(plan: &Plan, missing: &[String]) -> Vec<NextAct
         id: id.to_owned(),
         argv,
     }]
+}
+
+pub(crate) fn summarize_project_scan(
+    scan: &crate::project::ProjectScan,
+) -> Result<ProjectScanSummary, MinoError> {
+    ProjectScanSummary::new(
+        scan.digest()?,
+        scan.files_scanned,
+        scan.directories_excluded,
+        scan.symlinks_skipped,
+        scan.bytes_read,
+        scan.truncated,
+        scan.truncation_reasons.clone(),
+    )
+    .map_err(|error| domain_input_error(&error))
 }
 
 pub(crate) fn derived_request_id(plan: &Plan, action: &str) -> String {

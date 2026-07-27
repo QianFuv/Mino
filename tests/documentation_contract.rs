@@ -49,6 +49,7 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
             "metadata",
             "summary",
             "outcome",
+            "scan",
             "context",
             "scope",
             "decision",
@@ -62,6 +63,7 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     (&["plan", "metadata", "--help"], &["set", "help"]),
     (&["plan", "summary", "--help"], &["set", "help"]),
     (&["plan", "outcome", "--help"], &["set", "help"]),
+    (&["plan", "scan", "--help"], &["accept", "help"]),
     (&["plan", "context", "--help"], &["add", "help"]),
     (&["plan", "scope", "--help"], &["set", "add", "help"]),
     (
@@ -247,6 +249,7 @@ const LEAF_COMMANDS: &[&str] = &[
     "plan next",
     "plan outcome set",
     "plan review",
+    "plan scan accept",
     "plan scope add",
     "plan scope set",
     "plan show",
@@ -428,6 +431,7 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             "plan.amend.reject",
             "plan.approve",
             "plan.archive",
+            "plan.scan.accept",
             "review.accept",
             "review.disposition",
             "standards.conflict.resolve"
