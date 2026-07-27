@@ -642,6 +642,7 @@ fn render_amendments(output: &mut String, plan: &Value) {
                 scalar(&item["minimum_classification"]),
                 scalar(&item["classification"]),
                 scalar(&item["status"]),
+                scalar(&item["source_review_id"]),
                 scalar(&item["base_revision"]),
                 scalar(&item["base_state_hash"]),
                 joined(&item["impact"]["affected_fields"]),
@@ -670,6 +671,7 @@ fn render_amendments(output: &mut String, plan: &Value) {
             "Minimum",
             "Classification",
             "Status",
+            "Source Review",
             "Base Revision",
             "Base State Hash",
             "Affected Fields",
@@ -709,11 +711,13 @@ fn render_review_items(output: &mut String, plan: &Value) {
                 scalar(&item["recorded_at"]),
                 scalar(&item["approval_reference"]),
                 scalar(&item["superseded_by_change"]),
+                joined(&item["linked_changes"]),
                 scalar(&item["disposition"]),
                 scalar(&item["disposition_actor"]),
                 scalar(&item["disposition_reference"]),
                 scalar(&item["disposition_reason"]),
                 scalar(&item["disposed_at"]),
+                scalar(&item["material_decisions"]),
             ]
         })
         .collect::<Vec<_>>();
@@ -731,11 +735,13 @@ fn render_review_items(output: &mut String, plan: &Value) {
             "Recorded At",
             "Approval Reference",
             "Superseded By Change",
+            "Linked Changes",
             "Disposition",
             "Disposition Actor",
             "Disposition Reference",
             "Disposition Reason",
             "Disposed At",
+            "Decision History",
         ],
         rows,
     );

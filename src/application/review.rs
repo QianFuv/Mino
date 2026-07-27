@@ -242,6 +242,51 @@ impl ReviewService {
         )
     }
 
+    /// Revises an accepted Material decision after its linked amendment terminates.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for stale revisions, an unrelated or non-terminal
+    /// amendment, an ineligible decision, incomplete audit fields, or persistence drift.
+    pub fn revise_disposition(
+        &self,
+        request: PlanMutationRequest,
+        review_id: String,
+        disposition: MaterialReviewDisposition,
+        decision_reference: String,
+        reason: String,
+    ) -> Result<PlanOperationReport, MinoError> {
+        let mut changed_fields = vec![
+            "review_items".to_owned(),
+            "status".to_owned(),
+            "resume_status".to_owned(),
+            "blocker".to_owned(),
+        ];
+        if disposition == MaterialReviewDisposition::DeferToFollowUp {
+            changed_fields.extend(["follow_ups".to_owned(), "final_outcome".to_owned()]);
+        }
+        let stored = self.plans.load_stored(&request.plan_id)?;
+        if is_replay_position(&stored, request.expected_revision)? {
+            return self.plans.replay_semantic(request, changed_fields);
+        }
+        let actor = request.actor.clone();
+        self.plans.commit_semantic(
+            request,
+            changed_fields,
+            |_| Ok(None),
+            move |plan, at| {
+                plan.revise_material_review(
+                    &review_id,
+                    disposition,
+                    actor.clone(),
+                    decision_reference.clone(),
+                    reason.clone(),
+                    at,
+                )
+            },
+        )
+    }
+
     /// Records explicit final review acceptance and moves the plan to Done.
     ///
     /// # Errors

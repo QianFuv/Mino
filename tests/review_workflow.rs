@@ -2,21 +2,24 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mino::application::agent::build_agent_context;
+use mino::application::amendment::AmendmentService;
 use mino::application::plan::PlanMutationRequest;
 use mino::application::review::ReviewService;
 use mino::domain::{
-    AcceptanceCriterion, Approval, CheckId, CommitGate, CriterionId, DraftCommitGateInput,
-    DraftCriterionInput, DraftFileInput, DraftTaskInput, DraftVerificationInput, EvidenceId,
-    FileChange, FileMapEntry, GitFlowConsent, GitReadiness, MaterialReviewDisposition, Plan,
-    PlanDraftSeed, PlanId, PlanStatus, RequestId, ReviewClassification, ReviewStatus,
-    StandardSelection, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
+    AcceptanceCriterion, AmendmentPatch, AmendmentStatus, Approval, CheckId, CommitGate,
+    CriterionId, DraftCommitGateInput, DraftCriterionInput, DraftFileInput, DraftTaskInput,
+    DraftVerificationInput, EvidenceId, FileChange, FileMapEntry, GitFlowConsent, GitReadiness,
+    MaterialReviewDisposition, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId,
+    ReviewClassification, ReviewStatus, StandardSelection, Task, TaskId, TaskStatus, Timestamp,
+    VerificationCheck,
 };
 use mino::project::initialize;
 use mino::render::{render_plan, write_projection};
-use mino::store::{MutationRequest, PlanStore};
+use mino::store::{MutationRequest, PlanStore, canonical_json_bytes, sha256_digest};
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -84,6 +87,22 @@ fn evidence_id(number: u16) -> EvidenceId {
 fn request_id(number: u64) -> RequestId {
     RequestId::parse(format!("70000000-0000-0000-0000-{number:012}"))
         .expect("request ID should parse")
+}
+
+fn run_mino(arguments: &[String]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_mino"))
+        .args(arguments)
+        .output()
+        .expect("Mino binary should run")
+}
+
+fn parse_cli_success(output: &Output) -> serde_json::Value {
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("successful command should return JSON")
 }
 
 fn seed(label: &str) -> Plan {
@@ -222,6 +241,101 @@ fn set_final_outcome(plan: &mut Plan, minute: u8) {
         timestamp(minute),
     )
     .expect("Final Outcome should be recorded");
+}
+
+fn state_hash(plan: &Plan) -> String {
+    sha256_digest(&canonical_json_bytes(plan).expect("plan should canonicalize"))
+}
+
+fn review_amendment_patch() -> AmendmentPatch {
+    serde_json::from_value(serde_json::json!({
+        "operations": [{
+            "operation": "replace-interfaces",
+            "interfaces": "Revised public interface contract"
+        }]
+    }))
+    .expect("amendment patch should parse")
+}
+
+fn pending_review_amendment(label: &str) -> Plan {
+    let mut plan = reviewed_plan(label);
+    let review_id = plan
+        .record_review(
+            "reviewer".to_owned(),
+            "Change the public contract".to_owned(),
+            ReviewClassification::MaterialChange,
+            None,
+            timestamp(12),
+        )
+        .expect("Material review should record");
+    plan.dispose_material_review(
+        &review_id,
+        MaterialReviewDisposition::AcceptChange,
+        "user".to_owned(),
+        "chat:accept-change".to_owned(),
+        "The change belongs to the active objective".to_owned(),
+        timestamp(13),
+    )
+    .expect("Accept Change should record");
+    plan.propose_amendment(
+        "Apply the requested contract change".to_owned(),
+        review_amendment_patch(),
+        None,
+        state_hash(&plan),
+        "codex".to_owned(),
+        timestamp(14),
+    )
+    .expect("review-owned amendment should propose");
+    plan
+}
+
+#[derive(Clone, Copy)]
+enum TerminalAmendment {
+    Reject,
+    Withdraw,
+    Cancel,
+}
+
+fn terminate_review_amendment(plan: &mut Plan, terminal: TerminalAmendment) -> AmendmentStatus {
+    match terminal {
+        TerminalAmendment::Reject => plan
+            .reject_amendment(
+                "C1",
+                "user".to_owned(),
+                "chat:reject-change".to_owned(),
+                "The concrete patch is not acceptable".to_owned(),
+                timestamp(15),
+            )
+            .expect("amendment should reject"),
+        TerminalAmendment::Withdraw => plan
+            .withdraw_amendment(
+                "C1",
+                "codex".to_owned(),
+                "The proposed patch is unsuitable".to_owned(),
+                timestamp(15),
+            )
+            .expect("amendment should withdraw"),
+        TerminalAmendment::Cancel => {
+            plan.approve_amendment(
+                "C1",
+                "user".to_owned(),
+                "chat:approve-change".to_owned(),
+                timestamp(15),
+            )
+            .expect("amendment should approve");
+            plan.cancel_amendment(
+                "C1",
+                "user".to_owned(),
+                "chat:cancel-change".to_owned(),
+                "The approved patch should not be applied".to_owned(),
+                timestamp(16),
+            )
+            .expect("amendment should cancel");
+        }
+    }
+    plan.amendment("C1")
+        .expect("amendment should exist")
+        .status()
 }
 
 fn complete_rework_input(id: &str) -> DraftTaskInput {
@@ -365,6 +479,13 @@ fn material_review_dispositions_close_every_product_decision_branch() {
         accepted_context.allowed_actions,
         ["plan.show", "plan.amend.propose"]
     );
+    assert!(!accepted_context.approval_required);
+    assert!(
+        accepted_context
+            .blocked_actions
+            .iter()
+            .any(|action| { action.action == "review.disposition.revise" })
+    );
 
     let mut declined = reviewed_plan("material-declined");
     let declined_id = declined
@@ -440,6 +561,225 @@ fn material_review_dispositions_close_every_product_decision_branch() {
             timestamp(14),
         )
         .expect("deferred Material request should not block acceptance");
+}
+
+#[test]
+fn terminated_review_amendments_allow_audited_decline_or_defer_revision() {
+    let cases = [
+        (
+            TerminalAmendment::Reject,
+            AmendmentStatus::Rejected,
+            MaterialReviewDisposition::Decline,
+        ),
+        (
+            TerminalAmendment::Withdraw,
+            AmendmentStatus::Withdrawn,
+            MaterialReviewDisposition::DeferToFollowUp,
+        ),
+        (
+            TerminalAmendment::Cancel,
+            AmendmentStatus::Cancelled,
+            MaterialReviewDisposition::Decline,
+        ),
+    ];
+    for (index, (terminal, expected_status, revised_disposition)) in cases.into_iter().enumerate() {
+        let mut plan = pending_review_amendment(&format!("decision-revision-{index}"));
+        assert_eq!(
+            terminate_review_amendment(&mut plan, terminal),
+            expected_status
+        );
+        let amendment = plan.amendment("C1").expect("amendment should exist");
+        assert_eq!(amendment.source_review_id(), Some("REV-1"));
+        let item = plan.review_item("REV-1").expect("review should exist");
+        assert_eq!(item.linked_changes(), ["C1"]);
+        assert_eq!(item.material_decisions().len(), 1);
+        assert!(plan.revisable_material_review().is_some());
+        let context = build_agent_context(Path::new("C:/fixture"), Some(&plan))
+            .expect("terminal amendment context should build");
+        assert!(context.approval_required);
+        assert!(
+            context
+                .allowed_actions
+                .contains(&"plan.amend.propose".to_owned())
+        );
+        assert!(
+            context
+                .allowed_actions
+                .contains(&"review.disposition.revise".to_owned())
+        );
+
+        plan.revise_material_review(
+            "REV-1",
+            revised_disposition,
+            "user".to_owned(),
+            format!("chat:revise-decision-{index}"),
+            "The terminated patch changes the product decision".to_owned(),
+            timestamp(18),
+        )
+        .expect("eligible Material decision should revise");
+        assert_eq!(plan.status(), PlanStatus::Review);
+        let item = plan.review_item("REV-1").expect("review should exist");
+        assert_eq!(
+            item.status(),
+            match revised_disposition {
+                MaterialReviewDisposition::Decline => ReviewStatus::Resolved,
+                MaterialReviewDisposition::DeferToFollowUp => ReviewStatus::Deferred,
+                MaterialReviewDisposition::AcceptChange => unreachable!(),
+            }
+        );
+        assert_eq!(item.material_decisions().len(), 2);
+        assert_eq!(
+            item.material_decisions()[0].disposition(),
+            MaterialReviewDisposition::AcceptChange
+        );
+        assert_eq!(
+            item.material_decisions()[1].disposition(),
+            revised_disposition
+        );
+        assert_eq!(item.material_decisions()[1].terminated_change(), Some("C1"));
+        let expected_follow_ups =
+            usize::from(revised_disposition == MaterialReviewDisposition::DeferToFollowUp);
+        assert_eq!(plan.follow_ups().len(), expected_follow_ups);
+        assert_eq!(
+            plan.final_outcome().follow_up_sources().len(),
+            expected_follow_ups
+        );
+    }
+}
+
+#[test]
+fn material_decision_revision_rejects_pending_applied_replacement_and_wrong_review_states() {
+    let mut pending = pending_review_amendment("revision-before-terminal");
+    let before = canonical_json_bytes(&pending).expect("plan should canonicalize");
+    assert!(
+        pending
+            .revise_material_review(
+                "REV-1",
+                MaterialReviewDisposition::Decline,
+                "user".to_owned(),
+                "chat:too-early".to_owned(),
+                "The amendment is not terminal".to_owned(),
+                timestamp(15),
+            )
+            .is_err()
+    );
+    assert_eq!(
+        canonical_json_bytes(&pending).expect("plan should canonicalize"),
+        before
+    );
+
+    let mut applied = pending.clone();
+    applied
+        .approve_amendment(
+            "C1",
+            "user".to_owned(),
+            "chat:approved".to_owned(),
+            timestamp(15),
+        )
+        .expect("amendment should approve");
+    applied
+        .apply_amendment("C1", timestamp(16))
+        .expect("amendment should apply");
+    assert!(
+        applied
+            .revise_material_review(
+                "REV-1",
+                MaterialReviewDisposition::Decline,
+                "user".to_owned(),
+                "chat:after-apply".to_owned(),
+                "Applied changes cannot revise the decision".to_owned(),
+                timestamp(17),
+            )
+            .is_err()
+    );
+
+    terminate_review_amendment(&mut pending, TerminalAmendment::Reject);
+    assert!(
+        pending
+            .revise_material_review(
+                "REV-2",
+                MaterialReviewDisposition::Decline,
+                "user".to_owned(),
+                "chat:wrong-review".to_owned(),
+                "The review link must match".to_owned(),
+                timestamp(16),
+            )
+            .is_err()
+    );
+    pending
+        .propose_amendment(
+            "Try a replacement patch".to_owned(),
+            review_amendment_patch(),
+            None,
+            state_hash(&pending),
+            "codex".to_owned(),
+            timestamp(17),
+        )
+        .expect("replacement amendment should propose");
+    assert_eq!(
+        pending
+            .amendment("C2")
+            .expect("replacement should exist")
+            .source_review_id(),
+        Some("REV-1")
+    );
+    assert_eq!(
+        pending
+            .review_item("REV-1")
+            .expect("review should exist")
+            .linked_changes(),
+        ["C1", "C2"]
+    );
+    assert!(plan_revision_is_blocked_by_replacement(&mut pending));
+}
+
+#[test]
+fn legacy_unlinked_review_amendment_and_projection_fields_remain_loadable() {
+    let plan = pending_review_amendment("legacy-review-amendment");
+    let mut value = serde_json::to_value(plan).expect("plan should serialize");
+    value["amendments"][0]
+        .as_object_mut()
+        .expect("amendment should be an object")
+        .remove("source_review_id");
+    let review = value["review_items"][0]
+        .as_object_mut()
+        .expect("review should be an object");
+    review.remove("linked_changes");
+    review.remove("material_decisions");
+    let legacy: Plan = serde_json::from_value(value).expect("legacy plan should remain loadable");
+    assert_eq!(
+        legacy
+            .review_item("REV-1")
+            .expect("review should exist")
+            .disposition(),
+        Some(MaterialReviewDisposition::AcceptChange)
+    );
+    assert!(
+        legacy
+            .review_item("REV-1")
+            .expect("review should exist")
+            .material_decisions()
+            .is_empty()
+    );
+    assert_eq!(
+        legacy
+            .amendment("C1")
+            .expect("amendment should exist")
+            .source_review_id(),
+        None
+    );
+}
+
+fn plan_revision_is_blocked_by_replacement(plan: &mut Plan) -> bool {
+    plan.revise_material_review(
+        "REV-1",
+        MaterialReviewDisposition::DeferToFollowUp,
+        "user".to_owned(),
+        "chat:replacement-pending".to_owned(),
+        "A replacement patch still owns the decision boundary".to_owned(),
+        timestamp(18),
+    )
+    .is_err()
 }
 
 #[test]
@@ -757,6 +1097,206 @@ fn application_material_defer_is_retry_safe_and_preserves_review_source() {
     assert_eq!(source.task(), "Evaluate a separate public API");
     let events = store.events(&id).expect("events should load");
     let event = serde_json::to_value(events.last().expect("disposition event should exist"))
+        .expect("event should serialize");
+    assert_eq!(
+        event["changed_fields"],
+        serde_json::json!([
+            "review_items",
+            "status",
+            "resume_status",
+            "blocker",
+            "follow_ups",
+            "final_outcome"
+        ])
+    );
+}
+
+fn initial_disposition_arguments(
+    project: &TestProject,
+    id: &PlanId,
+    expected_revision: u64,
+) -> Vec<String> {
+    vec![
+        "--root".to_owned(),
+        project.path().to_string_lossy().into_owned(),
+        "--format".to_owned(),
+        "json".to_owned(),
+        "--no-input".to_owned(),
+        "review".to_owned(),
+        "disposition".to_owned(),
+        "--plan".to_owned(),
+        id.to_string(),
+        "--expect-revision".to_owned(),
+        expected_revision.to_string(),
+        "--request-id".to_owned(),
+        request_id(71).to_string(),
+        "--actor".to_owned(),
+        "user".to_owned(),
+        "--review".to_owned(),
+        "REV-1".to_owned(),
+        "--decision".to_owned(),
+        "accept-change".to_owned(),
+        "--decision-ref".to_owned(),
+        "chat:accept-change".to_owned(),
+        "--reason".to_owned(),
+        "The request belongs to this objective".to_owned(),
+    ]
+}
+
+fn persist_accepted_material_review(project: &TestProject) -> (PlanStore, PlanId, u64) {
+    let store = PlanStore::new(project.path());
+    let initial = seed("application-material-revision");
+    let id = initial.id().clone();
+    store
+        .create_plan(
+            &initial,
+            request_id(1),
+            "codex",
+            vec!["test".to_owned(), "create".to_owned()],
+        )
+        .expect("plan should persist");
+    persist_reviewed_plan(&store, &id);
+    let plan = store.load_plan(&id).expect("reviewed plan should load");
+    write_projection(
+        &project.path().join(format!("docs/plan/{id}.md")),
+        &render_plan(&plan).expect("plan should render"),
+        None,
+    )
+    .expect("projection should publish");
+    let reviews = ReviewService::discover(project.path()).expect("review service should discover");
+    let recorded = reviews
+        .record(
+            PlanMutationRequest {
+                plan_id: id.clone(),
+                expected_revision: plan.revision(),
+                request_id: request_id(70),
+                actor: "reviewer".to_owned(),
+                command: vec!["mino".to_owned(), "review".to_owned(), "record".to_owned()],
+                updated_at: timestamp(30),
+            },
+            ReviewClassification::MaterialChange,
+            "Change the public contract".to_owned(),
+            None,
+        )
+        .expect("Material review should persist");
+    let output = run_mino(&initial_disposition_arguments(
+        project,
+        &id,
+        recorded.revision,
+    ));
+    let accepted = parse_cli_success(&output);
+    (
+        store,
+        id,
+        accepted["revision"]
+            .as_u64()
+            .expect("accepted revision should exist"),
+    )
+}
+
+fn reject_persisted_review_amendment(
+    project: &TestProject,
+    id: &PlanId,
+    expected_revision: u64,
+) -> u64 {
+    let amendments =
+        AmendmentService::discover(project.path()).expect("amendment service should discover");
+    let proposed = amendments
+        .propose(
+            PlanMutationRequest {
+                plan_id: id.clone(),
+                expected_revision,
+                request_id: request_id(72),
+                actor: "codex".to_owned(),
+                command: vec!["mino".to_owned(), "plan".to_owned(), "amend".to_owned()],
+                updated_at: Timestamp::now_utc(),
+            },
+            "Apply the requested contract change".to_owned(),
+            review_amendment_patch(),
+            None,
+        )
+        .expect("review amendment should persist");
+    let rejected = amendments
+        .reject(
+            PlanMutationRequest {
+                plan_id: id.clone(),
+                expected_revision: proposed.revision,
+                request_id: request_id(73),
+                actor: "user".to_owned(),
+                command: vec!["mino".to_owned(), "plan".to_owned(), "amend".to_owned()],
+                updated_at: Timestamp::now_utc(),
+            },
+            "C1".to_owned(),
+            "chat:reject-patch".to_owned(),
+            "The concrete patch is unsuitable".to_owned(),
+        )
+        .expect("review amendment should reject");
+    rejected.revision
+}
+
+fn decision_revision_arguments(
+    project: &TestProject,
+    id: &PlanId,
+    expected_revision: u64,
+) -> Vec<String> {
+    vec![
+        "--root".to_owned(),
+        project.path().to_string_lossy().into_owned(),
+        "--format".to_owned(),
+        "json".to_owned(),
+        "--no-input".to_owned(),
+        "review".to_owned(),
+        "disposition".to_owned(),
+        "revise".to_owned(),
+        "--plan".to_owned(),
+        id.to_string(),
+        "--expect-revision".to_owned(),
+        expected_revision.to_string(),
+        "--request-id".to_owned(),
+        request_id(74).to_string(),
+        "--actor".to_owned(),
+        "user".to_owned(),
+        "--review".to_owned(),
+        "REV-1".to_owned(),
+        "--decision".to_owned(),
+        "defer-to-follow-up".to_owned(),
+        "--decision-ref".to_owned(),
+        "chat:revise-to-follow-up".to_owned(),
+        "--reason".to_owned(),
+        "The rejected patch belongs in follow-up".to_owned(),
+    ]
+}
+
+#[test]
+fn cli_material_decision_revision_is_retry_safe_and_preserves_history() {
+    let project = TestProject::new();
+    let (store, id, accepted_revision) = persist_accepted_material_review(&project);
+    let rejected_revision = reject_persisted_review_amendment(&project, &id, accepted_revision);
+    let arguments = decision_revision_arguments(&project, &id, rejected_revision);
+    let first = run_mino(&arguments);
+    assert!(
+        first.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let replay = run_mino(&arguments);
+    assert!(
+        replay.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let replay: serde_json::Value =
+        serde_json::from_slice(&replay.stdout).expect("replay should return JSON");
+    assert_eq!(replay["replayed"], true);
+
+    let plan = store.load_plan(&id).expect("revised plan should load");
+    let item = plan.review_item("REV-1").expect("review should exist");
+    assert_eq!(item.material_decisions().len(), 2);
+    assert_eq!(item.material_decisions()[1].terminated_change(), Some("C1"));
+    assert_eq!(plan.follow_ups(), ["Change the public contract"]);
+    assert_eq!(plan.final_outcome().follow_up_sources().len(), 1);
+    let events = store.events(&id).expect("events should load");
+    let event = serde_json::to_value(events.last().expect("revision event should exist"))
         .expect("event should serialize");
     assert_eq!(
         event["changed_fields"],

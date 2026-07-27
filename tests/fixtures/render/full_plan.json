@@ -150,6 +150,36 @@
       "git_flow_consent": "Approved"
     }
   ],
+  "amendments": [
+    {
+      "id": "C1",
+      "reason": "Evaluate the requested renderer plugin contract",
+      "minimum_classification": "Material",
+      "classification": "Material",
+      "status": "Rejected",
+      "source_review_id": "REV-1",
+      "operations": [
+        {
+          "operation": "replace-interfaces",
+          "interfaces": "Renderer plugin contract under review"
+        }
+      ],
+      "base_revision": 5,
+      "base_state_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "impact": {
+        "affected_fields": ["interfaces"],
+        "affected_tasks": [],
+        "affected_checks": [],
+        "stale_evidence": []
+      },
+      "proposer": "codex",
+      "proposed_at": "2026-07-25T12:08:15Z",
+      "disposition_actor": "user",
+      "disposition_reference": "chat:reject-renderer-plugin-patch",
+      "disposition_reason": "The concrete plugin patch is unsuitable",
+      "disposed_at": "2026-07-25T12:08:45Z"
+    }
+  ],
   "review_items": [
     {
       "id": "REV-1",
@@ -157,13 +187,31 @@
       "feedback": "Evaluate renderer plugin support separately",
       "classification": "Material Change",
       "action": "Pause for a protected material amendment",
+      "linked_changes": ["C1"],
       "status": "Deferred",
       "recorded_at": "2026-07-25T12:08:00Z",
       "disposition": "Defer to Follow-Up",
       "disposition_actor": "user",
       "disposition_reference": "chat:defer-renderer-plugin",
       "disposition_reason": "Plugin support is a separate objective",
-      "disposed_at": "2026-07-25T12:09:00Z"
+      "disposed_at": "2026-07-25T12:09:00Z",
+      "material_decisions": [
+        {
+          "disposition": "Accept Change",
+          "actor": "user",
+          "reference": "chat:accept-renderer-plugin",
+          "reason": "The request belongs to the renderer objective",
+          "decided_at": "2026-07-25T12:08:00Z"
+        },
+        {
+          "disposition": "Defer to Follow-Up",
+          "actor": "user",
+          "reference": "chat:defer-renderer-plugin",
+          "reason": "Plugin support is a separate objective",
+          "decided_at": "2026-07-25T12:09:00Z",
+          "terminated_change": "C1"
+        }
+      ]
     },
     {
       "id": "REV-2",

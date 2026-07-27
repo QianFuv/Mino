@@ -3,8 +3,9 @@
 use mino::domain::{
     AcceptanceCriterion, AmendmentPatch, CheckId, CheckpointKind, CommitGate, CriterionId,
     DeviationClassification, DeviationStatus, DomainError, DomainErrorKind, Event, Evidence,
-    EvidenceId, GitFlowConsent, Plan, PlanId, PlanStatus, RequestId, ReviewClassification, Task,
-    TaskId, TaskStatus, Timestamp, VerificationCheck, WorkspaceFingerprint, WorkspaceGitEntry,
+    EvidenceId, GitFlowConsent, MaterialReviewDisposition, Plan, PlanId, PlanStatus, RequestId,
+    ReviewClassification, ReviewItem, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
+    WorkspaceFingerprint, WorkspaceGitEntry,
 };
 use mino::store::{canonical_json_bytes, sha256_digest};
 use schemars::schema_for;
@@ -345,6 +346,37 @@ fn schema_and_round_trip_are_strict_and_deterministic() {
         protocol_error
             .to_string()
             .contains("Unsupported protocol version/revision")
+    );
+}
+
+#[test]
+fn legacy_material_review_projection_loads_without_synthetic_history_or_links() {
+    let payload = json!({
+        "id": "REV-1",
+        "reviewer": "reviewer",
+        "feedback": "Change the public contract",
+        "classification": "Material Change",
+        "action": "Pause for a protected material amendment",
+        "linked_task": null,
+        "status": "Blocked",
+        "recorded_at": "2026-07-25T11:10:00Z",
+        "disposition": "Accept Change",
+        "disposition_actor": "user",
+        "disposition_reference": "chat:accept-change",
+        "disposition_reason": "The request belongs to this objective",
+        "disposed_at": "2026-07-25T11:11:00Z"
+    });
+    let item: ReviewItem =
+        serde_json::from_value(payload.clone()).expect("legacy review item should load");
+    assert_eq!(
+        item.disposition(),
+        Some(MaterialReviewDisposition::AcceptChange)
+    );
+    assert!(item.linked_changes().is_empty());
+    assert!(item.material_decisions().is_empty());
+    assert_eq!(
+        serde_json::to_value(item).expect("legacy review item should serialize"),
+        payload
     );
 }
 

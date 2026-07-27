@@ -46,7 +46,7 @@ pub use plan::{
     GitReadiness, OutcomeFollowUpSource, Plan, PlanMetadata, PlanScope, ProjectScanAcceptance,
     ProjectScanSummary, StandardSelection,
 };
-pub use review::{MaterialReviewDisposition, ReviewItem};
+pub use review::{MaterialReviewDecision, MaterialReviewDisposition, ReviewItem};
 pub use standards::{
     StandardConflict, StandardConflictCandidate, StandardConflictDecision, StandardConflictRecord,
     StandardSourceKind, StandardsConflictState,

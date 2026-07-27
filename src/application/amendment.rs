@@ -47,7 +47,8 @@ impl AmendmentService {
             .amendment_minimum_classification(&patch)
             .map_err(|error| map_domain_error(&error))?;
         let classification = requested_classification.unwrap_or(minimum);
-        let changed_fields = proposal_changed_fields(classification);
+        let source_review_id = stored.amendment_source_review_id();
+        let changed_fields = proposal_changed_fields(classification, source_review_id.is_some());
         if is_replay_position(&stored, request.expected_revision)? {
             return self.plans.replay_semantic(request, changed_fields);
         }
@@ -230,7 +231,10 @@ impl AmendmentService {
                 format!("Amendment {change_id} does not exist"),
             )
         })?;
-        let changed_fields = proposal_changed_fields(amendment.classification());
+        let changed_fields = disposition_changed_fields(
+            amendment.classification(),
+            amendment.source_review_id().is_some(),
+        );
         if is_replay_position(&stored, request.expected_revision)? {
             return self.plans.replay_semantic(request, changed_fields);
         }
@@ -283,9 +287,14 @@ enum AmendmentDisposition {
     },
 }
 
-fn proposal_changed_fields(classification: AmendmentClassification) -> Vec<String> {
+fn proposal_changed_fields(
+    classification: AmendmentClassification,
+    is_review_owned: bool,
+) -> Vec<String> {
     let mut fields = vec!["amendments".to_owned()];
-    if classification == AmendmentClassification::Material {
+    if is_review_owned {
+        fields.push("review_items".to_owned());
+    } else if classification == AmendmentClassification::Material {
         fields.extend([
             "blocker".to_owned(),
             "resume_status".to_owned(),
@@ -294,6 +303,17 @@ fn proposal_changed_fields(classification: AmendmentClassification) -> Vec<Strin
         ]);
     }
     fields
+}
+
+fn disposition_changed_fields(
+    classification: AmendmentClassification,
+    is_review_owned: bool,
+) -> Vec<String> {
+    if is_review_owned {
+        vec!["amendments".to_owned()]
+    } else {
+        proposal_changed_fields(classification, false)
+    }
 }
 
 fn is_replay_position(plan: &Plan, expected_revision: u64) -> Result<bool, MinoError> {

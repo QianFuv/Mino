@@ -1333,6 +1333,15 @@ fn material_apply_is_atomic_and_supersedes_review_only_after_success() {
     reviewed
         .finish_execution(timestamp(15))
         .expect("plan should enter Review");
+    let unrelated_review_id = reviewed
+        .record_review(
+            "user".to_owned(),
+            "Re-run the original acceptance evidence".to_owned(),
+            ReviewClassification::AcceptanceDefect,
+            Some(task_id("T1")),
+            timestamp(16),
+        )
+        .expect("unrelated review item should record");
     let review_id = reviewed
         .record_review(
             "user".to_owned(),
@@ -1380,6 +1389,20 @@ fn material_apply_is_atomic_and_supersedes_review_only_after_success() {
             timestamp(17),
         )
         .expect("review-owned proposal should record");
+    assert_eq!(
+        reviewed
+            .amendment("C1")
+            .expect("amendment should exist")
+            .source_review_id(),
+        Some(review_id.as_str())
+    );
+    assert_eq!(
+        reviewed
+            .review_item(&review_id)
+            .expect("review should exist")
+            .linked_changes(),
+        ["C1"]
+    );
     reviewed
         .approve_amendment(
             "C1",
@@ -1391,9 +1414,37 @@ fn material_apply_is_atomic_and_supersedes_review_only_after_success() {
     reviewed
         .apply_amendment("C1", timestamp(19))
         .expect("review amendment should apply");
-    let review = reviewed.review_item("REV-1").expect("review should exist");
+    let review = reviewed
+        .review_item(&review_id)
+        .expect("review should exist");
     assert_eq!(review.status(), ReviewStatus::Resolved);
     assert_eq!(review.superseded_by_change(), Some("C1"));
+    assert_eq!(review.linked_changes(), ["C1"]);
+    assert_eq!(
+        reviewed
+            .review_item(&unrelated_review_id)
+            .expect("unrelated review should exist")
+            .status(),
+        ReviewStatus::Resolved
+    );
+    assert_eq!(
+        reviewed
+            .review_item(&unrelated_review_id)
+            .expect("unrelated review should exist")
+            .superseded_by_change(),
+        Some("C1")
+    );
+    let serialized = serde_json::to_value(&reviewed).expect("plan should serialize");
+    let mut missing_reverse_link = serialized.clone();
+    missing_reverse_link["review_items"][1]["linked_changes"] = json!([]);
+    assert!(serde_json::from_value::<Plan>(missing_reverse_link).is_err());
+    let mut missing_source_review = serialized.clone();
+    missing_source_review["amendments"][0]["source_review_id"] = json!("REV-99");
+    assert!(serde_json::from_value::<Plan>(missing_source_review).is_err());
+    let mut mismatched_decision_projection = serialized;
+    mismatched_decision_projection["review_items"][1]["material_decisions"][0]["actor"] =
+        json!("different-user");
+    assert!(serde_json::from_value::<Plan>(mismatched_decision_projection).is_err());
     assert_eq!(reviewed.status(), PlanStatus::Ready);
     assert!(!reviewed.final_outcome().is_complete());
     assert!(reviewed.is_evidence_stale(&evidence_id(3)));

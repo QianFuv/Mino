@@ -73,6 +73,21 @@ enum DispositionArgument {
     DeferToFollowUp,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RevisedDispositionArgument {
+    Decline,
+    DeferToFollowUp,
+}
+
+impl From<RevisedDispositionArgument> for MaterialReviewDisposition {
+    fn from(value: RevisedDispositionArgument) -> Self {
+        match value {
+            RevisedDispositionArgument::Decline => Self::Decline,
+            RevisedDispositionArgument::DeferToFollowUp => Self::DeferToFollowUp,
+        }
+    }
+}
+
 impl From<DispositionArgument> for MaterialReviewDisposition {
     fn from(value: DispositionArgument) -> Self {
         match value {
@@ -124,18 +139,54 @@ pub(crate) struct ResolveArguments {
 
 #[derive(Debug, Args)]
 pub(crate) struct DispositionArguments {
+    #[command(subcommand)]
+    action: Option<DispositionAction>,
+    /// Target plan identifier for the initial disposition.
+    #[arg(long)]
+    plan: Option<String>,
+    /// Required optimistic-concurrency revision for the initial disposition.
+    #[arg(long)]
+    expect_revision: Option<u64>,
+    /// Idempotency UUID for the initial disposition.
+    #[arg(long)]
+    request_id: Option<String>,
+    /// Reviewer or actor recorded in the event log.
+    #[arg(long, default_value = "user")]
+    actor: String,
+    /// Stable blocked Material review identifier such as REV-1.
+    #[arg(long)]
+    review: Option<String>,
+    /// Product decision for the requested Material change.
+    #[arg(long, value_enum)]
+    decision: Option<DispositionArgument>,
+    /// Auditable reference for the explicit product decision.
+    #[arg(long)]
+    decision_ref: Option<String>,
+    /// Reason for accepting, declining, or deferring the requested change.
+    #[arg(long, allow_hyphen_values = true)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum DispositionAction {
+    /// Revise Accept Change after its linked amendment terminates unapplied.
+    Revise(RevisedDispositionArguments),
+}
+
+#[derive(Debug, Args)]
+struct RevisedDispositionArguments {
     #[command(flatten)]
     mutation: MutationArguments,
     /// Stable blocked Material review identifier such as REV-1.
     #[arg(long)]
     review: String,
-    /// Product decision for the requested Material change.
+    /// Revised product decision; Accept Change cannot be recorded again.
     #[arg(long, value_enum)]
-    decision: DispositionArgument,
-    /// Auditable reference for the explicit product decision.
+    decision: RevisedDispositionArgument,
+    /// Auditable reference for the protected decision revision.
     #[arg(long)]
     decision_ref: String,
-    /// Reason for accepting, declining, or deferring the requested change.
+    /// Reason for declining or deferring after the amendment terminated.
     #[arg(long, allow_hyphen_values = true)]
     reason: String,
 }
@@ -240,14 +291,59 @@ fn resolve(
 fn disposition(
     start: &Path,
     service: &ReviewService,
-    arguments: DispositionArguments,
+    mut arguments: DispositionArguments,
+) -> Result<CommandResponse, MinoError> {
+    if let Some(action) = arguments.action.take() {
+        return match action {
+            DispositionAction::Revise(arguments) => revise_disposition(start, service, arguments),
+        };
+    }
+    let mutation = MutationArguments {
+        plan: require_disposition_argument(arguments.plan, "--plan")?,
+        expect_revision: require_disposition_argument(
+            arguments.expect_revision,
+            "--expect-revision",
+        )?,
+        request_id: require_disposition_argument(arguments.request_id, "--request-id")?,
+        actor: arguments.actor,
+    };
+    let review = require_disposition_argument(arguments.review, "--review")?;
+    let decision = require_disposition_argument(arguments.decision, "--decision")?;
+    let decision_ref = require_disposition_argument(arguments.decision_ref, "--decision-ref")?;
+    let reason = require_disposition_argument(arguments.reason, "--reason")?;
+    let decision_name = decision
+        .to_possible_value()
+        .map_or_else(|| "unknown".to_owned(), |value| value.get_name().to_owned());
+    let command = mutation_command(
+        &["disposition"],
+        &mutation,
+        vec![
+            "--review".to_owned(),
+            review.clone(),
+            "--decision".to_owned(),
+            decision_name,
+            "--decision-ref".to_owned(),
+            decision_ref.clone(),
+            "--reason".to_owned(),
+            reason.clone(),
+        ],
+    );
+    let request = mutation_request(mutation, command)?;
+    let report = service.disposition(request, review, decision.into(), decision_ref, reason)?;
+    response_with_guidance(start, "Material review disposition recorded.", report)
+}
+
+fn revise_disposition(
+    start: &Path,
+    service: &ReviewService,
+    arguments: RevisedDispositionArguments,
 ) -> Result<CommandResponse, MinoError> {
     let decision_name = arguments
         .decision
         .to_possible_value()
         .map_or_else(|| "unknown".to_owned(), |value| value.get_name().to_owned());
     let command = mutation_command(
-        &["disposition"],
+        &["disposition", "revise"],
         &arguments.mutation,
         vec![
             "--review".to_owned(),
@@ -261,14 +357,23 @@ fn disposition(
         ],
     );
     let request = mutation_request(arguments.mutation, command)?;
-    let report = service.disposition(
+    let report = service.revise_disposition(
         request,
         arguments.review,
         arguments.decision.into(),
         arguments.decision_ref,
         arguments.reason,
     )?;
-    response_with_guidance(start, "Material review disposition recorded.", report)
+    response_with_guidance(start, "Material review disposition revised.", report)
+}
+
+fn require_disposition_argument<T>(value: Option<T>, name: &str) -> Result<T, MinoError> {
+    value.ok_or_else(|| {
+        MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            format!("review disposition requires {name}"),
+        )
+    })
 }
 
 fn accept(

@@ -788,6 +788,11 @@ fn agent_cli_is_direct_strict_and_uses_the_only_active_plan() {
             .as_array()
             .is_some_and(|actions| actions.iter().any(|action| action["id"] == "plan.approve"))
     );
+    assert!(capabilities["actions"].as_array().is_some_and(|actions| {
+        actions.iter().any(|action| {
+            action["id"] == "review.disposition.revise" && action["approval_boundary"] == true
+        })
+    }));
 
     let second = run_mino(&create_arguments(&project, "Second active plan", 2));
     assert_eq!(second.status.code(), Some(5));

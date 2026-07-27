@@ -120,6 +120,7 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("protocol.status", false, false),
     ("review.accept", true, true),
     ("review.disposition", true, true),
+    ("review.disposition.revise", true, true),
     ("review.record", true, false),
     ("review.resolve", true, false),
     ("review.rework", true, false),
@@ -594,22 +595,34 @@ fn guidance(
 }
 
 fn material_review_blocked_guidance(plan: &Plan) -> Guidance {
-    let accepted_change = plan.review_items().iter().any(|item| {
+    let accepted_change = plan.review_items().iter().find(|item| {
         item.classification() == ReviewClassification::MaterialChange
             && item.status() == ReviewStatus::Blocked
             && item.disposition() == Some(MaterialReviewDisposition::AcceptChange)
     });
-    if accepted_change {
+    if accepted_change.is_some() {
+        let can_revise = plan.revisable_material_review().is_some();
+        let mut allowed_actions = vec!["plan.show", "plan.amend.propose"];
+        if can_revise {
+            allowed_actions.push("review.disposition.revise");
+        }
+        let mut blocked_actions = vec![
+            blocked(
+                "exec.resume",
+                "Accepted Material review feedback requires a protected amendment",
+            ),
+            blocked("review.accept", "Material review feedback remains blocked"),
+        ];
+        if !can_revise {
+            blocked_actions.push(blocked(
+                "review.disposition.revise",
+                "A linked Material amendment must terminate unapplied before revising the decision",
+            ));
+        }
         Guidance {
-            allowed_actions: action_ids(&["plan.show", "plan.amend.propose"]),
-            blocked_actions: vec![
-                blocked(
-                    "exec.resume",
-                    "Accepted Material review feedback requires a protected amendment",
-                ),
-                blocked("review.accept", "Material review feedback remains blocked"),
-            ],
-            approval_required: false,
+            allowed_actions: action_ids(&allowed_actions),
+            blocked_actions,
+            approval_required: can_revise,
             next_actions: Vec::new(),
         }
     } else {

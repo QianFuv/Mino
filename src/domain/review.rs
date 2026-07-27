@@ -1,5 +1,7 @@
 //! Classified review records and their constrained resolution lifecycle.
 
+use std::collections::BTreeSet;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +19,95 @@ pub enum MaterialReviewDisposition {
     /// Move the request to sourced, non-blocking follow-up work.
     #[serde(rename = "Defer to Follow-Up")]
     DeferToFollowUp,
+}
+
+/// One immutable product decision in a Material review item's audit history.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MaterialReviewDecision {
+    disposition: MaterialReviewDisposition,
+    actor: String,
+    reference: String,
+    reason: String,
+    decided_at: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminated_change: Option<String>,
+}
+
+impl MaterialReviewDecision {
+    fn new(
+        disposition: MaterialReviewDisposition,
+        actor: String,
+        reference: String,
+        reason: String,
+        decided_at: Timestamp,
+        terminated_change: Option<String>,
+    ) -> Result<Self, DomainError> {
+        let decision = Self {
+            disposition,
+            actor,
+            reference,
+            reason,
+            decided_at,
+            terminated_change,
+        };
+        decision.validate()?;
+        Ok(decision)
+    }
+
+    /// Returns the product disposition recorded by this decision.
+    #[must_use]
+    pub const fn disposition(&self) -> MaterialReviewDisposition {
+        self.disposition
+    }
+
+    /// Returns the actor who recorded this decision.
+    #[must_use]
+    pub fn actor(&self) -> &str {
+        &self.actor
+    }
+
+    /// Returns the auditable decision reference.
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+
+    /// Returns the decision rationale.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    /// Returns when this decision was recorded.
+    #[must_use]
+    pub const fn decided_at(&self) -> &Timestamp {
+        &self.decided_at
+    }
+
+    /// Returns the terminated amendment that enabled a decision revision.
+    #[must_use]
+    pub fn terminated_change(&self) -> Option<&str> {
+        self.terminated_change.as_deref()
+    }
+
+    fn validate(&self) -> Result<(), DomainError> {
+        if self.actor.trim().is_empty()
+            || self.reference.trim().is_empty()
+            || self.reason.trim().is_empty()
+            || self
+                .terminated_change
+                .as_deref()
+                .is_some_and(|change_id| change_number(change_id).is_none())
+        {
+            Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Material review decision fields are malformed",
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// One immutable review request plus its constrained processing status.
@@ -37,6 +128,8 @@ pub struct ReviewItem {
     approval_reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     superseded_by_change: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    linked_changes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     disposition: Option<MaterialReviewDisposition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,6 +140,8 @@ pub struct ReviewItem {
     disposition_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     disposed_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    material_decisions: Vec<MaterialReviewDecision>,
 }
 
 impl ReviewItem {
@@ -178,11 +273,13 @@ impl ReviewItem {
             recorded_at,
             approval_reference,
             superseded_by_change: None,
+            linked_changes: Vec::new(),
             disposition: None,
             disposition_actor: None,
             disposition_reference: None,
             disposition_reason: None,
             disposed_at: None,
+            material_decisions: Vec::new(),
         };
         item.validate()?;
         Ok(item)
@@ -254,6 +351,12 @@ impl ReviewItem {
         self.superseded_by_change.as_deref()
     }
 
+    /// Returns Material amendments proposed for this review request.
+    #[must_use]
+    pub fn linked_changes(&self) -> &[String] {
+        &self.linked_changes
+    }
+
     /// Returns the explicit Material review decision when one was recorded.
     #[must_use]
     pub const fn disposition(&self) -> Option<MaterialReviewDisposition> {
@@ -282,6 +385,12 @@ impl ReviewItem {
     #[must_use]
     pub const fn disposed_at(&self) -> Option<&Timestamp> {
         self.disposed_at.as_ref()
+    }
+
+    /// Returns the append-only Material product-decision history.
+    #[must_use]
+    pub fn material_decisions(&self) -> &[MaterialReviewDecision] {
+        &self.material_decisions
     }
 
     pub(crate) fn begin_rework(&mut self) -> Result<(), DomainError> {
@@ -316,6 +425,27 @@ impl ReviewItem {
         Ok(())
     }
 
+    pub(crate) fn link_amendment(&mut self, change_id: &str) -> Result<(), DomainError> {
+        if self.classification != ReviewClassification::MaterialChange
+            || self.status != ReviewStatus::Blocked
+            || self.disposition != Some(MaterialReviewDisposition::AcceptChange)
+            || self.superseded_by_change.is_some()
+            || change_number(change_id).is_none()
+            || self.linked_changes.iter().any(|linked| linked == change_id)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Review item {} cannot link amendment {change_id}", self.id),
+            ));
+        }
+        if self.material_decisions.is_empty() {
+            self.material_decisions
+                .push(self.legacy_material_decision()?);
+        }
+        self.linked_changes.push(change_id.to_owned());
+        self.validate()
+    }
+
     pub(crate) fn supersede_for_amendment(&mut self, change_id: &str) -> Result<(), DomainError> {
         if matches!(
             self.classification,
@@ -327,6 +457,18 @@ impl ReviewItem {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
                 "A superseding amendment requires a valid change identifier",
+            ));
+        }
+        if self.classification == ReviewClassification::MaterialChange
+            && !self.linked_changes.is_empty()
+            && !self.linked_changes.iter().any(|linked| linked == change_id)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!(
+                    "Material review item {} is not linked to amendment {change_id}",
+                    self.id
+                ),
             ));
         }
         self.status = ReviewStatus::Resolved;
@@ -355,22 +497,115 @@ impl ReviewItem {
                 ),
             ));
         }
-        self.disposition = Some(disposition);
-        self.disposition_actor = Some(actor);
-        self.disposition_reference = Some(reference);
-        self.disposition_reason = Some(reason);
-        self.disposed_at = Some(disposed_at);
-        self.status = match disposition {
+        let decision =
+            MaterialReviewDecision::new(disposition, actor, reference, reason, disposed_at, None)?;
+        self.apply_material_decision(&decision);
+        self.material_decisions.push(decision);
+        self.validate()
+    }
+
+    pub(crate) fn revise_material_change(
+        &mut self,
+        disposition: MaterialReviewDisposition,
+        actor: String,
+        reference: String,
+        reason: String,
+        terminated_change: String,
+        decided_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if self.classification != ReviewClassification::MaterialChange
+            || self.status != ReviewStatus::Blocked
+            || self.disposition != Some(MaterialReviewDisposition::AcceptChange)
+            || self.superseded_by_change.is_some()
+            || !matches!(
+                disposition,
+                MaterialReviewDisposition::Decline | MaterialReviewDisposition::DeferToFollowUp
+            )
+            || !self
+                .linked_changes
+                .iter()
+                .any(|change_id| change_id == &terminated_change)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!(
+                    "Review item {} cannot revise its Material disposition",
+                    self.id
+                ),
+            ));
+        }
+        if self.material_decisions.is_empty() {
+            self.material_decisions
+                .push(self.legacy_material_decision()?);
+        }
+        let decision = MaterialReviewDecision::new(
+            disposition,
+            actor,
+            reference,
+            reason,
+            decided_at,
+            Some(terminated_change),
+        )?;
+        self.apply_material_decision(&decision);
+        self.material_decisions.push(decision);
+        self.validate()
+    }
+
+    fn apply_material_decision(&mut self, decision: &MaterialReviewDecision) {
+        self.disposition = Some(decision.disposition);
+        self.disposition_actor = Some(decision.actor.clone());
+        self.disposition_reference = Some(decision.reference.clone());
+        self.disposition_reason = Some(decision.reason.clone());
+        self.disposed_at = Some(decision.decided_at.clone());
+        self.status = match decision.disposition {
             MaterialReviewDisposition::AcceptChange => ReviewStatus::Blocked,
             MaterialReviewDisposition::Decline => ReviewStatus::Resolved,
             MaterialReviewDisposition::DeferToFollowUp => ReviewStatus::Deferred,
         };
-        self.validate()
+    }
+
+    fn legacy_material_decision(&self) -> Result<MaterialReviewDecision, DomainError> {
+        MaterialReviewDecision::new(
+            self.disposition.ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Legacy Material review has no disposition",
+                )
+            })?,
+            self.disposition_actor.clone().ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Legacy Material review has no disposition actor",
+                )
+            })?,
+            self.disposition_reference.clone().ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Legacy Material review has no disposition reference",
+                )
+            })?,
+            self.disposition_reason.clone().ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Legacy Material review has no disposition reason",
+                )
+            })?,
+            self.disposed_at.clone().ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Legacy Material review has no disposition timestamp",
+                )
+            })?,
+            None,
+        )
     }
 
     pub(crate) fn validate(&self) -> Result<(), DomainError> {
         self.validate_fields()?;
-        if self.classification != ReviewClassification::MaterialChange && self.disposition.is_some()
+        if self.classification != ReviewClassification::MaterialChange
+            && (self.disposition.is_some()
+                || !self.linked_changes.is_empty()
+                || !self.material_decisions.is_empty())
         {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
@@ -443,6 +678,11 @@ impl ReviewItem {
                     && self.origin_task.is_none()
                     && self.approval_reference.is_none()
                     && self.action == "Pause for a protected material amendment"
+                    && self.superseded_by_change.as_ref().is_none_or(|change_id| {
+                        self.linked_changes.is_empty()
+                            || self.linked_changes.iter().any(|linked| linked == change_id)
+                    })
+                    && (self.disposition.is_some() || self.linked_changes.is_empty())
                     && matches!(
                         (
                             self.disposition,
@@ -502,6 +742,7 @@ impl ReviewItem {
         let has_no_disposition = self.disposition.is_none()
             && disposition_fields.iter().all(Option::is_none)
             && self.disposed_at.is_none();
+        let mut linked_changes = BTreeSet::new();
         if review_number(&self.id).is_none()
             || self.reviewer.trim().is_empty()
             || self.feedback.trim().is_empty()
@@ -514,7 +755,11 @@ impl ReviewItem {
                 .superseded_by_change
                 .as_deref()
                 .is_some_and(|change_id| change_number(change_id).is_none())
+            || self.linked_changes.iter().any(|change_id| {
+                change_number(change_id).is_none() || !linked_changes.insert(change_id)
+            })
             || !(has_complete_disposition || has_no_disposition)
+            || !self.material_decision_history_is_valid()
         {
             Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
@@ -523,6 +768,36 @@ impl ReviewItem {
         } else {
             Ok(())
         }
+    }
+
+    fn material_decision_history_is_valid(&self) -> bool {
+        if self.material_decisions.is_empty() {
+            return self.linked_changes.is_empty();
+        }
+        let mut terminated_changes = BTreeSet::new();
+        if self
+            .material_decisions
+            .iter()
+            .any(|decision| decision.validate().is_err())
+            || self.material_decisions[0].terminated_change.is_some()
+            || self.material_decisions.iter().skip(1).any(|decision| {
+                decision.terminated_change.as_ref().is_none_or(|change_id| {
+                    !self.linked_changes.iter().any(|linked| linked == change_id)
+                        || !terminated_changes.insert(change_id)
+                }) || decision.disposition == MaterialReviewDisposition::AcceptChange
+            })
+        {
+            return false;
+        }
+        let last = self
+            .material_decisions
+            .last()
+            .expect("non-empty decision history has a last item");
+        self.disposition == Some(last.disposition)
+            && self.disposition_actor.as_deref() == Some(last.actor.as_str())
+            && self.disposition_reference.as_deref() == Some(last.reference.as_str())
+            && self.disposition_reason.as_deref() == Some(last.reason.as_str())
+            && self.disposed_at.as_ref() == Some(&last.decided_at)
     }
 }
 

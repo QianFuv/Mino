@@ -525,6 +525,8 @@ pub struct Amendment {
     minimum_classification: AmendmentClassification,
     classification: AmendmentClassification,
     status: AmendmentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_review_id: Option<String>,
     operations: Vec<AmendmentOperation>,
     base_revision: u64,
     base_state_hash: String,
@@ -552,6 +554,7 @@ impl Amendment {
         reason: String,
         minimum_classification: AmendmentClassification,
         classification: AmendmentClassification,
+        source_review_id: Option<String>,
         operations: Vec<AmendmentOperation>,
         base_revision: u64,
         base_state_hash: String,
@@ -569,6 +572,7 @@ impl Amendment {
             } else {
                 AmendmentStatus::Proposed
             },
+            source_review_id,
             operations,
             base_revision,
             base_state_hash,
@@ -616,6 +620,12 @@ impl Amendment {
     #[must_use]
     pub const fn status(&self) -> AmendmentStatus {
         self.status
+    }
+
+    /// Returns the Material review request that owns this amendment.
+    #[must_use]
+    pub fn source_review_id(&self) -> Option<&str> {
+        self.source_review_id.as_deref()
     }
 
     /// Returns immutable typed operations in proposal order.
@@ -717,6 +727,15 @@ impl Amendment {
     #[must_use]
     pub fn is_applied(&self) -> bool {
         self.status == AmendmentStatus::Applied
+    }
+
+    /// Returns whether the proposal ended without applying its operations.
+    #[must_use]
+    pub const fn is_terminated_without_apply(&self) -> bool {
+        matches!(
+            self.status,
+            AmendmentStatus::Rejected | AmendmentStatus::Withdrawn | AmendmentStatus::Cancelled
+        )
     }
 
     pub(crate) fn approve(
@@ -850,6 +869,9 @@ impl Amendment {
             || !is_sha256(&self.base_state_hash)
             || self.operations.is_empty()
             || self.classification < self.minimum_classification
+            || self.source_review_id.as_deref().is_some_and(|review_id| {
+                self.classification != AmendmentClassification::Material || !is_review_id(review_id)
+            })
         {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
@@ -959,6 +981,14 @@ impl Amendment {
             }
         }
     }
+}
+
+fn is_review_id(value: &str) -> bool {
+    value
+        .strip_prefix("REV-")
+        .filter(|number| !number.starts_with('0'))
+        .and_then(|number| number.parse::<u64>().ok())
+        .is_some_and(|number| number > 0)
 }
 
 pub(crate) fn change_number(id: &str) -> Option<u64> {

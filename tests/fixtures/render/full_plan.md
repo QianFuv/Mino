@@ -2,7 +2,7 @@
 managed_by: mino
 plan_id: 2026-07-25-render-contract
 revision: 8
-state_hash: sha256:31bab9df163e718917a0c4fe006bc38c920ddc9c0cddc79838b6eff1f6994855
+state_hash: sha256:716d7420493179a45d2e7000584ad85c24d1a1ac9f9ff0711679a1dabf5dc8d0
 renderer_version: 2
 manual_editing: prohibited
 ---
@@ -183,14 +183,16 @@ _None._
 
 ## Protected Amendments
 
-_None._
+| ID | Reason | Minimum | Classification | Status | Source Review | Base Revision | Base State Hash | Affected Fields | Affected Tasks | Affected Checks | Stale Evidence | Proposer | Proposed At | Approval Actor | Approval Reference | Approved At | Disposition Actor | Disposition Reference | Disposition Reason | Disposed At | Applied At | Operations |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| C1 | Evaluate the requested renderer plugin contract | Material | Material | Rejected | REV-1 | 5 | sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc | interfaces | None | None | None | codex | 2026-07-25T12:08:15Z | N/A | N/A | N/A | user | chat:reject-renderer-plugin-patch | The concrete plugin patch is unsuitable | 2026-07-25T12:08:45Z | N/A | \{"interfaces":"Renderer plugin contract under review","operation":"replace-interfaces"\} |
 
 ## Review Feedback
 
-| ID | Reviewer | Feedback | Classification | Action | Task | Origin Task | Status | Recorded At | Approval Reference | Superseded By Change | Disposition | Disposition Actor | Disposition Reference | Disposition Reason | Disposed At |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| REV-1 | reviewer | Evaluate renderer plugin support separately | Material Change | Pause for a protected material amendment | N/A | N/A | Deferred | 2026-07-25T12:08:00Z | N/A | N/A | Defer to Follow-Up | user | chat:defer-renderer-plugin | Plugin support is a separate objective | 2026-07-25T12:09:00Z |
-| REV-2 | reviewer | Projection contract accepted | Accepted | Record acceptance | T1 | N/A | Resolved | 2026-07-25T12:08:00Z | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| ID | Reviewer | Feedback | Classification | Action | Task | Origin Task | Status | Recorded At | Approval Reference | Superseded By Change | Linked Changes | Disposition | Disposition Actor | Disposition Reference | Disposition Reason | Disposed At | Decision History |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| REV-1 | reviewer | Evaluate renderer plugin support separately | Material Change | Pause for a protected material amendment | N/A | N/A | Deferred | 2026-07-25T12:08:00Z | N/A | N/A | C1 | Defer to Follow-Up | user | chat:defer-renderer-plugin | Plugin support is a separate objective | 2026-07-25T12:09:00Z | \{"actor":"user","decided\_at":"2026-07-25T12:08:00Z","disposition":"Accept Change","reason":"The request belongs to the renderer objective","reference":"chat:accept-renderer-plugin"\}, \{"actor":"user","decided\_at":"2026-07-25T12:09:00Z","disposition":"Defer to Follow-Up","reason":"Plugin support is a separate objective","reference":"chat:defer-renderer-plugin","terminated\_change":"C1"\} |
+| REV-2 | reviewer | Projection contract accepted | Accepted | Record acceptance | T1 | N/A | Resolved | 2026-07-25T12:08:00Z | N/A | N/A | None | N/A | N/A | N/A | N/A | N/A | N/A |
 
 ## Follow-Ups
 

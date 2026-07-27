@@ -1542,6 +1542,18 @@ impl Plan {
         self.contextual_amendment_minimum(patch.operations(), operation_minimum)
     }
 
+    pub(crate) fn amendment_source_review_id(&self) -> Option<&str> {
+        self.review_items
+            .iter()
+            .find(|item| {
+                item.classification() == ReviewClassification::MaterialChange
+                    && item.status() == ReviewStatus::Blocked
+                    && item.disposition() == Some(MaterialReviewDisposition::AcceptChange)
+                    && item.superseded_by_change().is_none()
+            })
+            .map(ReviewItem::id)
+    }
+
     /// Proposes one typed protected change against the exact current revision.
     ///
     /// # Errors
@@ -1600,11 +1612,13 @@ impl Plan {
         let operations = patch.into_operations();
         let impact = self.amendment_impact(&operations, classification)?;
         let change_id = self.next_amendment_id()?;
+        let source_review_id = self.amendment_source_review_id().map(str::to_owned);
         let amendment = Amendment::proposed(
             change_id.clone(),
             reason,
             minimum_classification,
             classification,
+            source_review_id.clone(),
             operations,
             self.revision,
             base_state_hash,
@@ -1633,6 +1647,10 @@ impl Plan {
             ));
         }
         candidate.amendments.push(amendment);
+        if let Some(review_id) = source_review_id {
+            let review_index = candidate.review_item_index(&review_id)?;
+            candidate.review_items[review_index].link_amendment(&change_id)?;
+        }
         candidate.record_revision(next_revision, updated_at);
         candidate.validate_invariants()?;
         *self = candidate;
@@ -1735,6 +1753,9 @@ impl Plan {
     ) -> Result<(), DomainError> {
         let amendment_index = self.pending_amendment_index(change_id)?;
         let classification = self.amendments[amendment_index].classification();
+        let source_review_id = self.amendments[amendment_index]
+            .source_review_id()
+            .map(str::to_owned);
         let operations = self.amendments[amendment_index].operations().to_vec();
         let next_revision = self.next_revision()?;
         let mut candidate = self.clone();
@@ -1762,8 +1783,18 @@ impl Plan {
                 let mut workspace = candidate.workspace_state()?;
                 workspace.reset_for_material_amendment();
                 candidate.store_workspace_state(&workspace)?;
-                for item in &mut candidate.review_items {
-                    item.supersede_for_amendment(change_id)?;
+                if let Some(review_id) = source_review_id {
+                    let review_index = candidate.review_item_index(&review_id)?;
+                    candidate.review_items[review_index].supersede_for_amendment(change_id)?;
+                    for (index, item) in candidate.review_items.iter_mut().enumerate() {
+                        if index != review_index {
+                            item.supersede_for_amendment(change_id)?;
+                        }
+                    }
+                } else {
+                    for item in &mut candidate.review_items {
+                        item.supersede_for_amendment(change_id)?;
+                    }
                 }
                 candidate.status = PlanStatus::Ready;
                 candidate.resume_status = None;
@@ -4182,7 +4213,86 @@ impl Plan {
             candidate.blocker = None;
         }
         if disposition == MaterialReviewDisposition::DeferToFollowUp {
-            candidate.follow_ups.push(feedback.clone());
+            if !candidate.follow_ups.iter().any(|item| item == &feedback) {
+                candidate.follow_ups.push(feedback.clone());
+            }
+            candidate
+                .final_outcome
+                .add_review_follow_up(review_id, &feedback)?;
+        }
+        candidate.record_revision(candidate.next_revision()?, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Returns the blocked Material review item whose accepted change may be revised.
+    #[must_use]
+    pub fn revisable_material_review(&self) -> Option<&ReviewItem> {
+        if self.has_pending_amendment() || !self.is_blocked_for_material_review() {
+            return None;
+        }
+        self.review_items.iter().find(|item| {
+            item.classification() == ReviewClassification::MaterialChange
+                && item.status() == ReviewStatus::Blocked
+                && item.disposition() == Some(MaterialReviewDisposition::AcceptChange)
+                && item.superseded_by_change().is_none()
+                && self.terminated_review_amendment(item).is_some()
+        })
+    }
+
+    /// Revises an accepted Material request after its linked amendment terminates unapplied.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the named blocked review owns a rejected,
+    /// withdrawn, or cancelled amendment and the new decision is Decline or Defer.
+    pub fn revise_material_review(
+        &mut self,
+        review_id: &str,
+        disposition: MaterialReviewDisposition,
+        actor: String,
+        reference: String,
+        reason: String,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let item = self
+            .revisable_material_review()
+            .filter(|item| item.id() == review_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvalidTransition,
+                    format!("Review item {review_id} cannot revise its Material decision"),
+                )
+            })?;
+        let terminated_change = self
+            .terminated_review_amendment(item)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Revisable Material review lost its terminated amendment",
+                )
+            })?
+            .id()
+            .to_owned();
+        let feedback = item.feedback().to_owned();
+        let item_index = self.review_item_index(review_id)?;
+        let mut candidate = self.clone();
+        candidate.review_items[item_index].revise_material_change(
+            disposition,
+            actor,
+            reference,
+            reason,
+            terminated_change,
+            updated_at.clone(),
+        )?;
+        candidate.status = PlanStatus::Review;
+        candidate.resume_status = None;
+        candidate.blocker = None;
+        if disposition == MaterialReviewDisposition::DeferToFollowUp {
+            if !candidate.follow_ups.iter().any(|item| item == &feedback) {
+                candidate.follow_ups.push(feedback.clone());
+            }
             candidate
                 .final_outcome
                 .add_review_follow_up(review_id, &feedback)?;
@@ -4972,6 +5082,14 @@ impl Plan {
             })
     }
 
+    fn terminated_review_amendment(&self, item: &ReviewItem) -> Option<&Amendment> {
+        let change_id = item.linked_changes().last()?;
+        self.amendment(change_id).filter(|amendment| {
+            amendment.source_review_id() == Some(item.id())
+                && amendment.is_terminated_without_apply()
+        })
+    }
+
     fn append_review_task(
         &mut self,
         task_id: TaskId,
@@ -5081,6 +5199,7 @@ impl Plan {
                 ));
             }
         }
+        self.validate_review_amendment_links()?;
         if self.review_items.iter().any(|item| {
             item.classification() == ReviewClassification::MaterialChange
                 && item.status() == ReviewStatus::Blocked
@@ -5103,6 +5222,81 @@ impl Plan {
                 DomainErrorKind::InvariantViolation,
                 "Done plans cannot retain unresolved review feedback",
             ));
+        }
+        Ok(())
+    }
+
+    fn validate_review_amendment_links(&self) -> Result<(), DomainError> {
+        for amendment in &self.amendments {
+            let Some(review_id) = amendment.source_review_id() else {
+                continue;
+            };
+            let item = self.review_item(review_id).ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!(
+                        "Amendment {} references missing review item {review_id}",
+                        amendment.id()
+                    ),
+                )
+            })?;
+            if amendment.classification() != AmendmentClassification::Material
+                || item.classification() != ReviewClassification::MaterialChange
+                || !item
+                    .linked_changes()
+                    .iter()
+                    .any(|change_id| change_id == amendment.id())
+                || (amendment.is_applied() && item.superseded_by_change() != Some(amendment.id()))
+            {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!(
+                        "Amendment {} and review item {review_id} are not reciprocally linked",
+                        amendment.id()
+                    ),
+                ));
+            }
+        }
+        for item in &self.review_items {
+            for change_id in item.linked_changes() {
+                let amendment = self.amendment(change_id).ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!(
+                            "Review item {} references missing amendment {change_id}",
+                            item.id()
+                        ),
+                    )
+                })?;
+                if amendment.source_review_id() != Some(item.id()) {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!(
+                            "Review item {} and amendment {change_id} are not reciprocally linked",
+                            item.id()
+                        ),
+                    ));
+                }
+            }
+            for decision in item.material_decisions().iter().skip(1) {
+                let change_id = decision.terminated_change().ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "A revised Material decision requires a terminated amendment",
+                    )
+                })?;
+                if !self
+                    .amendment(change_id)
+                    .is_some_and(Amendment::is_terminated_without_apply)
+                {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!(
+                            "Material decision revision references ineligible amendment {change_id}"
+                        ),
+                    ));
+                }
+            }
         }
         Ok(())
     }
