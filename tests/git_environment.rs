@@ -164,6 +164,8 @@ fn discovery_and_readiness_probes_enforce_timeout_and_output_limits() {
     );
 
     let output_limited = initialized_non_git_project(&area.path("output-limited"));
+    fs::write(output_limited.join("output-limit.marker"), "limit\n")
+        .expect("output limit marker should be written");
     let output_plan = create_plan(&output_limited, Some(&shim_directory), 2);
     assert_eq!(output_plan.git_readiness().repository(), "Unknown");
     assert_eq!(output_plan.git_readiness().working_tree(), "Unknown");
@@ -387,25 +389,19 @@ fn main() {
         .iter()
         .any(|argument| argument == "--is-inside-work-tree")
     {
-        let count_path = root.join(".git-shim-count");
-        let count = std::fs::read_to_string(&count_path)
-            .ok()
-            .and_then(|value| value.parse::<u8>().ok())
-            .unwrap_or(0);
-        std::fs::write(&count_path, (count + 1).to_string())
-            .expect("Git shim count should update");
-        if count == 0 {
-            println!("false");
+        if root.join("probe-timeout.marker").exists() {
+            thread::sleep(Duration::from_secs(30));
             return;
         }
-    }
-    if root.join("probe-timeout.marker").exists() {
-        thread::sleep(Duration::from_secs(30));
+        if root.join("output-limit.marker").exists() {
+            io::stdout()
+                .write_all(&vec![b'x'; 70 * 1024])
+                .expect("Git shim output should write");
+            return;
+        }
+        println!("false");
         return;
     }
-    io::stdout()
-        .write_all(&vec![b'x'; 70 * 1024])
-        .expect("Git shim output should write");
 }
 "#,
     )
