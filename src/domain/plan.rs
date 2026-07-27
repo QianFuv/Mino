@@ -10,15 +10,16 @@ use super::execution::EXECUTION_EXTENSION_KEY;
 use super::review::review_number;
 use super::standards::STANDARDS_CONFLICT_EXTENSION_KEY;
 use super::{
-    Amendment, AmendmentClassification, AmendmentImpact, AmendmentOperation, AmendmentPatch,
-    AmendmentStatus, CheckId, CheckStatus, CheckpointKind, CommitStatus, CriterionId,
-    DeviationClassification, DomainError, DomainErrorKind, DraftContextInput, DraftCriterionInput,
-    DraftDecisionInput, DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput,
-    DraftScopeInput, DraftTaskInput, DraftTaskUpdateInput, DraftVerificationInput, EvidenceId,
-    ExecutionState, FileMapEntry, GitFlowConsent, Lineage, MaterialReviewDisposition, PlanArchive,
-    PlanDraftSeed, PlanId, PlanStatus, ProtocolVersion, ReviewClassification, ReviewItem,
-    ReviewStatus, SchemaVersion, StandardConflict, StandardsConflictState, Task, TaskId,
-    TaskStatus, Timestamp, VerificationCheck, WorkspaceFingerprint, WorkspaceProtocolState,
+    AcceptanceCriterion, Amendment, AmendmentClassification, AmendmentImpact, AmendmentOperation,
+    AmendmentPatch, AmendmentStatus, CheckId, CheckStatus, CheckpointKind, CommitGate,
+    CommitStatus, CriterionId, DeviationClassification, DomainError, DomainErrorKind,
+    DraftContextInput, DraftCriterionInput, DraftDecisionInput, DraftEdgeCaseInput, DraftFileInput,
+    DraftMetadataInput, DraftPlanInput, DraftScopeInput, DraftTaskInput, DraftTaskUpdateInput,
+    DraftVerificationInput, EvidenceId, ExecutionState, FileMapEntry, GitFlowConsent, Lineage,
+    MaterialReviewDisposition, PlanArchive, PlanDraftSeed, PlanId, PlanStatus, ProtocolVersion,
+    ReviewClassification, ReviewItem, ReviewStatus, SchemaVersion, StandardConflict,
+    StandardsConflictState, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
+    WorkspaceFingerprint, WorkspaceProtocolState,
 };
 
 const PROJECT_SCAN_EXTENSION_KEY: &str = "project_scan";
@@ -1752,6 +1753,9 @@ impl Plan {
                 let mut execution = candidate.execution_state()?;
                 execution.reset_for_material_amendment();
                 candidate.store_execution_state(&execution)?;
+                let mut workspace = candidate.workspace_state()?;
+                workspace.reset_for_material_amendment();
+                candidate.store_workspace_state(&workspace)?;
                 for item in &mut candidate.review_items {
                     item.supersede_for_amendment(change_id)?;
                 }
@@ -2160,7 +2164,18 @@ impl Plan {
         let maximum = self
             .tasks
             .iter()
-            .filter_map(|task| task.id().as_str().strip_prefix('T'))
+            .map(Task::id)
+            .chain(
+                self.amendments
+                    .iter()
+                    .flat_map(Amendment::operations)
+                    .filter_map(|operation| match operation {
+                        AmendmentOperation::AddTask { task } => task.id.as_ref(),
+                        AmendmentOperation::RemoveTask { task_id } => Some(task_id),
+                        _ => None,
+                    }),
+            )
+            .filter_map(|task_id| task_id.as_str().strip_prefix('T'))
             .filter_map(|number| number.parse::<u64>().ok())
             .max()
             .unwrap_or(0);
@@ -4822,6 +4837,23 @@ impl Plan {
                 "Global verification contains duplicate check identifiers",
             ));
         }
+        let task_check_ids = self
+            .tasks
+            .iter()
+            .flat_map(Task::verification_checks)
+            .map(VerificationCheck::id)
+            .collect::<Vec<_>>();
+        let unique_task_check_ids = task_check_ids.iter().copied().collect::<BTreeSet<_>>();
+        if unique_task_check_ids.len() != task_check_ids.len()
+            || global_check_ids
+                .iter()
+                .any(|check_id| unique_task_check_ids.contains(check_id))
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Task and global verification identifiers must be unique across the plan",
+            ));
+        }
         if self.status != PlanStatus::Draft && self.global_verification.is_empty() {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
@@ -5172,7 +5204,19 @@ impl Plan {
         let mut affected_tasks = BTreeSet::new();
         let mut affected_checks = BTreeSet::new();
         let mut stale_evidence = BTreeSet::new();
+        let mut preview = self.clone();
+        let mut next_task_id = self.next_task_id()?;
         for operation in operations {
+            if let AmendmentOperation::AddTask { task } = operation {
+                if task.id.as_ref() != Some(&next_task_id) {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Expected amended task ID {next_task_id}"),
+                    ));
+                }
+                next_task_id = increment_task_id(&next_task_id)?;
+            }
+            preview.apply_amendment_operation(operation.clone())?;
             match operation {
                 AmendmentOperation::AddTaskFile { task_id, path, .. }
                 | AmendmentOperation::ExpandTaskFile { task_id, path, .. } => {
@@ -5213,6 +5257,98 @@ impl Plan {
                     affected_tasks.insert(task_id.clone());
                     affected_fields.insert(format!("tasks.{task_id}.implementation_notes"));
                 }
+                AmendmentOperation::AddTask { task } => {
+                    let task_id = task.id.as_ref().expect("validated AddTask ID exists");
+                    affected_tasks.insert(task_id.clone());
+                    affected_fields.extend([
+                        "approach.file_map".to_owned(),
+                        "task_order".to_owned(),
+                        "tasks".to_owned(),
+                        format!("tasks.{task_id}"),
+                    ]);
+                }
+                AmendmentOperation::UpdateTaskDefinition { task_id, .. } => {
+                    affected_tasks.insert(task_id.clone());
+                    affected_fields.extend([
+                        format!("tasks.{task_id}.title"),
+                        format!("tasks.{task_id}.steps"),
+                    ]);
+                }
+                AmendmentOperation::RemoveTask { task_id } => {
+                    affected_tasks.insert(task_id.clone());
+                    affected_fields.extend([
+                        "approach.file_map".to_owned(),
+                        "extensions.workspace.task_baselines".to_owned(),
+                        "task_order".to_owned(),
+                        "tasks".to_owned(),
+                        format!("tasks.{task_id}"),
+                    ]);
+                }
+                AmendmentOperation::ReplaceTaskDependencies {
+                    task_id,
+                    depends_on: _,
+                } => {
+                    affected_tasks.insert(task_id.clone());
+                    affected_fields.insert(format!("tasks.{task_id}.depends_on"));
+                }
+                AmendmentOperation::AddCriterion { task_id, criterion } => {
+                    affected_tasks.insert(task_id.clone());
+                    let criterion_id = criterion
+                        .id
+                        .as_ref()
+                        .expect("validated criterion ID exists");
+                    affected_fields.insert(format!(
+                        "tasks.{task_id}.acceptance_criteria.{criterion_id}"
+                    ));
+                }
+                AmendmentOperation::UpdateCriterion {
+                    task_id,
+                    criterion_id,
+                    ..
+                }
+                | AmendmentOperation::RemoveCriterion {
+                    task_id,
+                    criterion_id,
+                } => {
+                    affected_tasks.insert(task_id.clone());
+                    affected_fields.insert(format!(
+                        "tasks.{task_id}.acceptance_criteria.{criterion_id}"
+                    ));
+                }
+                AmendmentOperation::AddTaskVerification {
+                    task_id,
+                    verification,
+                } => {
+                    affected_tasks.insert(task_id.clone());
+                    affected_checks.insert(verification.id.clone());
+                    affected_fields.insert(format!(
+                        "tasks.{task_id}.verification_checks.{}",
+                        verification.id
+                    ));
+                }
+                AmendmentOperation::UpdateTaskVerification {
+                    task_id, check_id, ..
+                }
+                | AmendmentOperation::RemoveTaskVerification { task_id, check_id } => {
+                    affected_tasks.insert(task_id.clone());
+                    affected_checks.insert(check_id.clone());
+                    affected_fields
+                        .insert(format!("tasks.{task_id}.verification_checks.{check_id}"));
+                }
+                AmendmentOperation::AddGlobalVerification { verification } => {
+                    affected_checks.insert(verification.id.clone());
+                    affected_fields.insert(format!("verification_plan.{}", verification.id));
+                }
+                AmendmentOperation::UpdateGlobalVerification { check_id, .. }
+                | AmendmentOperation::RemoveGlobalVerification { check_id } => {
+                    affected_checks.insert(check_id.clone());
+                    affected_fields.insert(format!("verification_plan.{check_id}"));
+                }
+                AmendmentOperation::ReplaceCommitGate { task_id, .. }
+                | AmendmentOperation::RemoveCommitGate { task_id } => {
+                    affected_tasks.insert(task_id.clone());
+                    affected_fields.insert(format!("tasks.{task_id}.commit_gate"));
+                }
                 AmendmentOperation::ReplaceSummary { .. } => {
                     affected_fields.insert("summary".to_owned());
                 }
@@ -5228,21 +5364,19 @@ impl Plan {
                 AmendmentOperation::RecordProtectedDecision { .. } => {
                     affected_fields.insert("decisions".to_owned());
                 }
-                AmendmentOperation::ReplaceTaskOrder { task_order } => {
-                    let supplied = task_order.iter().collect::<BTreeSet<_>>();
-                    let expected = self.tasks.iter().map(Task::id).collect::<BTreeSet<_>>();
-                    if supplied != expected || task_order.len() != self.tasks.len() {
-                        return Err(DomainError::new(
-                            DomainErrorKind::InvariantViolation,
-                            "Replacement task order must contain every task exactly once",
-                        ));
-                    }
+                AmendmentOperation::ReplaceTaskOrder { .. } => {
                     affected_fields.insert("task_order".to_owned());
                 }
             }
         }
         if classification == AmendmentClassification::Material {
             self.collect_material_amendment_impact(
+                &mut affected_fields,
+                &mut affected_tasks,
+                &mut affected_checks,
+                &mut stale_evidence,
+            );
+            preview.collect_material_amendment_impact(
                 &mut affected_fields,
                 &mut affected_tasks,
                 &mut affected_checks,
@@ -5369,8 +5503,8 @@ impl Plan {
                 reason,
             } => {
                 let entry = FileMapEntry::new(path, change, reason, task_id.clone());
-                self.task_mut(&task_id)?.add_amended_file(entry.clone())?;
-                self.approach.file_map.push(entry);
+                self.task_mut(&task_id)?.add_amended_file(entry)?;
+                self.rebuild_authored_file_map();
             }
             AmendmentOperation::ReplaceTaskVerification {
                 task_id,
@@ -5388,6 +5522,176 @@ impl Plan {
             )?,
             AmendmentOperation::AddImplementationNote { task_id, note } => {
                 self.task_mut(&task_id)?.add_implementation_note(note)?;
+            }
+            AmendmentOperation::AddTask { task } => {
+                let task_id = task.id.clone().ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "Amended task requires an explicit identifier",
+                    )
+                })?;
+                if self.task(&task_id).is_some() {
+                    return Err(DomainError::new(
+                        DomainErrorKind::DuplicateTask,
+                        format!("Task {task_id} already exists"),
+                    ));
+                }
+                let mut task = Task::from_draft(&task_id, task)?;
+                task.mark_ready()?;
+                self.task_order.push(task_id);
+                self.tasks.push(task);
+                self.rebuild_authored_file_map();
+            }
+            AmendmentOperation::UpdateTaskDefinition {
+                task_id,
+                title,
+                steps,
+            } => self
+                .task_mut(&task_id)?
+                .replace_amended_definition(title, steps)?,
+            AmendmentOperation::RemoveTask { task_id } => {
+                let index = self
+                    .tasks
+                    .iter()
+                    .position(|task| task.id() == &task_id)
+                    .ok_or_else(|| {
+                        DomainError::new(
+                            DomainErrorKind::TaskNotFound,
+                            format!("Task {task_id} does not exist"),
+                        )
+                    })?;
+                self.tasks.remove(index);
+                self.task_order.retain(|candidate| candidate != &task_id);
+                self.rebuild_authored_file_map();
+                if self.extensions.contains_key(WORKSPACE_EXTENSION_KEY) {
+                    let mut workspace = self.workspace_state()?;
+                    workspace.remove_task_baseline(&task_id);
+                    self.store_workspace_state(&workspace)?;
+                }
+            }
+            AmendmentOperation::ReplaceTaskDependencies {
+                task_id,
+                depends_on,
+            } => self
+                .task_mut(&task_id)?
+                .replace_amended_dependencies(depends_on)?,
+            AmendmentOperation::AddCriterion { task_id, criterion } => {
+                let expected = self
+                    .task(&task_id)
+                    .ok_or_else(|| {
+                        DomainError::new(
+                            DomainErrorKind::TaskNotFound,
+                            format!("Task {task_id} does not exist"),
+                        )
+                    })?
+                    .next_criterion_id()?;
+                if criterion.id.as_ref() != Some(&expected) {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Expected criterion ID {expected}"),
+                    ));
+                }
+                self.task_mut(&task_id)?
+                    .add_amended_criterion(AcceptanceCriterion::new(
+                        expected,
+                        criterion.description,
+                    ))?;
+            }
+            AmendmentOperation::UpdateCriterion {
+                task_id,
+                criterion_id,
+                description,
+            } => self
+                .task_mut(&task_id)?
+                .update_amended_criterion(&criterion_id, description)?,
+            AmendmentOperation::RemoveCriterion {
+                task_id,
+                criterion_id,
+            } => self
+                .task_mut(&task_id)?
+                .remove_amended_criterion(&criterion_id)?,
+            AmendmentOperation::AddTaskVerification {
+                task_id,
+                verification,
+            } => self
+                .task_mut(&task_id)?
+                .add_amended_verification(verification.into_check())?,
+            AmendmentOperation::UpdateTaskVerification {
+                task_id,
+                check_id,
+                verification,
+            } => {
+                if verification.id != check_id {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "Task verification update cannot change its stable identifier",
+                    ));
+                }
+                self.task_mut(&task_id)?.replace_amended_verification(
+                    &check_id,
+                    verification.command,
+                    verification.cwd,
+                    verification.expected_exit_code,
+                    verification.required,
+                )?;
+            }
+            AmendmentOperation::RemoveTaskVerification { task_id, check_id } => self
+                .task_mut(&task_id)?
+                .remove_amended_verification(&check_id)?,
+            AmendmentOperation::AddGlobalVerification { verification } => {
+                self.add_global_verification_unversioned(verification.into_check())?;
+            }
+            AmendmentOperation::UpdateGlobalVerification {
+                check_id,
+                verification,
+            } => {
+                if verification.id != check_id {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "Global verification update cannot change its stable identifier",
+                    ));
+                }
+                self.global_verification
+                    .iter_mut()
+                    .find(|check| check.id() == &check_id)
+                    .ok_or_else(|| {
+                        DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            format!("Global check {check_id} does not exist"),
+                        )
+                    })?
+                    .replace_definition(
+                        verification.command,
+                        verification.cwd,
+                        verification.expected_exit_code,
+                        verification.required,
+                    )?;
+            }
+            AmendmentOperation::RemoveGlobalVerification { check_id } => {
+                let index = self
+                    .global_verification
+                    .iter()
+                    .position(|check| check.id() == &check_id)
+                    .ok_or_else(|| {
+                        DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            format!("Global check {check_id} does not exist"),
+                        )
+                    })?;
+                self.global_verification.remove(index);
+            }
+            AmendmentOperation::ReplaceCommitGate {
+                task_id,
+                commit_gate,
+            } => self
+                .task_mut(&task_id)?
+                .replace_amended_commit_gate(Some(CommitGate::new(
+                    commit_gate.required,
+                    commit_gate.planned_message,
+                    commit_gate.scope,
+                )))?,
+            AmendmentOperation::RemoveCommitGate { task_id } => {
+                self.task_mut(&task_id)?.replace_amended_commit_gate(None)?;
             }
             AmendmentOperation::ReplaceSummary { summary } => self.summary = summary,
             AmendmentOperation::ReplaceScope {
@@ -5423,6 +5727,7 @@ impl Plan {
             )),
             AmendmentOperation::ReplaceTaskOrder { task_order } => {
                 self.task_order = task_order;
+                self.rebuild_authored_file_map();
             }
         }
         Ok(())
@@ -5653,6 +5958,21 @@ fn rework_task_number(task_id: &TaskId) -> Option<u64> {
         .as_str()
         .strip_prefix('R')
         .and_then(|number| number.parse().ok())
+}
+
+fn increment_task_id(task_id: &TaskId) -> Result<TaskId, DomainError> {
+    let number = task_id
+        .as_str()
+        .strip_prefix('T')
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Task identifier overflowed",
+            )
+        })?;
+    TaskId::parse(format!("T{number}"))
 }
 
 fn context_from_input(input: DraftContextInput) -> ContextReference {

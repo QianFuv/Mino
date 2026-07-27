@@ -541,7 +541,7 @@ impl CommitGate {
             ));
         }
         if self.planned_message.contains(['\r', '\n'])
-            || self.scope.iter().any(|path| path.trim().is_empty())
+            || self.scope.iter().any(|path| !is_safe_repository_path(path))
         {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
@@ -1362,6 +1362,145 @@ impl Task {
             .replace_definition(command, cwd, expected_exit_code, required)
     }
 
+    pub(crate) fn replace_amended_definition(
+        &mut self,
+        title: String,
+        steps: Vec<String>,
+    ) -> Result<(), DomainError> {
+        if self.status == TaskStatus::Draft
+            || title.trim().is_empty()
+            || steps.iter().any(|step| step.trim().is_empty())
+        {
+            return Err(self.invalid_transition("replace an amended task definition"));
+        }
+        self.title = title;
+        self.steps = steps;
+        Ok(())
+    }
+
+    pub(crate) fn replace_amended_dependencies(
+        &mut self,
+        depends_on: Vec<TaskId>,
+    ) -> Result<(), DomainError> {
+        if self.status == TaskStatus::Draft
+            || depends_on.iter().collect::<BTreeSet<_>>().len() != depends_on.len()
+        {
+            return Err(self.invalid_transition("replace amended dependencies"));
+        }
+        self.depends_on = depends_on;
+        Ok(())
+    }
+
+    pub(crate) fn add_amended_criterion(
+        &mut self,
+        criterion: AcceptanceCriterion,
+    ) -> Result<(), DomainError> {
+        if self.status == TaskStatus::Draft
+            || criterion.description.trim().is_empty()
+            || self
+                .acceptance_criteria
+                .iter()
+                .any(|current| current.id == criterion.id)
+        {
+            return Err(self.invalid_transition("add an amended acceptance criterion"));
+        }
+        self.acceptance_criteria.push(criterion);
+        Ok(())
+    }
+
+    pub(crate) fn update_amended_criterion(
+        &mut self,
+        criterion_id: &CriterionId,
+        description: String,
+    ) -> Result<(), DomainError> {
+        if self.status == TaskStatus::Draft || description.trim().is_empty() {
+            return Err(self.invalid_transition("update an amended acceptance criterion"));
+        }
+        self.acceptance_criteria
+            .iter_mut()
+            .find(|criterion| criterion.id() == criterion_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no criterion {criterion_id}", self.id),
+                )
+            })?
+            .description = description;
+        Ok(())
+    }
+
+    pub(crate) fn remove_amended_criterion(
+        &mut self,
+        criterion_id: &CriterionId,
+    ) -> Result<(), DomainError> {
+        if self.status == TaskStatus::Draft {
+            return Err(self.invalid_transition("remove an amended acceptance criterion"));
+        }
+        let index = self
+            .acceptance_criteria
+            .iter()
+            .position(|criterion| criterion.id() == criterion_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no criterion {criterion_id}", self.id),
+                )
+            })?;
+        self.acceptance_criteria.remove(index);
+        Ok(())
+    }
+
+    pub(crate) fn add_amended_verification(
+        &mut self,
+        check: VerificationCheck,
+    ) -> Result<(), DomainError> {
+        if self.status == TaskStatus::Draft
+            || check.command.is_empty()
+            || check.command.iter().any(|part| part.trim().is_empty())
+            || check.cwd.trim().is_empty()
+            || self
+                .verification_checks
+                .iter()
+                .any(|current| current.id == check.id)
+        {
+            return Err(self.invalid_transition("add an amended verification check"));
+        }
+        self.verification_checks.push(check);
+        Ok(())
+    }
+
+    pub(crate) fn remove_amended_verification(
+        &mut self,
+        check_id: &CheckId,
+    ) -> Result<(), DomainError> {
+        if self.status == TaskStatus::Draft {
+            return Err(self.invalid_transition("remove an amended verification check"));
+        }
+        let index = self
+            .verification_checks
+            .iter()
+            .position(|check| check.id() == check_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no check {check_id}", self.id),
+                )
+            })?;
+        self.verification_checks.remove(index);
+        Ok(())
+    }
+
+    pub(crate) fn replace_amended_commit_gate(
+        &mut self,
+        commit_gate: Option<CommitGate>,
+    ) -> Result<(), DomainError> {
+        if self.status == TaskStatus::Draft {
+            return Err(self.invalid_transition("replace an amended commit gate"));
+        }
+        self.commit_gate = commit_gate;
+        Ok(())
+    }
+
     pub(crate) fn add_implementation_note(&mut self, note: String) -> Result<(), DomainError> {
         if self.status == TaskStatus::Draft {
             return Err(self.invalid_transition("record an implementation note"));
@@ -1596,7 +1735,7 @@ impl Task {
         if file_paths.len() != self.file_map.len()
             || self.file_map.iter().any(|entry| {
                 entry.task_id != self.id
-                    || entry.path.trim().is_empty()
+                    || !is_safe_repository_path(&entry.path)
                     || entry.reason.trim().is_empty()
             })
         {
@@ -1610,7 +1749,13 @@ impl Task {
             .iter()
             .map(|criterion| &criterion.id)
             .collect::<BTreeSet<_>>();
-        if criterion_ids.len() != self.acceptance_criteria.len() {
+        let criterion_prefix = format!("{}-A", self.id);
+        if criterion_ids.len() != self.acceptance_criteria.len()
+            || self
+                .acceptance_criteria
+                .iter()
+                .any(|criterion| !criterion.id.as_str().starts_with(&criterion_prefix))
+        {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
                 format!("Task {} has duplicate criterion identifiers", self.id),

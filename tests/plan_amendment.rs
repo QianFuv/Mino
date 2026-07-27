@@ -741,6 +741,419 @@ fn material_amendment_cannot_be_lowered_or_applied_without_approval() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
+fn material_patch_adds_a_complete_migration_execution_graph() {
+    let mut plan = approved_plan("material-graph-add", false);
+    start_and_satisfy_first_task(&mut plan);
+    let graph_patch = patch(&json!([
+        {
+            "operation": "add-task",
+            "task": {
+                "id": "T2",
+                "title": "Create the compatibility migration",
+                "depends_on": ["T1"],
+                "steps": ["Create the migration"],
+                "files": [{
+                    "path": "migrations/v2.rs",
+                    "change": "Create",
+                    "reason": "Own the approved migration"
+                }],
+                "acceptance_criteria": [{
+                    "id": "T2-A1",
+                    "description": "Existing callers can migrate"
+                }],
+                "verification": [{
+                    "id": "T2-V1",
+                    "command": ["cargo", "test", "migration"],
+                    "cwd": ".",
+                    "expected_exit_code": 0,
+                    "required": true
+                }],
+                "commit_gate": {
+                    "required": true,
+                    "planned_message": "feat(migration): add compatibility path",
+                    "scope": ["migrations/v2.rs"]
+                }
+            }
+        },
+        {
+            "operation": "update-task-definition",
+            "task_id": "T2",
+            "title": "Implement the approved compatibility migration",
+            "steps": ["Create the migration", "Document the compatibility boundary"]
+        },
+        {
+            "operation": "replace-task-dependencies",
+            "task_id": "T2",
+            "depends_on": ["T1"]
+        },
+        {
+            "operation": "update-criterion",
+            "task_id": "T2",
+            "criterion_id": "T2-A1",
+            "description": "Existing callers retain a documented migration path"
+        },
+        {
+            "operation": "add-criterion",
+            "task_id": "T2",
+            "criterion": {
+                "id": "T2-A2",
+                "description": "The public compatibility promise is verified"
+            }
+        },
+        {
+            "operation": "update-task-verification",
+            "task_id": "T2",
+            "check_id": "T2-V1",
+            "verification": {
+                "id": "T2-V1",
+                "command": ["cargo", "test", "migration", "--all-features"],
+                "cwd": ".",
+                "expected_exit_code": 0,
+                "required": true
+            }
+        },
+        {
+            "operation": "add-task-verification",
+            "task_id": "T2",
+            "verification": {
+                "id": "T2-V2",
+                "command": ["cargo", "test", "compatibility"],
+                "cwd": ".",
+                "expected_exit_code": 0,
+                "required": true
+            }
+        },
+        {
+            "operation": "add-global-verification",
+            "verification": {
+                "id": "GLOBAL-INTEGRATION",
+                "command": ["cargo", "test", "--all-features"],
+                "cwd": ".",
+                "expected_exit_code": 0,
+                "required": true
+            }
+        },
+        {
+            "operation": "replace-commit-gate",
+            "task_id": "T2",
+            "commit_gate": {
+                "required": true,
+                "planned_message": "feat(migration): implement compatibility path",
+                "scope": ["migrations/v2.rs"]
+            }
+        },
+        {
+            "operation": "replace-task-order",
+            "task_order": ["T1", "T2"]
+        }
+    ]));
+    let before = state_hash(&plan);
+    plan.propose_amendment(
+        "Add the approved migration graph".to_owned(),
+        graph_patch,
+        None,
+        before,
+        "codex".to_owned(),
+        timestamp(12),
+    )
+    .expect("complete Material graph should propose");
+    let amendment = plan.amendment("C1").expect("proposal should exist");
+    assert_eq!(
+        amendment.minimum_classification(),
+        AmendmentClassification::Material
+    );
+    assert_eq!(
+        amendment.impact().affected_tasks(),
+        [task_id("T1"), task_id("T2")]
+    );
+    assert_eq!(
+        amendment.impact().affected_checks(),
+        [
+            check_id("GLOBAL-INTEGRATION"),
+            check_id("GLOBAL-V1"),
+            check_id("T1-V1"),
+            check_id("T2-V1"),
+            check_id("T2-V2"),
+        ]
+    );
+    assert_eq!(
+        amendment.impact().stale_evidence(),
+        [evidence_id(1), evidence_id(2)]
+    );
+    plan.approve_amendment(
+        "C1",
+        "user".to_owned(),
+        "chat:material-graph-approved".to_owned(),
+        timestamp(13),
+    )
+    .expect("Material graph should approve");
+    plan.apply_amendment("C1", timestamp(14))
+        .expect("Material graph should apply atomically");
+
+    assert_eq!(plan.status(), PlanStatus::Ready);
+    assert!(!plan.has_plan_approval());
+    assert_eq!(plan.task_order(), [task_id("T1"), task_id("T2")]);
+    let migration = plan
+        .task(&task_id("T2"))
+        .expect("migration task should exist");
+    assert_eq!(migration.status(), TaskStatus::Ready);
+    assert_eq!(
+        migration.title(),
+        "Implement the approved compatibility migration"
+    );
+    assert_eq!(migration.acceptance_criteria().len(), 2);
+    assert_eq!(migration.verification_checks().len(), 2);
+    assert_eq!(
+        migration
+            .commit_gate()
+            .expect("migration gate should exist")
+            .planned_message(),
+        "feat(migration): implement compatibility path"
+    );
+    assert!(
+        plan.global_verification()
+            .iter()
+            .any(|check| check.id() == &check_id("GLOBAL-INTEGRATION"))
+    );
+    assert!(plan.is_evidence_stale(&evidence_id(1)));
+    assert!(plan.is_evidence_stale(&evidence_id(2)));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn material_patch_removes_graph_nodes_without_reusing_task_ids() {
+    let mut plan = approved_plan("material-graph-remove", true);
+    let graph_patch = patch(&json!([
+        {
+            "operation": "add-criterion",
+            "task_id": "T1",
+            "criterion": {
+                "id": "T1-A2",
+                "description": "The replacement criterion remains observable"
+            }
+        },
+        {
+            "operation": "remove-criterion",
+            "task_id": "T1",
+            "criterion_id": "T1-A1"
+        },
+        {
+            "operation": "add-task-verification",
+            "task_id": "T1",
+            "verification": {
+                "id": "T1-V2",
+                "command": ["cargo", "test", "replacement"],
+                "cwd": ".",
+                "expected_exit_code": 0,
+                "required": true
+            }
+        },
+        {
+            "operation": "remove-task-verification",
+            "task_id": "T1",
+            "check_id": "T1-V1"
+        },
+        {
+            "operation": "add-global-verification",
+            "verification": {
+                "id": "GLOBAL-V2",
+                "command": ["cargo", "test", "replacement-global"],
+                "cwd": ".",
+                "expected_exit_code": 0,
+                "required": true
+            }
+        },
+        {
+            "operation": "update-global-verification",
+            "check_id": "GLOBAL-V2",
+            "verification": {
+                "id": "GLOBAL-V2",
+                "command": ["cargo", "test", "replacement-global", "--all-features"],
+                "cwd": ".",
+                "expected_exit_code": 0,
+                "required": true
+            }
+        },
+        {
+            "operation": "remove-global-verification",
+            "check_id": "GLOBAL-V1"
+        },
+        {
+            "operation": "remove-commit-gate",
+            "task_id": "T1"
+        },
+        {
+            "operation": "remove-task",
+            "task_id": "T2"
+        }
+    ]));
+    plan.propose_amendment(
+        "Replace and remove obsolete graph nodes".to_owned(),
+        graph_patch,
+        None,
+        state_hash(&plan),
+        "codex".to_owned(),
+        timestamp(8),
+    )
+    .expect("graph removal should propose");
+    plan.approve_amendment(
+        "C1",
+        "user".to_owned(),
+        "chat:graph-removal-approved".to_owned(),
+        timestamp(9),
+    )
+    .expect("graph removal should approve");
+    plan.apply_amendment("C1", timestamp(10))
+        .expect("valid graph removal should apply");
+
+    assert_eq!(plan.task_order(), [task_id("T1")]);
+    assert!(plan.task(&task_id("T2")).is_none());
+    let task = plan
+        .task(&task_id("T1"))
+        .expect("retained task should exist");
+    assert_eq!(task.acceptance_criteria()[0].id(), &criterion_id("T1-A2"));
+    assert_eq!(task.verification_checks()[0].id(), &check_id("T1-V2"));
+    assert!(task.commit_gate().is_none());
+    assert_eq!(plan.global_verification()[0].id(), &check_id("GLOBAL-V2"));
+    assert_eq!(
+        plan.global_verification()[0].command(),
+        ["cargo", "test", "replacement-global", "--all-features"]
+    );
+    assert!(
+        plan.approach()
+            .file_map()
+            .iter()
+            .all(|entry| entry.task_id() != &task_id("T2"))
+    );
+    assert_eq!(
+        plan.next_task_id().expect("next task ID should allocate"),
+        task_id("T3")
+    );
+}
+
+#[test]
+fn invalid_material_graph_apply_is_atomic_and_strictly_typed() {
+    let mut plan = approved_plan("material-graph-atomic", false);
+    let invalid = patch(&json!([{
+        "operation": "remove-criterion",
+        "task_id": "T1",
+        "criterion_id": "T1-A1"
+    }]));
+    assert!(
+        plan.propose_amendment(
+            "Remove the only criterion".to_owned(),
+            invalid.clone(),
+            Some(AmendmentClassification::Minor),
+            state_hash(&plan),
+            "codex".to_owned(),
+            timestamp(8),
+        )
+        .is_err()
+    );
+    plan.propose_amendment(
+        "Remove the only criterion".to_owned(),
+        invalid,
+        None,
+        state_hash(&plan),
+        "codex".to_owned(),
+        timestamp(9),
+    )
+    .expect("structurally typed graph proposal should record");
+    plan.approve_amendment(
+        "C1",
+        "user".to_owned(),
+        "chat:invalid-graph-approved".to_owned(),
+        timestamp(10),
+    )
+    .expect("invalid final graph may still receive approval");
+    let before_apply = canonical_json_bytes(&plan).expect("plan should canonicalize");
+    assert!(plan.apply_amendment("C1", timestamp(11)).is_err());
+    assert_eq!(
+        canonical_json_bytes(&plan).expect("plan should canonicalize"),
+        before_apply
+    );
+
+    assert!(
+        serde_json::from_value::<AmendmentPatch>(json!({
+            "operations": [{
+                "operation": "add-global-verification",
+                "verification": {
+                    "id": "GLOBAL-V2",
+                    "command": ["cargo", "test"],
+                    "cwd": ".",
+                    "required": true,
+                    "unexpected": true
+                }
+            }]
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn material_graph_rejects_duplicate_checks_and_dependency_cycles_atomically() {
+    let mut duplicate = approved_plan("material-duplicate-check", false);
+    duplicate
+        .propose_amendment(
+            "Introduce a duplicate check".to_owned(),
+            patch(&json!([{
+                "operation": "add-global-verification",
+                "verification": {
+                    "id": "T1-V1",
+                    "command": ["cargo", "test"],
+                    "cwd": ".",
+                    "expected_exit_code": 0,
+                    "required": true
+                }
+            }])),
+            None,
+            state_hash(&duplicate),
+            "codex".to_owned(),
+            timestamp(8),
+        )
+        .expect("typed duplicate proposal should record before final graph validation");
+    duplicate
+        .approve_amendment(
+            "C1",
+            "user".to_owned(),
+            "chat:duplicate-check-approved".to_owned(),
+            timestamp(9),
+        )
+        .expect("duplicate proposal should approve");
+    let duplicate_before = canonical_json_bytes(&duplicate).expect("plan should canonicalize");
+    assert!(duplicate.apply_amendment("C1", timestamp(10)).is_err());
+    assert_eq!(canonical_json_bytes(&duplicate).unwrap(), duplicate_before);
+
+    let mut cycle = approved_plan("material-dependency-cycle", true);
+    cycle
+        .propose_amendment(
+            "Introduce a dependency cycle".to_owned(),
+            patch(&json!([{
+                "operation": "replace-task-dependencies",
+                "task_id": "T1",
+                "depends_on": ["T2"]
+            }])),
+            None,
+            state_hash(&cycle),
+            "codex".to_owned(),
+            timestamp(8),
+        )
+        .expect("typed dependency proposal should record");
+    cycle
+        .approve_amendment(
+            "C1",
+            "user".to_owned(),
+            "chat:dependency-cycle-approved".to_owned(),
+            timestamp(9),
+        )
+        .expect("dependency proposal should approve");
+    let cycle_before = canonical_json_bytes(&cycle).expect("plan should canonicalize");
+    assert!(cycle.apply_amendment("C1", timestamp(10)).is_err());
+    assert_eq!(canonical_json_bytes(&cycle).unwrap(), cycle_before);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
 fn material_apply_is_atomic_and_supersedes_review_only_after_success() {
     let mut plan = approved_plan("material-rollback", true);
     let invalid_order = patch(&json!([{

@@ -6,7 +6,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::task::is_safe_repository_path;
-use super::{CheckId, DomainError, DomainErrorKind, EvidenceId, FileChange, TaskId, Timestamp};
+use super::{
+    CheckId, CriterionId, DomainError, DomainErrorKind, DraftCommitGateInput, DraftCriterionInput,
+    DraftTaskInput, DraftVerificationInput, EvidenceId, FileChange, Task, TaskId, Timestamp,
+};
 
 /// Minimum protection class required by an amendment operation.
 #[derive(
@@ -129,6 +132,107 @@ pub enum AmendmentOperation {
         /// Non-empty implementation note.
         note: String,
     },
+    /// Adds one complete task to the protected execution graph.
+    AddTask {
+        /// Complete authored task with an explicit monotonic identifier.
+        task: DraftTaskInput,
+    },
+    /// Replaces one task's title and ordered implementation steps.
+    UpdateTaskDefinition {
+        /// Existing task to update.
+        task_id: TaskId,
+        /// Complete replacement title.
+        title: String,
+        /// Complete replacement ordered steps.
+        steps: Vec<String>,
+    },
+    /// Removes one task and its current File Map responsibilities.
+    RemoveTask {
+        /// Existing task to remove.
+        task_id: TaskId,
+    },
+    /// Replaces one task's complete dependency list.
+    ReplaceTaskDependencies {
+        /// Existing task to update.
+        task_id: TaskId,
+        /// Complete replacement dependency list.
+        depends_on: Vec<TaskId>,
+    },
+    /// Adds one explicit acceptance criterion to a task.
+    AddCriterion {
+        /// Existing task to update.
+        task_id: TaskId,
+        /// Criterion with an explicit next identifier.
+        criterion: DraftCriterionInput,
+    },
+    /// Replaces one acceptance criterion description.
+    UpdateCriterion {
+        /// Existing task to update.
+        task_id: TaskId,
+        /// Existing stable criterion identifier.
+        criterion_id: CriterionId,
+        /// Complete replacement description.
+        description: String,
+    },
+    /// Removes one acceptance criterion.
+    RemoveCriterion {
+        /// Existing task to update.
+        task_id: TaskId,
+        /// Existing stable criterion identifier.
+        criterion_id: CriterionId,
+    },
+    /// Adds one task-scoped verification check.
+    AddTaskVerification {
+        /// Existing task to update.
+        task_id: TaskId,
+        /// Complete pending verification definition.
+        verification: DraftVerificationInput,
+    },
+    /// Replaces one task-scoped verification check.
+    UpdateTaskVerification {
+        /// Existing task to update.
+        task_id: TaskId,
+        /// Existing stable check identifier.
+        check_id: CheckId,
+        /// Complete replacement definition with the same identifier.
+        verification: DraftVerificationInput,
+    },
+    /// Removes one task-scoped verification check.
+    RemoveTaskVerification {
+        /// Existing task to update.
+        task_id: TaskId,
+        /// Existing stable check identifier.
+        check_id: CheckId,
+    },
+    /// Adds one global verification check.
+    AddGlobalVerification {
+        /// Complete pending verification definition.
+        verification: DraftVerificationInput,
+    },
+    /// Replaces one global verification check.
+    UpdateGlobalVerification {
+        /// Existing stable check identifier.
+        check_id: CheckId,
+        /// Complete replacement definition with the same identifier.
+        verification: DraftVerificationInput,
+    },
+    /// Removes one global verification check.
+    RemoveGlobalVerification {
+        /// Existing stable check identifier.
+        check_id: CheckId,
+    },
+    /// Replaces one task's complete commit gate.
+    ReplaceCommitGate {
+        /// Existing task to update.
+        task_id: TaskId,
+        /// Complete replacement commit gate.
+        commit_gate: DraftCommitGateInput,
+    },
+    /// Removes one task's commit gate.
+    RemoveCommitGate {
+        /// Existing task to update.
+        task_id: TaskId,
+    },
     /// Replaces the plan summary and therefore its approved outcome description.
     ReplaceSummary {
         /// Complete replacement summary.
@@ -198,7 +302,22 @@ impl AmendmentOperation {
             | Self::ReplaceInterfaces { .. }
             | Self::RecordProtectedDecision { .. }
             | Self::ReplaceTaskOrder { .. }
-            | Self::ExpandTaskFile { .. } => AmendmentClassification::Material,
+            | Self::ExpandTaskFile { .. }
+            | Self::AddTask { .. }
+            | Self::UpdateTaskDefinition { .. }
+            | Self::RemoveTask { .. }
+            | Self::ReplaceTaskDependencies { .. }
+            | Self::AddCriterion { .. }
+            | Self::UpdateCriterion { .. }
+            | Self::RemoveCriterion { .. }
+            | Self::AddTaskVerification { .. }
+            | Self::UpdateTaskVerification { .. }
+            | Self::RemoveTaskVerification { .. }
+            | Self::AddGlobalVerification { .. }
+            | Self::UpdateGlobalVerification { .. }
+            | Self::RemoveGlobalVerification { .. }
+            | Self::ReplaceCommitGate { .. }
+            | Self::RemoveCommitGate { .. } => AmendmentClassification::Material,
         }
     }
 
@@ -221,6 +340,29 @@ impl AmendmentOperation {
                     && !cwd.trim().is_empty()
             }
             Self::AddImplementationNote { note, .. } => !note.trim().is_empty(),
+            Self::AddTask { task } => complete_task_input(task),
+            Self::UpdateTaskDefinition { title, steps, .. } => {
+                !title.trim().is_empty() && steps.iter().all(|step| !step.trim().is_empty())
+            }
+            Self::RemoveTask { .. }
+            | Self::RemoveCriterion { .. }
+            | Self::RemoveTaskVerification { .. }
+            | Self::RemoveGlobalVerification { .. }
+            | Self::RemoveCommitGate { .. } => true,
+            Self::ReplaceTaskDependencies { depends_on, .. } => {
+                depends_on.iter().collect::<BTreeSet<_>>().len() == depends_on.len()
+            }
+            Self::AddCriterion { criterion, .. } => {
+                criterion.id.is_some() && !criterion.description.trim().is_empty()
+            }
+            Self::UpdateCriterion { description, .. } => !description.trim().is_empty(),
+            Self::AddTaskVerification { verification, .. }
+            | Self::UpdateTaskVerification { verification, .. }
+            | Self::AddGlobalVerification { verification }
+            | Self::UpdateGlobalVerification { verification, .. } => {
+                complete_verification_input(verification)
+            }
+            Self::ReplaceCommitGate { commit_gate, .. } => complete_commit_gate_input(commit_gate),
             Self::ReplaceSummary { summary } => !summary.trim().is_empty(),
             Self::ReplaceScope {
                 goal,
@@ -843,6 +985,35 @@ fn minor_file_change_is_valid(kind: MinorFileKind, change: FileChange) -> bool {
 
 fn complete_text_list(values: &[String]) -> bool {
     !values.is_empty() && values.iter().all(|value| !value.trim().is_empty())
+}
+
+fn complete_task_input(input: &DraftTaskInput) -> bool {
+    let Some(task_id) = input.id.as_ref() else {
+        return false;
+    };
+    if input
+        .files
+        .iter()
+        .any(|file| !is_safe_repository_path(&file.path))
+    {
+        return false;
+    }
+    Task::from_draft(task_id, input.clone())
+        .and_then(|mut task| task.mark_ready())
+        .is_ok()
+}
+
+fn complete_verification_input(input: &DraftVerificationInput) -> bool {
+    !input.command.is_empty()
+        && input.command.iter().all(|part| !part.trim().is_empty())
+        && !input.cwd.trim().is_empty()
+}
+
+fn complete_commit_gate_input(input: &DraftCommitGateInput) -> bool {
+    !input.planned_message.trim().is_empty()
+        && !input.planned_message.contains(['\r', '\n'])
+        && !input.scope.is_empty()
+        && input.scope.iter().all(|path| is_safe_repository_path(path))
 }
 
 fn strictly_sorted<T: Ord>(values: &[T]) -> bool {

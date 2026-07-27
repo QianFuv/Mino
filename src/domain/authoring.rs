@@ -1,5 +1,6 @@
 //! Strict authored-plan inputs that exclude lifecycle and execution-only state.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -136,7 +137,7 @@ pub struct DraftEdgeCaseInput {
 }
 
 /// One authored file responsibility inside a task.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DraftFileInput {
     /// Project-relative path or narrow glob.
@@ -148,7 +149,7 @@ pub struct DraftFileInput {
 }
 
 /// One authored acceptance criterion.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DraftCriterionInput {
     /// Optional identifier that must match the next deterministic identifier.
@@ -159,7 +160,7 @@ pub struct DraftCriterionInput {
 }
 
 /// One authored deterministic verification command.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DraftVerificationInput {
     /// Stable check identifier.
@@ -192,7 +193,7 @@ impl DraftVerificationInput {
 }
 
 /// One authored task-level Git commit gate.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DraftCommitGateInput {
     /// Whether task completion requires a commit.
@@ -205,7 +206,7 @@ pub struct DraftCommitGateInput {
 }
 
 /// One task definition accepted before execution begins.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DraftTaskInput {
     /// Optional identifier that must match the next deterministic task ID.
