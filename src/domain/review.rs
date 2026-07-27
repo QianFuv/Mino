@@ -6,6 +6,19 @@ use serde::{Deserialize, Serialize};
 use super::amendment::change_number;
 use super::{DomainError, DomainErrorKind, ReviewClassification, ReviewStatus, TaskId, Timestamp};
 
+/// Explicit product decision for one protected Material review request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub enum MaterialReviewDisposition {
+    /// Accept the requested change for a protected Material amendment.
+    #[serde(rename = "Accept Change")]
+    AcceptChange,
+    /// Decline the requested change and continue reviewing the approved scope.
+    Decline,
+    /// Move the request to sourced, non-blocking follow-up work.
+    #[serde(rename = "Defer to Follow-Up")]
+    DeferToFollowUp,
+}
+
 /// One immutable review request plus its constrained processing status.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +37,16 @@ pub struct ReviewItem {
     approval_reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     superseded_by_change: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disposition: Option<MaterialReviewDisposition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disposition_actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disposition_reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disposition_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disposed_at: Option<Timestamp>,
 }
 
 impl ReviewItem {
@@ -155,6 +178,11 @@ impl ReviewItem {
             recorded_at,
             approval_reference,
             superseded_by_change: None,
+            disposition: None,
+            disposition_actor: None,
+            disposition_reference: None,
+            disposition_reason: None,
+            disposed_at: None,
         };
         item.validate()?;
         Ok(item)
@@ -226,6 +254,36 @@ impl ReviewItem {
         self.superseded_by_change.as_deref()
     }
 
+    /// Returns the explicit Material review decision when one was recorded.
+    #[must_use]
+    pub const fn disposition(&self) -> Option<MaterialReviewDisposition> {
+        self.disposition
+    }
+
+    /// Returns the actor who recorded the Material review decision.
+    #[must_use]
+    pub fn disposition_actor(&self) -> Option<&str> {
+        self.disposition_actor.as_deref()
+    }
+
+    /// Returns the auditable reference for the Material review decision.
+    #[must_use]
+    pub fn disposition_reference(&self) -> Option<&str> {
+        self.disposition_reference.as_deref()
+    }
+
+    /// Returns the reason supplied for the Material review decision.
+    #[must_use]
+    pub fn disposition_reason(&self) -> Option<&str> {
+        self.disposition_reason.as_deref()
+    }
+
+    /// Returns when the Material review decision was recorded.
+    #[must_use]
+    pub const fn disposed_at(&self) -> Option<&Timestamp> {
+        self.disposed_at.as_ref()
+    }
+
     pub(crate) fn begin_rework(&mut self) -> Result<(), DomainError> {
         if self.status != ReviewStatus::Open
             || !matches!(
@@ -276,9 +334,67 @@ impl ReviewItem {
         self.validate()
     }
 
+    pub(crate) fn dispose_material_change(
+        &mut self,
+        disposition: MaterialReviewDisposition,
+        actor: String,
+        reference: String,
+        reason: String,
+        disposed_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if self.classification != ReviewClassification::MaterialChange
+            || self.status != ReviewStatus::Blocked
+            || self.superseded_by_change.is_some()
+            || self.disposition.is_some()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!(
+                    "Review item {} cannot receive a Material disposition",
+                    self.id
+                ),
+            ));
+        }
+        self.disposition = Some(disposition);
+        self.disposition_actor = Some(actor);
+        self.disposition_reference = Some(reference);
+        self.disposition_reason = Some(reason);
+        self.disposed_at = Some(disposed_at);
+        self.status = match disposition {
+            MaterialReviewDisposition::AcceptChange => ReviewStatus::Blocked,
+            MaterialReviewDisposition::Decline => ReviewStatus::Resolved,
+            MaterialReviewDisposition::DeferToFollowUp => ReviewStatus::Deferred,
+        };
+        self.validate()
+    }
+
     pub(crate) fn validate(&self) -> Result<(), DomainError> {
         self.validate_fields()?;
-        let is_valid = match self.classification {
+        if self.classification != ReviewClassification::MaterialChange && self.disposition.is_some()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!(
+                    "Review item {} has an invalid Material disposition",
+                    self.id
+                ),
+            ));
+        }
+        if self.classification_state_is_valid() {
+            Ok(())
+        } else {
+            Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!(
+                    "Review item {} has inconsistent classification state",
+                    self.id
+                ),
+            ))
+        }
+    }
+
+    fn classification_state_is_valid(&self) -> bool {
+        match self.classification {
             ReviewClassification::AcceptanceDefect => {
                 self.linked_task.is_some()
                     && self.origin_task.is_none()
@@ -327,10 +443,30 @@ impl ReviewItem {
                     && self.origin_task.is_none()
                     && self.approval_reference.is_none()
                     && self.action == "Pause for a protected material amendment"
-                    && ((self.status == ReviewStatus::Blocked
-                        && self.superseded_by_change.is_none())
-                        || (self.status == ReviewStatus::Resolved
-                            && self.superseded_by_change.is_some()))
+                    && matches!(
+                        (
+                            self.disposition,
+                            self.status,
+                            self.superseded_by_change.as_ref(),
+                        ),
+                        (
+                            None | Some(MaterialReviewDisposition::AcceptChange),
+                            ReviewStatus::Blocked,
+                            None,
+                        ) | (
+                            None | Some(MaterialReviewDisposition::AcceptChange),
+                            ReviewStatus::Resolved,
+                            Some(_),
+                        ) | (
+                            Some(MaterialReviewDisposition::Decline),
+                            ReviewStatus::Resolved,
+                            None,
+                        ) | (
+                            Some(MaterialReviewDisposition::DeferToFollowUp),
+                            ReviewStatus::Deferred,
+                            None,
+                        )
+                    )
             }
             ReviewClassification::FollowUp => {
                 self.linked_task.is_none()
@@ -349,21 +485,23 @@ impl ReviewItem {
                     )
                     && self.status == ReviewStatus::Resolved
             }
-        };
-        if is_valid {
-            Ok(())
-        } else {
-            Err(DomainError::new(
-                DomainErrorKind::InvariantViolation,
-                format!(
-                    "Review item {} has inconsistent classification state",
-                    self.id
-                ),
-            ))
         }
     }
 
     fn validate_fields(&self) -> Result<(), DomainError> {
+        let disposition_fields = [
+            self.disposition_actor.as_deref(),
+            self.disposition_reference.as_deref(),
+            self.disposition_reason.as_deref(),
+        ];
+        let has_complete_disposition = self.disposition.is_some()
+            && disposition_fields
+                .iter()
+                .all(|value| value.is_some_and(|value| !value.trim().is_empty()))
+            && self.disposed_at.is_some();
+        let has_no_disposition = self.disposition.is_none()
+            && disposition_fields.iter().all(Option::is_none)
+            && self.disposed_at.is_none();
         if review_number(&self.id).is_none()
             || self.reviewer.trim().is_empty()
             || self.feedback.trim().is_empty()
@@ -376,6 +514,7 @@ impl ReviewItem {
                 .superseded_by_change
                 .as_deref()
                 .is_some_and(|change_id| change_number(change_id).is_none())
+            || !(has_complete_disposition || has_no_disposition)
         {
             Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,

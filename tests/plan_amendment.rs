@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use mino::domain::{
     AcceptanceCriterion, AmendmentClassification, AmendmentPatch, AmendmentStatus, Approval,
     CheckId, CheckStatus, CheckpointKind, CommitGate, CriterionId, CriterionStatus, EvidenceId,
-    FileChange, FileMapEntry, GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId,
-    PlanStatus, ReviewClassification, ReviewStatus, StandardSelection, Task, TaskId, TaskStatus,
-    Timestamp, VerificationCheck,
+    FileChange, FileMapEntry, GitFlowConsent, GitReadiness, MaterialReviewDisposition, Plan,
+    PlanDraftSeed, PlanId, PlanStatus, ReviewClassification, ReviewStatus, StandardSelection, Task,
+    TaskId, TaskStatus, Timestamp, VerificationCheck,
 };
 use mino::project::initialize;
 use mino::store::{canonical_json_bytes, sha256_digest};
@@ -740,6 +740,7 @@ fn material_amendment_cannot_be_lowered_or_applied_without_approval() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn material_apply_is_atomic_and_supersedes_review_only_after_success() {
     let mut plan = approved_plan("material-rollback", true);
     let invalid_order = patch(&json!([{
@@ -787,9 +788,17 @@ fn material_apply_is_atomic_and_supersedes_review_only_after_success() {
         .record_global_check_pass(&check_id("GLOBAL-V1"), evidence_id(4), timestamp(14))
         .expect("global check should pass");
     reviewed
+        .set_final_outcome(
+            "Approved implementation is verified".to_owned(),
+            "N/A".to_owned(),
+            Vec::new(),
+            timestamp(15),
+        )
+        .expect("Final Outcome should record");
+    reviewed
         .finish_execution(timestamp(15))
         .expect("plan should enter Review");
-    reviewed
+    let review_id = reviewed
         .record_review(
             "user".to_owned(),
             "The public contract must change".to_owned(),
@@ -798,6 +807,31 @@ fn material_apply_is_atomic_and_supersedes_review_only_after_success() {
             timestamp(16),
         )
         .expect("material review should record");
+    assert!(
+        reviewed
+            .propose_amendment(
+                "Apply the requested contract change".to_owned(),
+                patch(&json!([{
+                    "operation": "replace-interfaces",
+                    "interfaces": "Revised public interface contract"
+                }])),
+                Some(AmendmentClassification::Material),
+                state_hash(&reviewed),
+                "codex".to_owned(),
+                timestamp(17),
+            )
+            .is_err()
+    );
+    reviewed
+        .dispose_material_review(
+            &review_id,
+            MaterialReviewDisposition::AcceptChange,
+            "user".to_owned(),
+            "chat:accept-material-change".to_owned(),
+            "The requested contract change belongs in this plan".to_owned(),
+            timestamp(17),
+        )
+        .expect("accept-change disposition should record");
     reviewed
         .propose_amendment(
             "Apply the requested contract change".to_owned(),
@@ -826,6 +860,7 @@ fn material_apply_is_atomic_and_supersedes_review_only_after_success() {
     assert_eq!(review.status(), ReviewStatus::Resolved);
     assert_eq!(review.superseded_by_change(), Some("C1"));
     assert_eq!(reviewed.status(), PlanStatus::Ready);
+    assert!(!reviewed.final_outcome().is_complete());
     assert!(reviewed.is_evidence_stale(&evidence_id(3)));
     assert!(reviewed.is_evidence_stale(&evidence_id(4)));
 }

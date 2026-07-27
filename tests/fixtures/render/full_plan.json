@@ -154,6 +154,20 @@
     {
       "id": "REV-1",
       "reviewer": "reviewer",
+      "feedback": "Evaluate renderer plugin support separately",
+      "classification": "Material Change",
+      "action": "Pause for a protected material amendment",
+      "status": "Deferred",
+      "recorded_at": "2026-07-25T12:08:00Z",
+      "disposition": "Defer to Follow-Up",
+      "disposition_actor": "user",
+      "disposition_reference": "chat:defer-renderer-plugin",
+      "disposition_reason": "Plugin support is a separate objective",
+      "disposed_at": "2026-07-25T12:09:00Z"
+    },
+    {
+      "id": "REV-2",
+      "reviewer": "reviewer",
       "feedback": "Projection contract accepted",
       "classification": "Accepted",
       "action": "Record acceptance",
@@ -162,7 +176,10 @@
       "recorded_at": "2026-07-25T12:08:00Z"
     }
   ],
-  "follow_ups": ["Expose rendering through the CLI"],
+  "follow_ups": [
+    "Expose rendering through the CLI",
+    "Evaluate renderer plugin support separately"
+  ],
   "lineage": {
     "parent_plan_id": "2026-07-24-parent-render",
     "forked_from_revision": 3,
@@ -173,7 +190,16 @@
   "final_outcome": {
     "summary": "Renderer is ready for integration",
     "remaining_risk": "CLI wiring remains",
-    "follow_up_tasks": ["Add plan show command"]
+    "follow_up_tasks": [
+      "Add plan show command",
+      "Evaluate renderer plugin support separately"
+    ],
+    "follow_up_sources": [
+      {
+        "review_id": "REV-1",
+        "task": "Evaluate renderer plugin support separately"
+      }
+    ]
   },
   "extensions": {
     "vendor.example/renderer": {

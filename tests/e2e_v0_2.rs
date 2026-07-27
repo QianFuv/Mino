@@ -432,6 +432,22 @@ fn full_v0_2_cli_lifecycle_reaches_done_after_conflict_amendment_and_rework() {
         &mut request_number,
     )
     .0;
+    let outcome = parse_success(&run_mino(
+        project.root(),
+        &mutation_arguments(
+            &["plan", "outcome", "set"],
+            &plan_id,
+            revision,
+            next_request(&mut request_number),
+            vec![
+                "--summary".to_owned(),
+                "The initial reviewed implementation is verified".to_owned(),
+                "--remaining-risk".to_owned(),
+                "N/A".to_owned(),
+            ],
+        ),
+    ));
+    revision = result_revision(&outcome);
     let first_review = parse_success(&run_mino(
         project.root(),
         &mutation_arguments(
@@ -544,6 +560,22 @@ fn full_v0_2_cli_lifecycle_reaches_done_after_conflict_amendment_and_rework() {
         &mut request_number,
     )
     .0;
+    let outcome = parse_success(&run_mino(
+        project.root(),
+        &mutation_arguments(
+            &["plan", "outcome", "set"],
+            &plan_id,
+            revision,
+            next_request(&mut request_number),
+            vec![
+                "--summary".to_owned(),
+                "The reviewed correction is verified".to_owned(),
+                "--remaining-risk".to_owned(),
+                "N/A".to_owned(),
+            ],
+        ),
+    ));
+    revision = result_revision(&outcome);
     let second_review = parse_success(&run_mino(
         project.root(),
         &mutation_arguments(

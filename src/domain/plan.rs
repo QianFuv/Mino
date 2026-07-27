@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::WORKSPACE_EXTENSION_KEY;
 use super::execution::EXECUTION_EXTENSION_KEY;
+use super::review::review_number;
 use super::standards::STANDARDS_CONFLICT_EXTENSION_KEY;
 use super::{
     Amendment, AmendmentClassification, AmendmentImpact, AmendmentOperation, AmendmentPatch,
@@ -14,10 +15,10 @@ use super::{
     DeviationClassification, DomainError, DomainErrorKind, DraftContextInput, DraftCriterionInput,
     DraftDecisionInput, DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput,
     DraftScopeInput, DraftTaskInput, DraftTaskUpdateInput, DraftVerificationInput, EvidenceId,
-    ExecutionState, FileMapEntry, GitFlowConsent, Lineage, PlanArchive, PlanDraftSeed, PlanId,
-    PlanStatus, ProtocolVersion, ReviewClassification, ReviewItem, ReviewStatus, SchemaVersion,
-    StandardConflict, StandardsConflictState, Task, TaskId, TaskStatus, Timestamp,
-    VerificationCheck, WorkspaceFingerprint, WorkspaceProtocolState,
+    ExecutionState, FileMapEntry, GitFlowConsent, Lineage, MaterialReviewDisposition, PlanArchive,
+    PlanDraftSeed, PlanId, PlanStatus, ProtocolVersion, ReviewClassification, ReviewItem,
+    ReviewStatus, SchemaVersion, StandardConflict, StandardsConflictState, Task, TaskId,
+    TaskStatus, Timestamp, VerificationCheck, WorkspaceFingerprint, WorkspaceProtocolState,
 };
 
 /// Human and repository metadata associated with a plan.
@@ -486,6 +487,151 @@ pub struct FinalOutcome {
     summary: String,
     remaining_risk: String,
     follow_up_tasks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    follow_up_sources: Vec<OutcomeFollowUpSource>,
+}
+
+/// One Final Outcome follow-up linked to the review item that created it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OutcomeFollowUpSource {
+    review_id: String,
+    task: String,
+}
+
+impl FinalOutcome {
+    /// Returns the user-visible completion summary.
+    #[must_use]
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    /// Returns the explicit residual risk statement.
+    #[must_use]
+    pub fn remaining_risk(&self) -> &str {
+        &self.remaining_risk
+    }
+
+    /// Returns all explicit and review-sourced follow-up tasks.
+    #[must_use]
+    pub fn follow_up_tasks(&self) -> &[String] {
+        &self.follow_up_tasks
+    }
+
+    /// Returns review identifiers retained for sourced follow-up tasks.
+    #[must_use]
+    pub fn follow_up_sources(&self) -> &[OutcomeFollowUpSource] {
+        &self.follow_up_sources
+    }
+
+    /// Returns whether the required summary and residual risk are complete.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        !self.summary.trim().is_empty() && !self.remaining_risk.trim().is_empty()
+    }
+
+    fn set(
+        &mut self,
+        summary: String,
+        remaining_risk: String,
+        follow_up_tasks: Vec<String>,
+    ) -> Result<(), DomainError> {
+        if summary.trim().is_empty() || remaining_risk.trim().is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Final Outcome requires a summary and explicit remaining risk",
+            ));
+        }
+        if follow_up_tasks.iter().any(|task| task.trim().is_empty()) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Final Outcome follow-up tasks cannot be empty",
+            ));
+        }
+        let mut tasks = follow_up_tasks;
+        for source in &self.follow_up_sources {
+            if !tasks.contains(&source.task) {
+                tasks.push(source.task.clone());
+            }
+        }
+        self.summary = summary;
+        self.remaining_risk = remaining_risk;
+        self.follow_up_tasks = tasks;
+        Ok(())
+    }
+
+    fn add_review_follow_up(&mut self, review_id: &str, task: &str) -> Result<(), DomainError> {
+        if review_number(review_id).is_none() || task.trim().is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "A sourced Final Outcome follow-up requires a review ID and task",
+            ));
+        }
+        if !self
+            .follow_up_sources
+            .iter()
+            .any(|source| source.review_id == review_id)
+        {
+            self.follow_up_sources.push(OutcomeFollowUpSource {
+                review_id: review_id.to_owned(),
+                task: task.to_owned(),
+            });
+        }
+        if !self.follow_up_tasks.iter().any(|existing| existing == task) {
+            self.follow_up_tasks.push(task.to_owned());
+        }
+        Ok(())
+    }
+
+    fn invalidate(&mut self) {
+        self.summary.clear();
+        self.remaining_risk.clear();
+    }
+
+    fn validate(&self) -> Result<(), DomainError> {
+        if self.summary.trim().is_empty() != self.remaining_risk.trim().is_empty()
+            || self
+                .follow_up_tasks
+                .iter()
+                .any(|task| task.trim().is_empty())
+            || self.follow_up_sources.iter().any(|source| {
+                review_number(&source.review_id).is_none()
+                    || source.task.trim().is_empty()
+                    || !self.follow_up_tasks.contains(&source.task)
+            })
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Final Outcome fields are inconsistent",
+            ));
+        }
+        let mut source_ids = BTreeSet::new();
+        if self
+            .follow_up_sources
+            .iter()
+            .any(|source| !source_ids.insert(&source.review_id))
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Final Outcome review sources must be unique",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl OutcomeFollowUpSource {
+    /// Returns the review record that created this follow-up.
+    #[must_use]
+    pub fn review_id(&self) -> &str {
+        &self.review_id
+    }
+
+    /// Returns the sourced follow-up task description.
+    #[must_use]
+    pub fn task(&self) -> &str {
+        &self.task
+    }
 }
 
 /// The versioned source-of-truth aggregate for one Mino plan.
@@ -920,6 +1066,12 @@ impl Plan {
         &self.follow_ups
     }
 
+    /// Returns the user-visible final execution result and residual risk.
+    #[must_use]
+    pub const fn final_outcome(&self) -> &FinalOutcome {
+        &self.final_outcome
+    }
+
     /// Returns immutable fork provenance when this plan is an alternative.
     #[must_use]
     pub const fn lineage(&self) -> Option<&Lineage> {
@@ -1121,6 +1273,18 @@ impl Plan {
         {
             return Err(self.invalid_transition("propose a protected amendment"));
         }
+        if is_material_review
+            && !self.review_items.iter().any(|item| {
+                item.classification() == ReviewClassification::MaterialChange
+                    && item.status() == ReviewStatus::Blocked
+                    && item.disposition() == Some(MaterialReviewDisposition::AcceptChange)
+            })
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::ApprovalRequired,
+                "Material review feedback requires an explicit accept-change disposition",
+            ));
+        }
         let operation_minimum = patch.minimum_classification()?;
         let minimum_classification =
             self.contextual_amendment_minimum(patch.operations(), operation_minimum)?;
@@ -1291,6 +1455,7 @@ impl Plan {
                     check.reset_for_rework();
                 }
                 candidate.invalidate_plan_approval();
+                candidate.final_outcome.invalidate();
                 let mut execution = candidate.execution_state()?;
                 execution.reset_for_material_amendment();
                 candidate.store_execution_state(&execution)?;
@@ -3315,6 +3480,49 @@ impl Plan {
         Ok(())
     }
 
+    /// Records the required user-visible outcome after final verification passes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless execution has complete task, commit, and global
+    /// verification gates, or a legacy Review is being repaired.
+    pub fn set_final_outcome(
+        &mut self,
+        summary: String,
+        remaining_risk: String,
+        follow_up_tasks: Vec<String>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if !(matches!(self.status, PlanStatus::InProgress | PlanStatus::Review)
+            || self.status == PlanStatus::Blocked && self.resume_status == Some(PlanStatus::Review))
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Final Outcome can be set only after execution or during Review",
+            ));
+        }
+        if self.tasks.iter().any(|task| {
+            task.status() != TaskStatus::Done
+                || task
+                    .commit_gate()
+                    .is_some_and(|gate| gate.is_required() && !gate.is_satisfied())
+        }) || !self.global_verification_is_satisfied()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Final Outcome requires complete tasks, commit gates, and global verification",
+            ));
+        }
+        let mut candidate = self.clone();
+        candidate
+            .final_outcome
+            .set(summary, remaining_risk, follow_up_tasks)?;
+        candidate.record_revision(candidate.next_revision()?, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Moves an executed plan to Review when every task is Done and committed.
     ///
     /// # Errors
@@ -3349,6 +3557,12 @@ impl Plan {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
                 "Every required global verification check must pass with evidence before review",
+            ));
+        }
+        if !self.final_outcome.is_complete() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Final Outcome requires a summary and explicit remaining risk before review",
             ));
         }
         let next_revision = self.next_revision()?;
@@ -3442,6 +3656,10 @@ impl Plan {
             self.follow_ups.push(feedback_for_state.clone());
         }
         self.review_items.push(item);
+        if classification == ReviewClassification::FollowUp {
+            self.final_outcome
+                .add_review_follow_up(&review_id, &feedback_for_state)?;
+        }
         if classification == ReviewClassification::MaterialChange {
             self.resume_status = Some(PlanStatus::Review);
             self.status = PlanStatus::Blocked;
@@ -3450,6 +3668,54 @@ impl Plan {
         self.record_revision(next_revision, updated_at);
         self.validate_invariants()?;
         Ok(review_id)
+    }
+
+    /// Records the explicit product decision for one blocked Material review item.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan is blocked by the named undecided Material
+    /// review item and the actor, reference, and reason are complete.
+    pub fn dispose_material_review(
+        &mut self,
+        review_id: &str,
+        disposition: MaterialReviewDisposition,
+        actor: String,
+        reference: String,
+        reason: String,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if !self.is_blocked_for_material_review() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "The plan is not blocked by Material review feedback",
+            ));
+        }
+        let item_index = self.review_item_index(review_id)?;
+        let feedback = self.review_items[item_index].feedback().to_owned();
+        let mut candidate = self.clone();
+        candidate.review_items[item_index].dispose_material_change(
+            disposition,
+            actor,
+            reference,
+            reason,
+            updated_at.clone(),
+        )?;
+        if disposition != MaterialReviewDisposition::AcceptChange {
+            candidate.status = PlanStatus::Review;
+            candidate.resume_status = None;
+            candidate.blocker = None;
+        }
+        if disposition == MaterialReviewDisposition::DeferToFollowUp {
+            candidate.follow_ups.push(feedback.clone());
+            candidate
+                .final_outcome
+                .add_review_follow_up(review_id, &feedback)?;
+        }
+        candidate.record_revision(candidate.next_revision()?, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
     }
 
     /// Starts a recorded acceptance rerun or materializes a reserved rework task.
@@ -3526,6 +3792,7 @@ impl Plan {
         for check in &mut self.global_verification {
             check.reset_for_rework();
         }
+        self.final_outcome.invalidate();
         self.status = PlanStatus::InProgress;
         self.record_revision(next_revision, updated_at);
         self.validate_invariants()
@@ -3587,6 +3854,12 @@ impl Plan {
         updated_at: Timestamp,
     ) -> Result<(), DomainError> {
         self.require_status(PlanStatus::Review, "accept review")?;
+        if !self.final_outcome.is_complete() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Review acceptance requires a complete Final Outcome",
+            ));
+        }
         if self.review_items.iter().any(|item| {
             matches!(
                 item.status(),
@@ -3644,6 +3917,7 @@ impl Plan {
         self.validate_approval_state()?;
         self.validate_global_verification()?;
         self.validate_amendment_state()?;
+        self.final_outcome.validate()?;
         self.validate_review_state()?;
         self.validate_execution_state()?;
         let task_ids = self.tasks.iter().map(Task::id).collect::<BTreeSet<_>>();
@@ -4270,6 +4544,31 @@ impl Plan {
                 ));
             }
             self.validate_review_relationship(item, &mut reserved_tasks)?;
+        }
+        for source in self.final_outcome.follow_up_sources() {
+            let item = self.review_item(source.review_id()).ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!(
+                        "Final Outcome follow-up source {} does not exist",
+                        source.review_id()
+                    ),
+                )
+            })?;
+            let is_sourced_follow_up = (item.classification() == ReviewClassification::FollowUp
+                && item.status() == ReviewStatus::Deferred)
+                || (item.classification() == ReviewClassification::MaterialChange
+                    && item.status() == ReviewStatus::Deferred
+                    && item.disposition() == Some(MaterialReviewDisposition::DeferToFollowUp));
+            if !is_sourced_follow_up || item.feedback() != source.task() {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!(
+                        "Final Outcome follow-up source {} does not match its review item",
+                        source.review_id()
+                    ),
+                ));
+            }
         }
         if self.review_items.iter().any(|item| {
             item.classification() == ReviewClassification::MaterialChange

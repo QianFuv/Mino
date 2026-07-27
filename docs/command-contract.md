@@ -85,6 +85,7 @@
 | `mino plan finalize` | 是 | 校验完整 Draft，并转换为 Ready。 |
 | `mino plan review` | 否 | 返回绑定当前 revision 与状态哈希的审批摘要。 |
 | `mino plan approve` | 是，审批边界 | 记录显式计划批准，并记录 Approved 或 Disabled Git Flow consent。 |
+| `mino plan outcome set` | 是 | 在任务、commit gate 与全局检查完成后写入非空 summary、显式 remaining risk 和可选 follow-up；Review 产生的 follow-up 自动保留来源 `REV-n`。 |
 
 直接 authored 修改只允许发生在 Draft。没有持久化 ID 的列表使用 1-based 位置，并始终与 `--expect-revision` 一起校验；已有 Task、Criterion 或 Check ID 的实体使用稳定 ID。位置过期、目标缺失、依赖顺序被破坏或替换定义不完整时，状态、revision 和投影都保持不变。Ready 或 In Progress 计划必须使用类型化 amendment；任意 JSON path、未知字段和 execution state 字段都会被拒绝。Ready 计划发生 authored 变化后，其旧批准不再有效。
 
@@ -170,7 +171,7 @@ artifact path 必须留在项目内。修正证据会创建带 `supersedes` 的�
 | `mino exec rework` | 计划 | 仅在必需全局检查失败后，用 `--task` 和非空 `--reason` 重新打开一个 Done 任务，重置其验收、检查、commit gate、任务基线和全部全局检查状态，同时保留历史 evidence。 |
 | `mino exec block` | 计划 | 用非空且可恢复的原因阻塞 Ready 或 In Progress 计划。 |
 | `mino exec resume` | 计划 | 恢复到记录的 Ready 或 In Progress 状态。 |
-| `mino exec finish` | 计划 | 在所有任务、必需 commit gate 和全局检查完成后转入 Review。 |
+| `mino exec finish` | 计划 | 在所有任务、必需 commit gate、全局检查和完整 Final Outcome 完成后转入 Review。 |
 
 只有 Open 偏差阻塞 task complete 和 exec finish；Resolved、Rejected 与 Superseded 保留全部审计字段但不再阻塞。旧状态中只有 Deviation checkpoint 时，读取会按 checkpoint 顺序生成确定性 `D<n>` 和 legacy checkpoint link；首次处置会把该记录持久化。Resolution evidence 必须属于同一计划和任务、未失效且未被替代；Superseded 必须引用已应用的 Amendment。
 
@@ -225,9 +226,10 @@ Mino 的执行命令不会隐式修改 Git。Git 命令也不提供 push、merge
 | `mino review record` | 是 | 记录一项 Acceptance Defect、In-Scope Rework、Material Change 或 Follow-Up。 |
 | `mino review rework` | 是 | 为 Acceptance Defect 重新打开任务，或从严格完整 YAML 实例化预留的 `R<n>` 任务。 |
 | `mino review resolve` | 是 | 在当前任务、commit、全局检查、证据和偏差门槛均通过后解决一项返工。 |
+| `mino review disposition` | 是，审批边界 | 用 `--decision accept-change|decline|defer-to-follow-up`、decision reference 和 reason 处置被阻塞的 Material Change。 |
 | `mino review accept` | 是，审批边界 | 要求 approval reference、全部反馈 resolved/deferred 和全部 live evidence 有效，随后进入 Done。 |
 
-review item 使用连续 `REV-n`。In-Scope Rework 在 record 时预留单调递增的 `R<n>`，即使后续定义无效也不会释放。Acceptance Defect 保留之前的 committed gate，只接受 fresh evidence，并拒绝文件变更。Material Change 进入 review-owned Blocked，不能通过普通 resume 越过；Follow-Up 保持 Deferred，不进入任务顺序。
+review item 使用连续 `REV-n`。In-Scope Rework 在 record 时预留单调递增的 `R<n>`，即使后续定义无效也不会释放。Acceptance Defect 保留之前的 committed gate，只接受 fresh evidence，并拒绝文件变更。Material Change 进入 review-owned Blocked，不能通过普通 resume 越过：`accept-change` 继续阻塞直至受保护 Material Amendment 应用，`decline` 解决该项，`defer-to-follow-up` 把原 feedback 及来源 Review ID 同步到 Final Outcome 并成为非阻塞 Deferred。普通 Follow-Up 同样保持 Deferred，不进入任务顺序，并同步来源关系。任何 review rework 或 Material apply 都会使旧 Final Outcome 失效，要求在新的最终检查通过后重写。
 
 ## 机器输出
 
@@ -314,6 +316,7 @@ Clap 参数错误也返回 2，但因为尚未进入 Mino dispatch，可能只�
 - Git Flow consent：`Pending`、`Approved`、`Disabled`。
 - Amendment classification：`Minor`、`Material`。
 - Amendment state：`Proposed`、`Approval Required`、`Approved`、`Applied`。
+- Material review disposition：`Accept Change`、`Decline`、`Defer to Follow-Up`。
 - Active binding：`missing`、`current`、`foreign_worktree`、`stale_branch`、`stale_head`、`not_repository`。
 
 只有命令清单中暴露的语义转换属于实现承诺；任何命令都不能接受调用方任意指定的 status value。

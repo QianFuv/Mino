@@ -295,6 +295,23 @@ fn packaged_entry_completes_catalog_observation_plan_and_variant_flow() {
     ));
     assert_eq!(global["run"]["outcome"], "passed");
     revision = result_revision(&global);
+    let outcome = parse_success(&run_mino(
+        &binary,
+        &workspace.project,
+        &mutation_arguments(
+            &["plan", "outcome", "set"],
+            &plan_id,
+            revision,
+            next_request(&mut request_number),
+            arguments(&[
+                "--summary",
+                "The v0.3 workflow is verified",
+                "--remaining-risk",
+                "N/A",
+            ]),
+        ),
+    ));
+    revision = result_revision(&outcome);
     let review = parse_success(&run_mino(
         &binary,
         &workspace.project,

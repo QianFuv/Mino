@@ -2,7 +2,7 @@
 managed_by: mino
 plan_id: 2026-07-25-render-contract
 revision: 8
-state_hash: sha256:1d6b2a14b453e802868fc225fc06aec50760a8fd80d3bc647407b6789b08a5d0
+state_hash: sha256:31bab9df163e718917a0c4fe006bc38c920ddc9c0cddc79838b6eff1f6994855
 renderer_version: 2
 manual_editing: prohibited
 ---
@@ -187,13 +187,15 @@ _None._
 
 ## Review Feedback
 
-| ID | Reviewer | Feedback | Classification | Action | Task | Origin Task | Status | Recorded At | Approval Reference | Superseded By Change |
-|---|---|---|---|---|---|---|---|---|---|---|
-| REV-1 | reviewer | Projection contract accepted | Accepted | Record acceptance | T1 | N/A | Resolved | 2026-07-25T12:08:00Z | N/A | N/A |
+| ID | Reviewer | Feedback | Classification | Action | Task | Origin Task | Status | Recorded At | Approval Reference | Superseded By Change | Disposition | Disposition Actor | Disposition Reference | Disposition Reason | Disposed At |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| REV-1 | reviewer | Evaluate renderer plugin support separately | Material Change | Pause for a protected material amendment | N/A | N/A | Deferred | 2026-07-25T12:08:00Z | N/A | N/A | Defer to Follow-Up | user | chat:defer-renderer-plugin | Plugin support is a separate objective | 2026-07-25T12:09:00Z |
+| REV-2 | reviewer | Projection contract accepted | Accepted | Record acceptance | T1 | N/A | Resolved | 2026-07-25T12:08:00Z | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 
 ## Follow-Ups
 
 - Expose rendering through the CLI
+- Evaluate renderer plugin support separately
 
 ## Lineage
 
@@ -218,6 +220,13 @@ CLI wiring remains
 ### Outcome Follow-Up Tasks
 
 - Add plan show command
+- Evaluate renderer plugin support separately
+
+### Outcome Follow-Up Sources
+
+| Source Review | Follow-Up Task |
+|---|---|
+| REV-1 | Evaluate renderer plugin support separately |
 
 ## Extensions
 

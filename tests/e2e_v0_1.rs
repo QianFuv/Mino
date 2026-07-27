@@ -631,14 +631,23 @@ fn run_checks_and_finish(binary: &Path, project: &Path, plan_id: &str) {
     ));
     assert_eq!(global["plan"]["revision"], 17);
     assert_eq!(global["evidence"]["id"], "E0005");
-    let finish = exec_arguments(&["finish"], plan_id, 17, 19, &[]);
+    let mut outcome = mutation_arguments(&["plan", "outcome", "set"], plan_id, 17, 19);
+    outcome.extend(strings(&[
+        "--summary",
+        "The verified feature is complete",
+        "--remaining-risk",
+        "N/A",
+    ]));
+    let outcome = assert_success(&run_json(binary, project, &outcome));
+    assert_eq!(outcome["revision"], 18);
+    let finish = exec_arguments(&["finish"], plan_id, 18, 20, &[]);
     let finished = assert_success(&run_json(binary, project, &finish));
     assert_eq!(finished["status"], "Review");
-    assert_eq!(finished["revision"], 18);
+    assert_eq!(finished["revision"], 19);
     let projection = projection_path(project, plan_id);
     fs::remove_file(&projection).expect("projection-loss fixture should be injected");
     let recovered_projection = assert_success(&run_json(binary, project, &finish));
-    assert_eq!(recovered_projection["revision"], 18);
+    assert_eq!(recovered_projection["revision"], 19);
     assert_eq!(recovered_projection["replayed"], true);
     assert!(projection.is_file());
 }
@@ -646,7 +655,7 @@ fn run_checks_and_finish(binary: &Path, project: &Path, plan_id: &str) {
 fn verify_final_state(binary: &Path, project: &Path, plan_id: &str) {
     let shown = assert_success(&run_json(binary, project, &read_arguments("show", plan_id)));
     assert_eq!(shown["status"], "Review");
-    assert_eq!(shown["revision"], 18);
+    assert_eq!(shown["revision"], 19);
     assert_eq!(shown["tasks"][0]["status"], "Done");
     assert_eq!(
         shown["tasks"][0]["acceptance_criteria"][0]["status"],
@@ -682,9 +691,9 @@ fn verify_final_state(binary: &Path, project: &Path, plan_id: &str) {
     let audit = PlanStore::new(project)
         .audit(&typed_plan)
         .expect("plan store should audit");
-    assert_eq!(audit.revision(), 18);
-    assert_eq!(audit.event_count(), 18);
-    assert_eq!(audit.snapshot_count(), 18);
+    assert_eq!(audit.revision(), 19);
+    assert_eq!(audit.event_count(), 19);
+    assert_eq!(audit.snapshot_count(), 19);
     let evidence = EvidenceStore::new(project);
     let records = evidence.list(&typed_plan).expect("evidence should list");
     assert_eq!(records.len(), 5);

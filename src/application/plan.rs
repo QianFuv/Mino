@@ -598,6 +598,34 @@ impl PlanService {
         )
     }
 
+    /// Records or idempotently replays the required Final Outcome mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for stale revisions, incomplete execution gates,
+    /// malformed outcome fields, storage failures, or projection drift.
+    pub fn set_outcome(
+        &self,
+        request: PlanMutationRequest,
+        summary: String,
+        remaining_risk: String,
+        follow_up_tasks: Vec<String>,
+    ) -> Result<PlanOperationReport, MinoError> {
+        self.commit_semantic(
+            request,
+            vec!["final_outcome".to_owned()],
+            |_| Ok(None),
+            move |plan, at| {
+                plan.set_final_outcome(
+                    summary.clone(),
+                    remaining_risk.clone(),
+                    follow_up_tasks.clone(),
+                    at,
+                )
+            },
+        )
+    }
+
     /// Commits one retry-safe semantic transition and updates its projection.
     pub(crate) fn commit_semantic<F, A>(
         &self,

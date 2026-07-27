@@ -10,9 +10,9 @@ use mino::application::review::ReviewService;
 use mino::domain::{
     AcceptanceCriterion, Approval, CheckId, CommitGate, CriterionId, DraftCommitGateInput,
     DraftCriterionInput, DraftFileInput, DraftTaskInput, DraftVerificationInput, EvidenceId,
-    FileChange, FileMapEntry, GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId,
-    PlanStatus, RequestId, ReviewClassification, ReviewStatus, StandardSelection, Task, TaskId,
-    TaskStatus, Timestamp, VerificationCheck,
+    FileChange, FileMapEntry, GitFlowConsent, GitReadiness, MaterialReviewDisposition, Plan,
+    PlanDraftSeed, PlanId, PlanStatus, RequestId, ReviewClassification, ReviewStatus,
+    StandardSelection, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
 };
 use mino::project::initialize;
 use mino::render::{render_plan, write_projection};
@@ -173,6 +173,7 @@ fn reviewed_plan(label: &str) -> Plan {
     satisfy_commit(&mut plan, &task, "src/lib.rs", 3, 9);
     plan.record_global_check_pass(&check_id("GLOBAL-V1"), evidence_id(4), timestamp(10))
         .expect("global check should pass");
+    set_final_outcome(&mut plan, 11);
     plan.finish_execution(timestamp(11))
         .expect("plan should enter Review");
     plan
@@ -211,6 +212,16 @@ fn satisfy_commit(plan: &mut Plan, task: &TaskId, file: &str, evidence: u16, min
         timestamp(minute),
     )
     .expect("commit should be recorded");
+}
+
+fn set_final_outcome(plan: &mut Plan, minute: u8) {
+    plan.set_final_outcome(
+        "Reviewed implementation is verified".to_owned(),
+        "N/A".to_owned(),
+        Vec::new(),
+        timestamp(minute),
+    )
+    .expect("Final Outcome should be recorded");
 }
 
 fn complete_rework_input(id: &str) -> DraftTaskInput {
@@ -305,13 +316,130 @@ fn every_review_classification_selects_one_typed_action() {
         .expect("material review context should build");
     assert!(context.approval_required);
     assert!(context.next_actions.is_empty());
-    assert_eq!(context.allowed_actions, ["plan.show", "plan.amend.propose"]);
+    assert_eq!(context.allowed_actions, ["plan.show", "review.disposition"]);
     assert!(
         context
             .blocked_actions
             .iter()
             .any(|action| action.action == "exec.resume")
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn material_review_dispositions_close_every_product_decision_branch() {
+    let mut accepted = reviewed_plan("material-accepted");
+    let accepted_id = accepted
+        .record_review(
+            "reviewer".to_owned(),
+            "Change the public contract".to_owned(),
+            ReviewClassification::MaterialChange,
+            None,
+            timestamp(12),
+        )
+        .expect("Material review should record");
+    accepted
+        .dispose_material_review(
+            &accepted_id,
+            MaterialReviewDisposition::AcceptChange,
+            "user".to_owned(),
+            "chat:accept-change".to_owned(),
+            "The change belongs to the active objective".to_owned(),
+            timestamp(13),
+        )
+        .expect("accept-change should record");
+    let item = accepted
+        .review_item(&accepted_id)
+        .expect("accepted Material item should exist");
+    assert_eq!(item.status(), ReviewStatus::Blocked);
+    assert_eq!(
+        item.disposition(),
+        Some(MaterialReviewDisposition::AcceptChange)
+    );
+    assert_eq!(item.disposition_actor(), Some("user"));
+    assert_eq!(item.disposition_reference(), Some("chat:accept-change"));
+    assert!(accepted.is_blocked_for_material_review());
+    let accepted_context = build_agent_context(Path::new("C:/fixture"), Some(&accepted))
+        .expect("accepted Material context should build");
+    assert_eq!(
+        accepted_context.allowed_actions,
+        ["plan.show", "plan.amend.propose"]
+    );
+
+    let mut declined = reviewed_plan("material-declined");
+    let declined_id = declined
+        .record_review(
+            "reviewer".to_owned(),
+            "Replace the approved interface".to_owned(),
+            ReviewClassification::MaterialChange,
+            None,
+            timestamp(12),
+        )
+        .expect("Material review should record");
+    declined
+        .dispose_material_review(
+            &declined_id,
+            MaterialReviewDisposition::Decline,
+            "user".to_owned(),
+            "chat:decline-change".to_owned(),
+            "The request is outside the approved objective".to_owned(),
+            timestamp(13),
+        )
+        .expect("decline should resolve the request");
+    assert_eq!(declined.status(), PlanStatus::Review);
+    assert_eq!(
+        declined
+            .review_item(&declined_id)
+            .expect("declined Material item should exist")
+            .status(),
+        ReviewStatus::Resolved
+    );
+    declined
+        .accept_review(
+            "reviewer".to_owned(),
+            "chat:accept-declined-result".to_owned(),
+            timestamp(14),
+        )
+        .expect("declined Material request should not block acceptance");
+
+    let mut deferred = reviewed_plan("material-deferred");
+    let feedback = "Evaluate the interface replacement separately";
+    let deferred_id = deferred
+        .record_review(
+            "reviewer".to_owned(),
+            feedback.to_owned(),
+            ReviewClassification::MaterialChange,
+            None,
+            timestamp(12),
+        )
+        .expect("Material review should record");
+    deferred
+        .dispose_material_review(
+            &deferred_id,
+            MaterialReviewDisposition::DeferToFollowUp,
+            "user".to_owned(),
+            "chat:defer-change".to_owned(),
+            "The request is valid but independent".to_owned(),
+            timestamp(13),
+        )
+        .expect("defer should create sourced follow-up work");
+    assert_eq!(deferred.status(), PlanStatus::Review);
+    assert_eq!(deferred.follow_ups(), [feedback]);
+    assert_eq!(deferred.final_outcome().follow_up_tasks(), [feedback]);
+    let source = deferred
+        .final_outcome()
+        .follow_up_sources()
+        .first()
+        .expect("deferred Material request should retain its review source");
+    assert_eq!(source.review_id(), deferred_id);
+    assert_eq!(source.task(), feedback);
+    deferred
+        .accept_review(
+            "reviewer".to_owned(),
+            "chat:accept-deferred-result".to_owned(),
+            timestamp(14),
+        )
+        .expect("deferred Material request should not block acceptance");
 }
 
 #[test]
@@ -379,6 +507,7 @@ fn reserved_rework_ids_are_never_reused_and_complete_r_tasks_reach_done() {
     satisfy_commit(&mut plan, &task_id("R1"), "src/lib.rs", 7, 20);
     plan.record_global_check_pass(&check_id("GLOBAL-V1"), evidence_id(8), timestamp(21))
         .expect("global check should rerun");
+    set_final_outcome(&mut plan, 22);
     plan.finish_execution(timestamp(22))
         .expect("rework should return to Review");
     assert!(
@@ -426,6 +555,7 @@ fn acceptance_defect_reruns_evidence_before_explicit_acceptance() {
         .expect("evidence-only rerun should complete");
     plan.record_global_check_pass(&check_id("GLOBAL-V1"), evidence_id(7), timestamp(18))
         .expect("global check should rerun");
+    set_final_outcome(&mut plan, 19);
     plan.finish_execution(timestamp(19))
         .expect("rerun should return to Review");
     plan.resolve_review(&review, timestamp(20))
@@ -544,6 +674,103 @@ fn application_review_record_is_revision_checked_idempotent_and_audited() {
     );
 }
 
+#[test]
+fn application_material_defer_is_retry_safe_and_preserves_review_source() {
+    let project = TestProject::new();
+    let store = PlanStore::new(project.path());
+    let initial = seed("application-material-disposition");
+    let id = initial.id().clone();
+    store
+        .create_plan(
+            &initial,
+            request_id(1),
+            "codex",
+            vec!["test".to_owned(), "create".to_owned()],
+        )
+        .expect("plan should persist");
+    persist_reviewed_plan(&store, &id);
+    let plan = store.load_plan(&id).expect("reviewed plan should load");
+    write_projection(
+        &project.path().join(format!("docs/plan/{id}.md")),
+        &render_plan(&plan).expect("plan should render"),
+        None,
+    )
+    .expect("projection should publish");
+
+    let service = ReviewService::discover(project.path()).expect("service should discover");
+    let recorded = service
+        .record(
+            PlanMutationRequest {
+                plan_id: id.clone(),
+                expected_revision: plan.revision(),
+                request_id: request_id(60),
+                actor: "reviewer".to_owned(),
+                command: vec!["mino".to_owned(), "review".to_owned(), "record".to_owned()],
+                updated_at: timestamp(30),
+            },
+            ReviewClassification::MaterialChange,
+            "Evaluate a separate public API".to_owned(),
+            None,
+        )
+        .expect("Material review should persist");
+    let request = PlanMutationRequest {
+        plan_id: id.clone(),
+        expected_revision: recorded.revision,
+        request_id: request_id(61),
+        actor: "user".to_owned(),
+        command: vec![
+            "mino".to_owned(),
+            "review".to_owned(),
+            "disposition".to_owned(),
+        ],
+        updated_at: timestamp(31),
+    };
+    let disposed = service
+        .disposition(
+            request.clone(),
+            "REV-1".to_owned(),
+            MaterialReviewDisposition::DeferToFollowUp,
+            "chat:defer-public-api".to_owned(),
+            "The API belongs to a separate objective".to_owned(),
+        )
+        .expect("Material defer should persist");
+    let replayed = service
+        .disposition(
+            request,
+            "REV-1".to_owned(),
+            MaterialReviewDisposition::DeferToFollowUp,
+            "chat:defer-public-api".to_owned(),
+            "The API belongs to a separate objective".to_owned(),
+        )
+        .expect("exact retry should replay");
+    assert!(replayed.replayed);
+    assert_eq!(replayed.revision, disposed.revision);
+
+    let plan = store.load_plan(&id).expect("disposed plan should load");
+    assert_eq!(plan.status(), PlanStatus::Review);
+    let source = plan
+        .final_outcome()
+        .follow_up_sources()
+        .first()
+        .expect("deferred request should retain a source");
+    assert_eq!(source.review_id(), "REV-1");
+    assert_eq!(source.task(), "Evaluate a separate public API");
+    let events = store.events(&id).expect("events should load");
+    let event = serde_json::to_value(events.last().expect("disposition event should exist"))
+        .expect("event should serialize");
+    assert_eq!(
+        event["changed_fields"],
+        serde_json::json!([
+            "review_items",
+            "status",
+            "resume_status",
+            "blocker",
+            "follow_ups",
+            "final_outcome"
+        ])
+    );
+}
+
 fn persist_reviewed_plan(store: &PlanStore, id: &PlanId) {
     persist(store, id, 1, 2, vec!["tasks"], |plan| {
         plan.add_task(original_task(), timestamp(1))
@@ -596,7 +823,15 @@ fn persist_reviewed_plan(store: &PlanStore, id: &PlanId) {
     persist(store, id, 10, 11, vec!["verification_plan"], |plan| {
         plan.record_global_check_pass(&check_id("GLOBAL-V1"), evidence_id(4), timestamp(10))
     });
-    persist(store, id, 11, 12, vec!["status"], |plan| {
+    persist(store, id, 11, 12, vec!["final_outcome"], |plan| {
+        plan.set_final_outcome(
+            "Reviewed implementation is verified".to_owned(),
+            "N/A".to_owned(),
+            Vec::new(),
+            timestamp(11),
+        )
+    });
+    persist(store, id, 12, 13, vec!["status"], |plan| {
         plan.finish_execution(timestamp(11))
     });
 }

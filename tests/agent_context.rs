@@ -218,6 +218,14 @@ fn lifecycle_contexts() -> Vec<(&'static str, Option<Plan>)> {
         .record_global_check_pass(&check_id("GLOBAL-V1"), evidence_id("E0003"), timestamp(9))
         .expect("global check should pass");
     ready
+        .set_final_outcome(
+            "Agent guidance fixture is verified".to_owned(),
+            "N/A".to_owned(),
+            Vec::new(),
+            timestamp(10),
+        )
+        .expect("Final Outcome should record");
+    ready
         .finish_execution(timestamp(10))
         .expect("plan should enter review");
     let review = ready.clone();
@@ -285,6 +293,64 @@ fn every_lifecycle_state_matches_its_agent_context_golden() {
         .expect("golden should be JSON");
         assert_eq!(actual, expected, "Agent context golden {name} changed");
     }
+}
+
+#[test]
+fn verified_execution_requires_outcome_before_finish_guidance() {
+    let mut plan = configured_draft();
+    plan.finalize(timestamp(3)).expect("plan should finalize");
+    plan.record_approval(Approval::plan(
+        "user",
+        "chat:approval",
+        timestamp(4),
+        GitFlowConsent::Approved,
+    ))
+    .expect("plan should be approved");
+    plan.start_task(&task_id(), timestamp(5))
+        .expect("task should start");
+    plan.record_task_criterion_pass(
+        &task_id(),
+        &criterion_id(),
+        evidence_id("E0001"),
+        timestamp(6),
+    )
+    .expect("criterion should pass");
+    plan.record_task_check_pass(
+        &task_id(),
+        &check_id("TASK-V1"),
+        evidence_id("E0002"),
+        timestamp(7),
+    )
+    .expect("task check should pass");
+    plan.complete_task(&task_id(), timestamp(8))
+        .expect("task should complete");
+    plan.record_global_check_pass(&check_id("GLOBAL-V1"), evidence_id("E0003"), timestamp(9))
+        .expect("global check should pass");
+
+    let incomplete = build_agent_context(Path::new("C:/fixture"), Some(&plan))
+        .expect("incomplete outcome context should build");
+    assert_eq!(
+        incomplete.allowed_actions,
+        ["plan.outcome.set", "exec.block", "plan.amend.propose"]
+    );
+    assert!(incomplete.next_actions.is_empty());
+    assert!(
+        incomplete
+            .blocked_actions
+            .iter()
+            .any(|action| action.action == "exec.finish")
+    );
+
+    plan.set_final_outcome(
+        "Agent guidance fixture is verified".to_owned(),
+        "N/A".to_owned(),
+        Vec::new(),
+        timestamp(10),
+    )
+    .expect("Final Outcome should record");
+    let complete = build_agent_context(Path::new("C:/fixture"), Some(&plan))
+        .expect("complete outcome context should build");
+    assert_eq!(complete.next_actions[0].id, "exec.finish");
 }
 
 #[test]

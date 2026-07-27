@@ -6,7 +6,9 @@ use crate::application::completion::{
     FreshnessScope, reconcile_stale_checks, validate_review_evidence,
 };
 use crate::application::plan::{PlanMutationRequest, PlanOperationReport, PlanService};
-use crate::domain::{DraftTaskInput, Plan, ReviewClassification, ReviewStatus, TaskId};
+use crate::domain::{
+    DraftTaskInput, MaterialReviewDisposition, Plan, ReviewClassification, ReviewStatus, TaskId,
+};
 use crate::evidence::EvidenceStore;
 use crate::validation::{validate_plan, validation_failure};
 use crate::{ErrorCategory, MinoError};
@@ -189,6 +191,53 @@ impl ReviewService {
             changed_fields,
             |_| Ok(None),
             move |plan, at| plan.resolve_review(&review_id, at),
+        )
+    }
+
+    /// Records the explicit disposition of one blocked Material review request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for stale revisions, a missing or already disposed
+    /// review item, incomplete audit fields, storage failures, or projection drift.
+    pub fn disposition(
+        &self,
+        request: PlanMutationRequest,
+        review_id: String,
+        disposition: MaterialReviewDisposition,
+        decision_reference: String,
+        reason: String,
+    ) -> Result<PlanOperationReport, MinoError> {
+        let mut changed_fields = vec!["review_items".to_owned()];
+        if disposition != MaterialReviewDisposition::AcceptChange {
+            changed_fields.extend([
+                "status".to_owned(),
+                "resume_status".to_owned(),
+                "blocker".to_owned(),
+            ]);
+        }
+        if disposition == MaterialReviewDisposition::DeferToFollowUp {
+            changed_fields.extend(["follow_ups".to_owned(), "final_outcome".to_owned()]);
+        }
+        let stored = self.plans.load_stored(&request.plan_id)?;
+        if is_replay_position(&stored, request.expected_revision)? {
+            return self.plans.replay_semantic(request, changed_fields);
+        }
+        let actor = request.actor.clone();
+        self.plans.commit_semantic(
+            request,
+            changed_fields,
+            |_| Ok(None),
+            move |plan, at| {
+                plan.dispose_material_review(
+                    &review_id,
+                    disposition,
+                    actor.clone(),
+                    decision_reference.clone(),
+                    reason.clone(),
+                    at,
+                )
+            },
         )
     }
 

@@ -11,7 +11,7 @@ use clap::{ArgAction, Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::application::plan::{
-    CreatePlanRequest, DraftMutation, DraftMutationRequest, PlanService,
+    CreatePlanRequest, DraftMutation, DraftMutationRequest, PlanMutationRequest, PlanService,
 };
 use crate::commands::CommandResponse;
 use crate::domain::{
@@ -54,6 +54,8 @@ pub(crate) enum PlanAction {
     Metadata(MetadataArguments),
     /// Replace the authored plan summary while Draft.
     Summary(SummaryArguments),
+    /// Record the verified execution result and residual risk.
+    Outcome(OutcomeArguments),
     /// Add current-state references while Draft.
     Context(ContextArguments),
     /// Set or append explicit plan scope boundaries.
@@ -186,6 +188,33 @@ struct SummarySetArguments {
     /// Canonical stdin digest accepted only for normalized replay argv.
     #[arg(long, hide = true)]
     input_digest: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct OutcomeArguments {
+    #[command(subcommand)]
+    action: OutcomeAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum OutcomeAction {
+    /// Set the complete Final Outcome after global verification passes.
+    Set(OutcomeSetArguments),
+}
+
+#[derive(Debug, Args)]
+struct OutcomeSetArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    /// User-visible result of the completed execution.
+    #[arg(long, allow_hyphen_values = true)]
+    summary: String,
+    /// Explicit residual risk statement, including N/A when none remains.
+    #[arg(long, allow_hyphen_values = true)]
+    remaining_risk: String,
+    /// Optional non-blocking follow-up task; repeat for multiple tasks.
+    #[arg(long = "follow-up", allow_hyphen_values = true)]
+    follow_ups: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -724,6 +753,9 @@ pub(crate) fn execute(
         PlanAction::Summary(arguments) => match arguments.action {
             SummaryAction::Set(arguments) => execute_summary(&service, arguments),
         },
+        PlanAction::Outcome(arguments) => match arguments.action {
+            OutcomeAction::Set(arguments) => execute_outcome(&service, arguments),
+        },
         PlanAction::Context(arguments) => match arguments.action {
             ContextAction::Add(arguments) => execute_context(&service, arguments),
         },
@@ -974,6 +1006,35 @@ fn execute_summary(
         command,
         "Plan summary updated.",
     )
+}
+
+fn execute_outcome(
+    service: &PlanService,
+    arguments: OutcomeSetArguments,
+) -> Result<CommandResponse, MinoError> {
+    let mut extra = vec![
+        "--summary".to_owned(),
+        arguments.summary.clone(),
+        "--remaining-risk".to_owned(),
+        arguments.remaining_risk.clone(),
+    ];
+    append_repeated(&mut extra, "--follow-up", &arguments.follow_ups);
+    let command = mutation_command(&["outcome", "set"], &arguments.mutation, extra);
+    let request = PlanMutationRequest {
+        plan_id: parse_plan_id(&arguments.mutation.plan)?,
+        expected_revision: arguments.mutation.expect_revision,
+        request_id: parse_request_id(&arguments.mutation.request_id)?,
+        actor: arguments.mutation.actor,
+        command,
+        updated_at: Timestamp::now_utc(),
+    };
+    let report = service.set_outcome(
+        request,
+        arguments.summary,
+        arguments.remaining_risk,
+        arguments.follow_ups,
+    )?;
+    operation_response(service, "Final Outcome recorded.", report)
 }
 
 fn execute_context(

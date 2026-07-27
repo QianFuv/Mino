@@ -665,6 +665,11 @@ fn render_review_items(output: &mut String, plan: &Value) {
                 scalar(&item["recorded_at"]),
                 scalar(&item["approval_reference"]),
                 scalar(&item["superseded_by_change"]),
+                scalar(&item["disposition"]),
+                scalar(&item["disposition_actor"]),
+                scalar(&item["disposition_reference"]),
+                scalar(&item["disposition_reason"]),
+                scalar(&item["disposed_at"]),
             ]
         })
         .collect::<Vec<_>>();
@@ -682,6 +687,11 @@ fn render_review_items(output: &mut String, plan: &Value) {
             "Recorded At",
             "Approval Reference",
             "Superseded By Change",
+            "Disposition",
+            "Disposition Actor",
+            "Disposition Reference",
+            "Disposition Reason",
+            "Disposed At",
         ],
         rows,
     );
@@ -748,6 +758,12 @@ fn render_final_outcome(output: &mut String, plan: &Value) {
         "Outcome Follow-Up Tasks",
         &outcome["follow_up_tasks"],
     );
+    let source_rows = array(&outcome["follow_up_sources"])
+        .iter()
+        .map(|source| vec![scalar(&source["review_id"]), scalar(&source["task"])])
+        .collect::<Vec<_>>();
+    output.push_str("\n### Outcome Follow-Up Sources\n\n");
+    write_optional_table(output, &["Source Review", "Follow-Up Task"], source_rows);
 }
 
 fn render_extensions(output: &mut String, plan: &Value) {

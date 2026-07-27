@@ -48,6 +48,7 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
             "archive",
             "metadata",
             "summary",
+            "outcome",
             "context",
             "scope",
             "decision",
@@ -60,6 +61,7 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     ),
     (&["plan", "metadata", "--help"], &["set", "help"]),
     (&["plan", "summary", "--help"], &["set", "help"]),
+    (&["plan", "outcome", "--help"], &["set", "help"]),
     (&["plan", "context", "--help"], &["add", "help"]),
     (&["plan", "scope", "--help"], &["set", "add", "help"]),
     (
@@ -173,7 +175,14 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     ),
     (
         &["review", "--help"],
-        &["record", "rework", "resolve", "accept", "help"],
+        &[
+            "record",
+            "rework",
+            "resolve",
+            "disposition",
+            "accept",
+            "help",
+        ],
     ),
     (&["protocol", "--help"], &["status", "migrate", "help"]),
 ];
@@ -236,6 +245,7 @@ const LEAF_COMMANDS: &[&str] = &[
     "plan fork",
     "plan metadata set",
     "plan next",
+    "plan outcome set",
     "plan review",
     "plan scope add",
     "plan scope set",
@@ -267,6 +277,7 @@ const LEAF_COMMANDS: &[&str] = &[
     "protocol migrate",
     "protocol status",
     "review accept",
+    "review disposition",
     "review record",
     "review resolve",
     "review rework",
@@ -418,6 +429,7 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             "plan.approve",
             "plan.archive",
             "review.accept",
+            "review.disposition",
             "standards.conflict.resolve"
         ]
     );

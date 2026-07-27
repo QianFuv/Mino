@@ -272,6 +272,13 @@ fn rich_source_plan() -> Plan {
     .expect("commit should record");
     plan.record_global_check_pass(&global_check_id, evidence_id("E0004"), timestamp(11))
         .expect("global check should pass");
+    plan.set_final_outcome(
+        "Archived alternative was fully verified".to_owned(),
+        "N/A".to_owned(),
+        Vec::new(),
+        timestamp(12),
+    )
+    .expect("Final Outcome should record");
     plan.finish_execution(timestamp(12))
         .expect("plan should enter Review");
     plan.record_review(

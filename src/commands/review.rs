@@ -9,7 +9,10 @@ use crate::application::agent::AgentService;
 use crate::application::plan::PlanMutationRequest;
 use crate::application::review::ReviewService;
 use crate::commands::CommandResponse;
-use crate::domain::{DraftTaskInput, PlanId, RequestId, ReviewClassification, TaskId, Timestamp};
+use crate::domain::{
+    DraftTaskInput, MaterialReviewDisposition, PlanId, RequestId, ReviewClassification, TaskId,
+    Timestamp,
+};
 use crate::input::read_utf8_file;
 use crate::store::sha256_digest;
 use crate::{ErrorCategory, MinoError};
@@ -22,6 +25,8 @@ pub(crate) enum ReviewAction {
     Rework(ReworkArguments),
     /// Resolve one fully executed and revalidated rework item.
     Resolve(ResolveArguments),
+    /// Decide how one blocked Material review request should proceed.
+    Disposition(DispositionArguments),
     /// Record explicit final acceptance and move Review to Done.
     Accept(AcceptArguments),
 }
@@ -57,6 +62,23 @@ impl From<ClassificationArgument> for ReviewClassification {
             ClassificationArgument::InScopeRework => Self::InScopeRework,
             ClassificationArgument::MaterialChange => Self::MaterialChange,
             ClassificationArgument::FollowUp => Self::FollowUp,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DispositionArgument {
+    AcceptChange,
+    Decline,
+    DeferToFollowUp,
+}
+
+impl From<DispositionArgument> for MaterialReviewDisposition {
+    fn from(value: DispositionArgument) -> Self {
+        match value {
+            DispositionArgument::AcceptChange => Self::AcceptChange,
+            DispositionArgument::Decline => Self::Decline,
+            DispositionArgument::DeferToFollowUp => Self::DeferToFollowUp,
         }
     }
 }
@@ -101,6 +123,24 @@ pub(crate) struct ResolveArguments {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct DispositionArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    /// Stable blocked Material review identifier such as REV-1.
+    #[arg(long)]
+    review: String,
+    /// Product decision for the requested Material change.
+    #[arg(long, value_enum)]
+    decision: DispositionArgument,
+    /// Auditable reference for the explicit product decision.
+    #[arg(long)]
+    decision_ref: String,
+    /// Reason for accepting, declining, or deferring the requested change.
+    #[arg(long, allow_hyphen_values = true)]
+    reason: String,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct AcceptArguments {
     #[command(flatten)]
     mutation: MutationArguments,
@@ -115,6 +155,7 @@ pub(crate) fn execute(start: &Path, action: ReviewAction) -> Result<CommandRespo
         ReviewAction::Record(arguments) => record(start, &service, arguments),
         ReviewAction::Rework(arguments) => rework(start, &service, arguments),
         ReviewAction::Resolve(arguments) => resolve(start, &service, arguments),
+        ReviewAction::Disposition(arguments) => disposition(start, &service, arguments),
         ReviewAction::Accept(arguments) => accept(start, &service, arguments),
     }
 }
@@ -194,6 +235,40 @@ fn resolve(
     let request = mutation_request(arguments.mutation, command)?;
     let report = service.resolve(request, arguments.review)?;
     response_with_guidance(start, "Review rework resolved.", report)
+}
+
+fn disposition(
+    start: &Path,
+    service: &ReviewService,
+    arguments: DispositionArguments,
+) -> Result<CommandResponse, MinoError> {
+    let decision_name = arguments
+        .decision
+        .to_possible_value()
+        .map_or_else(|| "unknown".to_owned(), |value| value.get_name().to_owned());
+    let command = mutation_command(
+        &["disposition"],
+        &arguments.mutation,
+        vec![
+            "--review".to_owned(),
+            arguments.review.clone(),
+            "--decision".to_owned(),
+            decision_name,
+            "--decision-ref".to_owned(),
+            arguments.decision_ref.clone(),
+            "--reason".to_owned(),
+            arguments.reason.clone(),
+        ],
+    );
+    let request = mutation_request(arguments.mutation, command)?;
+    let report = service.disposition(
+        request,
+        arguments.review,
+        arguments.decision.into(),
+        arguments.decision_ref,
+        arguments.reason,
+    )?;
+    response_with_guidance(start, "Material review disposition recorded.", report)
 }
 
 fn accept(

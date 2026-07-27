@@ -9,8 +9,8 @@ use crate::application::plan::{
 };
 use crate::domain::{
     AmendmentClassification, AmendmentStatus, CURRENT_PROTOCOL_REVISION, CURRENT_PROTOCOL_VERSION,
-    CheckId, CheckStatus, Plan, PlanId, PlanStatus, ReviewClassification, ReviewStatus, TaskId,
-    TaskStatus,
+    CheckId, CheckStatus, MaterialReviewDisposition, Plan, PlanId, PlanStatus,
+    ReviewClassification, ReviewStatus, TaskId, TaskStatus,
 };
 use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitHeadState};
 use crate::validation::validate_plan;
@@ -81,6 +81,7 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("plan.fork", true, false),
     ("plan.metadata.set", true, false),
     ("plan.next", false, false),
+    ("plan.outcome.set", true, false),
     ("plan.review", false, false),
     ("plan.scope.add", true, false),
     ("plan.scope.set", true, false),
@@ -112,6 +113,7 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("protocol.migrate", true, false),
     ("protocol.status", false, false),
     ("review.accept", true, true),
+    ("review.disposition", true, true),
     ("review.record", true, false),
     ("review.resolve", true, false),
     ("review.rework", true, false),
@@ -457,7 +459,7 @@ fn guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
         PlanStatus::Ready => ready_guidance(root, plan),
         PlanStatus::InProgress => Ok(in_progress_guidance(plan)),
         PlanStatus::Blocked if plan.is_blocked_for_material_review() => {
-            Ok(material_review_blocked_guidance())
+            Ok(material_review_blocked_guidance(plan))
         }
         PlanStatus::Blocked => Ok(Guidance {
             allowed_actions: action_ids(&["exec.resume"]),
@@ -478,18 +480,42 @@ fn guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
     }
 }
 
-fn material_review_blocked_guidance() -> Guidance {
-    Guidance {
-        allowed_actions: action_ids(&["plan.show", "plan.amend.propose"]),
-        blocked_actions: vec![
-            blocked(
-                "exec.resume",
-                "Material review feedback requires an explicitly approved protected amendment",
-            ),
-            blocked("review.accept", "Material review feedback remains blocked"),
-        ],
-        approval_required: true,
-        next_actions: Vec::new(),
+fn material_review_blocked_guidance(plan: &Plan) -> Guidance {
+    let accepted_change = plan.review_items().iter().any(|item| {
+        item.classification() == ReviewClassification::MaterialChange
+            && item.status() == ReviewStatus::Blocked
+            && item.disposition() == Some(MaterialReviewDisposition::AcceptChange)
+    });
+    if accepted_change {
+        Guidance {
+            allowed_actions: action_ids(&["plan.show", "plan.amend.propose"]),
+            blocked_actions: vec![
+                blocked(
+                    "exec.resume",
+                    "Accepted Material review feedback requires a protected amendment",
+                ),
+                blocked("review.accept", "Material review feedback remains blocked"),
+            ],
+            approval_required: false,
+            next_actions: Vec::new(),
+        }
+    } else {
+        Guidance {
+            allowed_actions: action_ids(&["plan.show", "review.disposition"]),
+            blocked_actions: vec![
+                blocked(
+                    "plan.amend.propose",
+                    "The Material review request needs an explicit disposition first",
+                ),
+                blocked(
+                    "exec.resume",
+                    "Material review feedback requires an explicit product decision",
+                ),
+                blocked("review.accept", "Material review feedback remains blocked"),
+            ],
+            approval_required: true,
+            next_actions: Vec::new(),
+        }
     }
 }
 
@@ -552,6 +578,17 @@ fn review_guidance(plan: &Plan) -> Guidance {
         .iter()
         .find(|item| matches!(item.status(), ReviewStatus::Open | ReviewStatus::InProgress));
     let Some(item) = unresolved else {
+        if !plan.final_outcome().is_complete() {
+            return Guidance {
+                allowed_actions: action_ids(&["plan.show", "plan.outcome.set"]),
+                blocked_actions: vec![blocked(
+                    "review.accept",
+                    "A complete Final Outcome is required before acceptance",
+                )],
+                approval_required: false,
+                next_actions: Vec::new(),
+            };
+        }
         return Guidance {
             allowed_actions: action_ids(&["plan.show", "review.record"]),
             blocked_actions: vec![
@@ -569,6 +606,9 @@ fn review_guidance(plan: &Plan) -> Guidance {
         };
     };
     let mut allowed_actions = action_ids(&["plan.show", "review.record"]);
+    if !plan.final_outcome().is_complete() {
+        allowed_actions.push("plan.outcome.set".to_owned());
+    }
     let next_actions = match item.status() {
         ReviewStatus::Open => {
             allowed_actions.push("review.rework".to_owned());
@@ -868,6 +908,8 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
             action_ids(&["exec.check.run", "exec.block"]),
             vec![check_action(plan, check_id)],
         )
+    } else if !plan.final_outcome().is_complete() {
+        (action_ids(&["plan.outcome.set", "exec.block"]), Vec::new())
     } else {
         (
             action_ids(&["exec.finish", "exec.block"]),
@@ -875,21 +917,28 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
         )
     };
     allowed_actions.push("plan.amend.propose".to_owned());
+    let mut blocked_actions = if can_commit && has_automatic_commit_consent {
+        Vec::new()
+    } else if can_commit {
+        vec![blocked(
+            "git.commit",
+            "Automatic commit requires Approved Git Flow consent; record a manually approved commit or approved skip",
+        )]
+    } else {
+        vec![blocked(
+            "git.commit",
+            "Task verification or completion is incomplete",
+        )]
+    };
+    if !plan.final_outcome().is_complete() {
+        blocked_actions.push(blocked(
+            "exec.finish",
+            "A complete Final Outcome is required before Review",
+        ));
+    }
     Guidance {
         allowed_actions,
-        blocked_actions: if can_commit && has_automatic_commit_consent {
-            Vec::new()
-        } else if can_commit {
-            vec![blocked(
-                "git.commit",
-                "Automatic commit requires Approved Git Flow consent; record a manually approved commit or approved skip",
-            )]
-        } else {
-            vec![blocked(
-                "git.commit",
-                "Task verification or completion is incomplete",
-            )]
-        },
+        blocked_actions,
         approval_required: can_commit && !has_automatic_commit_consent,
         next_actions,
     }

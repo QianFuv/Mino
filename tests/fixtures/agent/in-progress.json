@@ -27,6 +27,10 @@
     {
       "action": "git.commit",
       "reason": "Task verification or completion is incomplete"
+    },
+    {
+      "action": "exec.finish",
+      "reason": "A complete Final Outcome is required before Review"
     }
   ],
   "standards": ["common@1.0.0"],

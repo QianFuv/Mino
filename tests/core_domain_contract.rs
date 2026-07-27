@@ -100,6 +100,16 @@ fn satisfy_global(plan: &mut Plan, evidence: u16, minute: u8) {
     .expect("global evidence should be recorded");
 }
 
+fn set_final_outcome(plan: &mut Plan, minute: u8) {
+    plan.set_final_outcome(
+        "Verified protocol execution completed".to_owned(),
+        "N/A".to_owned(),
+        Vec::new(),
+        timestamp(minute),
+    )
+    .expect("Final Outcome should be recorded");
+}
+
 fn satisfy_commit(plan: &mut Plan, task_id: &TaskId, evidence: u16, minute: u8) {
     let commit_digit = char::from_digit(u32::from(evidence % 16), 16)
         .expect("commit fixture digit should be hexadecimal");
@@ -376,6 +386,7 @@ fn plan_lifecycle_requires_approval_and_preserves_legal_order() {
         .expect("active task should complete");
     satisfy_commit(&mut plan, &first_id, 3, 11);
     satisfy_global(&mut plan, 4, 12);
+    set_final_outcome(&mut plan, 13);
     plan.finish_execution(timestamp(13))
         .expect("completed plan should enter review");
     assert_eq!(plan.status(), PlanStatus::Review);
@@ -417,6 +428,7 @@ fn only_the_first_dependency_complete_task_can_run() {
         .expect("second task should complete");
     satisfy_commit(&mut plan, &second_id, 6, 18);
     satisfy_global(&mut plan, 7, 19);
+    set_final_outcome(&mut plan, 20);
     plan.finish_execution(timestamp(20))
         .expect("plan should enter review");
     plan.validate_invariants()
@@ -440,6 +452,7 @@ fn approved_commit_skips_satisfy_task_order_finish_and_acceptance() {
         .expect("second task should complete");
     satisfy_commit_skip(&mut plan, &second_id, 6, 17);
     satisfy_global(&mut plan, 7, 18);
+    set_final_outcome(&mut plan, 19);
 
     plan.finish_execution(timestamp(19))
         .expect("skipped required gates should permit review");
@@ -508,6 +521,7 @@ fn final_verification_failure_has_an_explicit_rework_exit() {
         .expect("reopened task should complete with fresh evidence");
     satisfy_commit_skip(&mut plan, &first_id, 10, 26);
     satisfy_global(&mut plan, 11, 27);
+    set_final_outcome(&mut plan, 28);
     plan.finish_execution(timestamp(28))
         .expect("fresh global verification should restore Review");
     assert_eq!(plan.status(), PlanStatus::Review);
@@ -557,6 +571,7 @@ fn blocked_execution_resumes_and_review_rework_reopens_a_task() {
         .expect("resumed task should complete");
     satisfy_commit(&mut plan, &first_id, 3, 12);
     satisfy_global(&mut plan, 4, 13);
+    set_final_outcome(&mut plan, 14);
     plan.finish_execution(timestamp(14))
         .expect("plan should enter review");
     let review_id = plan
@@ -605,6 +620,7 @@ fn blocked_execution_resumes_and_review_rework_reopens_a_task() {
         .expect_err("rework should require global verification again");
     assert_eq!(global_error.kind(), DomainErrorKind::InvariantViolation);
     satisfy_global(&mut plan, 7, 23);
+    set_final_outcome(&mut plan, 24);
     plan.finish_execution(timestamp(24))
         .expect("reworked plan should return to review");
     plan.resolve_review(&review_id, timestamp(25))
@@ -851,6 +867,7 @@ fn transition_matrix_rejects_commands_outside_their_legal_states() {
         .expect("second task should complete");
     satisfy_commit(&mut plan, &second_id, 6, 18);
     satisfy_global(&mut plan, 7, 19);
+    set_final_outcome(&mut plan, 20);
     plan.finish_execution(timestamp(20))
         .expect("plan should enter review");
 

@@ -9,12 +9,13 @@ use crate::application::plan::{
 use crate::domain::{
     AcceptanceCriterion, CheckStatus, CommitStatus, CriterionId, CriterionStatus, Evidence,
     EvidenceId, EvidenceType, FileChange, Plan, RequestId, ReviewClassification, ReviewStatus,
-    Task, TaskId, Timestamp, VerificationCheck,
+    Task, TaskId, Timestamp, VerificationCheck, WorkspaceFingerprint,
 };
 use crate::evidence::{EvidenceError, EvidenceErrorKind, EvidenceStore};
 use crate::git::matches_file_map_path;
 use crate::workspace::{
-    WorkspaceDeltaEntry, WorkspaceDeltaKind, workspace_delta, workspace_fingerprint_is_current,
+    WorkspaceDeltaEntry, WorkspaceDeltaKind, recapture_workspace_fingerprint, workspace_delta,
+    workspace_fingerprint_is_current,
 };
 use crate::{ErrorCategory, MinoError, NextAction};
 
@@ -233,7 +234,10 @@ fn validate_criterion_binding(
     evidence: &Evidence,
     all_evidence: &[Evidence],
 ) -> Result<(), MinoError> {
-    validate_current_evidence(root, plan, evidence, all_evidence)?;
+    let task = plan
+        .task(task_id)
+        .ok_or_else(|| incomplete(format!("Task {task_id} does not exist")))?;
+    validate_current_evidence(root, plan, Some(task), evidence, all_evidence)?;
     if evidence.task_id() != Some(task_id) {
         return Err(incompatible(format!(
             "Evidence {} is not bound to task {task_id}",
@@ -264,15 +268,15 @@ fn validate_command_criterion(
             evidence.id()
         ))
     })?;
-    let check = plan
+    let task = plan
         .task(task_id)
-        .and_then(|task| {
-            task.verification_checks()
-                .iter()
-                .find(|check| check.id() == check_id)
-        })
+        .ok_or_else(|| incompatible(format!("Task {task_id} does not exist")))?;
+    let check = task
+        .verification_checks()
+        .iter()
+        .find(|check| check.id() == check_id)
         .ok_or_else(|| incompatible(format!("Check {check_id} does not belong to {task_id}")))?;
-    validate_passing_check_evidence(root, plan, check, evidence)
+    validate_passing_check_evidence(root, plan, Some(task), check, evidence)
 }
 
 pub(crate) fn validate_task_evidence(
@@ -356,7 +360,12 @@ fn validate_completed_check(
         )));
     }
     let record = evidence_by_id(evidence, evidence_id)?;
-    validate_current_evidence(root, plan, record, evidence)?;
+    let task = task_id.map(|task_id| {
+        plan.task(task_id)
+            .ok_or_else(|| incomplete(format!("Task {task_id} does not exist")))
+    });
+    let task = task.transpose()?;
+    validate_current_evidence(root, plan, task, record, evidence)?;
     if record.kind() != EvidenceType::Command
         || record.task_id() != task_id
         || record.check_id() != Some(check.id())
@@ -366,12 +375,13 @@ fn validate_completed_check(
             check.id()
         )));
     }
-    validate_passing_check_evidence(root, plan, check, record)
+    validate_passing_check_evidence(root, plan, task, check, record)
 }
 
 fn validate_passing_check_evidence(
     root: &Path,
     plan: &Plan,
+    task: Option<&Task>,
     check: &VerificationCheck,
     evidence: &Evidence,
 ) -> Result<(), MinoError> {
@@ -379,9 +389,10 @@ fn validate_passing_check_evidence(
         && check.evidence_refs().last() == Some(evidence.id())
         && evidence.exit_code() == Some(check.expected_exit_code())
         && evidence.workspace_fingerprint().is_some()
-        && workspace_fingerprint_is_current(
+        && check_workspace_is_current(
             root,
             plan,
+            task,
             evidence
                 .workspace_fingerprint()
                 .expect("checked workspace fingerprint exists"),
@@ -400,6 +411,7 @@ fn validate_passing_check_evidence(
 fn validate_current_evidence(
     root: &Path,
     plan: &Plan,
+    task: Option<&Task>,
     evidence: &Evidence,
     all_evidence: &[Evidence],
 ) -> Result<(), MinoError> {
@@ -426,7 +438,7 @@ fn validate_current_evidence(
                 evidence.id()
             ))
         })?;
-        if !workspace_fingerprint_is_current(root, plan, fingerprint)? {
+        if !check_workspace_is_current(root, plan, task, fingerprint)? {
             return Err(incomplete(format!(
                 "Evidence {} is stale for the current workspace",
                 evidence.id()
@@ -611,23 +623,30 @@ fn stale_check_ids(
     scope: FreshnessScope<'_>,
 ) -> Result<Vec<crate::domain::CheckId>, MinoError> {
     let checks = match scope {
-        FreshnessScope::Task(task_id) => plan
-            .task(task_id)
-            .ok_or_else(|| incomplete(format!("Task {task_id} does not exist")))?
-            .verification_checks()
-            .iter()
-            .collect::<Vec<_>>(),
+        FreshnessScope::Task(task_id) => {
+            let task = plan
+                .task(task_id)
+                .ok_or_else(|| incomplete(format!("Task {task_id} does not exist")))?;
+            task.verification_checks()
+                .iter()
+                .map(|check| (Some(task), check))
+                .collect::<Vec<_>>()
+        }
         FreshnessScope::All => plan
             .tasks()
             .iter()
-            .flat_map(Task::verification_checks)
-            .chain(plan.global_verification())
+            .flat_map(|task| {
+                task.verification_checks()
+                    .iter()
+                    .map(move |check| (Some(task), check))
+            })
+            .chain(plan.global_verification().iter().map(|check| (None, check)))
             .collect::<Vec<_>>(),
     };
     let mut stale = Vec::new();
-    for check in checks
+    for (task, check) in checks
         .into_iter()
-        .filter(|check| check.status() == CheckStatus::Passed)
+        .filter(|(_, check)| check.status() == CheckStatus::Passed)
     {
         let Some(evidence_id) = check.evidence_refs().last() else {
             continue;
@@ -635,7 +654,7 @@ fn stale_check_ids(
         let record = evidence_by_id(evidence, evidence_id)?;
         let is_current = if record.kind() == EvidenceType::Command {
             match record.workspace_fingerprint() {
-                Some(fingerprint) => workspace_fingerprint_is_current(root, plan, fingerprint)?,
+                Some(fingerprint) => check_workspace_is_current(root, plan, task, fingerprint)?,
                 None => false,
             }
         } else {
@@ -648,6 +667,24 @@ fn stale_check_ids(
     stale.sort();
     stale.dedup();
     Ok(stale)
+}
+
+fn check_workspace_is_current(
+    root: &Path,
+    plan: &Plan,
+    task: Option<&Task>,
+    fingerprint: &WorkspaceFingerprint,
+) -> Result<bool, MinoError> {
+    let is_committed_task = task.is_some_and(|task| {
+        task.commit_gate()
+            .is_some_and(|gate| gate.status() == CommitStatus::Committed)
+    });
+    if !is_committed_task {
+        return workspace_fingerprint_is_current(root, plan, fingerprint);
+    }
+    let current = recapture_workspace_fingerprint(root, plan, fingerprint)?;
+    Ok(current.repository_mode() == fingerprint.repository_mode()
+        && current.file_snapshots() == fingerprint.file_snapshots())
 }
 
 fn stale_error(report: &PlanOperationReport, stale: &[crate::domain::CheckId]) -> MinoError {

@@ -43,9 +43,9 @@ pub use id::{CheckId, CriterionId, EvidenceId, PlanId, RequestId, TaskId};
 pub use lineage::{Lineage, PlanArchive};
 pub use plan::{
     Approach, Approval, ApprovalKind, ContextReference, Decision, EdgeCase, FinalOutcome,
-    GitReadiness, Plan, PlanMetadata, PlanScope, StandardSelection,
+    GitReadiness, OutcomeFollowUpSource, Plan, PlanMetadata, PlanScope, StandardSelection,
 };
-pub use review::ReviewItem;
+pub use review::{MaterialReviewDisposition, ReviewItem};
 pub use standards::{
     StandardConflict, StandardConflictCandidate, StandardConflictDecision, StandardConflictRecord,
     StandardSourceKind, StandardsConflictState,

@@ -447,6 +447,38 @@ fn cli_completion_flow_rejects_scope_drift_then_enters_review() {
 }
 
 #[test]
+fn final_outcome_is_required_after_current_global_verification() {
+    let project = TestProject::new("outcome-gate", "pass");
+    let completed = complete_task_after_scope_and_freshness_rejections(&project);
+    let global = parse_success(&run_mino(
+        &project,
+        &check_arguments(result_revision(&completed), 18, "GLOBAL-CHECK"),
+    ));
+
+    let missing = run_mino(
+        &project,
+        &mutation_arguments("finish", result_revision(&global), 19, &[]),
+    );
+    assert_eq!(missing.status.code(), Some(2));
+    let missing: Value = serde_json::from_slice(&missing.stdout).expect("failure should be JSON");
+    assert!(
+        missing["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Final Outcome"))
+    );
+
+    let outcome = parse_success(&run_mino(
+        &project,
+        &outcome_arguments(result_revision(&global), 20),
+    ));
+    let finished = parse_success(&run_mino(
+        &project,
+        &mutation_arguments("finish", result_revision(&outcome), 21, &[]),
+    ));
+    assert_eq!(finished["status"], "Review");
+}
+
+#[test]
 fn non_git_project_completes_a_real_file_change_from_its_task_baseline() {
     let project = TestProject::new_without_git("non-git", "pass");
     let started = start_active_task(&project, 50);
@@ -725,7 +757,7 @@ fn assert_final_and_review_freshness(project: &TestProject, completed: &Value) {
         &check_arguments(result_revision(completed), 18, "GLOBAL-CHECK"),
     ));
     assert_eq!(global["evidence"]["id"], "E0003");
-    assert_eq!(global["next_actions"][0]["id"], "exec.finish");
+    assert_eq!(global["next_actions"], serde_json::json!([]));
     fs::write(
         project.path().join("src/feature.rs"),
         "pub fn feature() -> u8 { 3 }\n",
@@ -779,7 +811,11 @@ fn assert_final_and_review_freshness(project: &TestProject, completed: &Value) {
         &check_arguments(result_revision(&recompleted), 24, "GLOBAL-CHECK"),
     ));
     assert_eq!(reglobal["evidence"]["id"], "E0005");
-    let finish_arguments = mutation_arguments("finish", result_revision(&reglobal), 25, &[]);
+    let outcome = parse_success(&run_mino(
+        project,
+        &outcome_arguments(result_revision(&reglobal), 25),
+    ));
+    let finish_arguments = mutation_arguments("finish", result_revision(&outcome), 26, &[]);
     let finished = parse_success(&run_mino(project, &finish_arguments));
     assert_eq!(finished["status"], "Review");
     fs::remove_file(project.path().join(projection_relative()))
@@ -800,7 +836,7 @@ fn assert_final_and_review_freshness(project: &TestProject, completed: &Value) {
     )
     .expect("post-review change should be written");
     let mut accept_arguments = vec!["review".to_owned(), "accept".to_owned()];
-    accept_arguments.extend(common_mutation_arguments(result_revision(&finished), 26));
+    accept_arguments.extend(common_mutation_arguments(result_revision(&finished), 27));
     accept_arguments.extend(["--approval-ref".to_owned(), "chat:stale-review".to_owned()]);
     let stale_review = run_mino(project, &accept_arguments);
     assert_eq!(stale_review.status.code(), Some(2));
@@ -1143,6 +1179,18 @@ fn criterion_arguments(revision: u64, sequence: u64, evidence: &str) -> Vec<Stri
         criterion_id().to_string(),
         "--evidence".to_owned(),
         evidence.to_owned(),
+    ]);
+    arguments
+}
+
+fn outcome_arguments(revision: u64, sequence: u64) -> Vec<String> {
+    let mut arguments = vec!["plan".to_owned(), "outcome".to_owned(), "set".to_owned()];
+    arguments.extend(common_mutation_arguments(revision, sequence));
+    arguments.extend([
+        "--summary".to_owned(),
+        "Completion contract verified".to_owned(),
+        "--remaining-risk".to_owned(),
+        "N/A".to_owned(),
     ]);
     arguments
 }
