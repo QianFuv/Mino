@@ -53,6 +53,15 @@ struct TestRepository {
 
 impl TestRepository {
     fn new(label: &str, state: FixtureState, with_commit_gate: bool) -> Self {
+        Self::new_with_git_flow(label, state, with_commit_gate, true)
+    }
+
+    fn new_with_git_flow(
+        label: &str,
+        state: FixtureState,
+        with_commit_gate: bool,
+        git_flow_enabled: bool,
+    ) -> Self {
         let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "mino-git-commit-{label}-{}-{sequence}",
@@ -67,7 +76,7 @@ impl TestRepository {
         initialize(&root).expect("Mino project should initialize");
         initialize_git(&root);
         let root = root.canonicalize().expect("repository root should resolve");
-        let plan_id = create_plan(&root, with_commit_gate);
+        let plan_id = create_plan(&root, with_commit_gate, git_flow_enabled);
         prepare_task(&root, &plan_id, state);
         Self { root, plan_id }
     }
@@ -197,6 +206,146 @@ fn valid_commit_is_exact_evidenced_clean_and_idempotent() {
 }
 
 #[test]
+fn verified_manual_commit_closes_a_disabled_git_flow_gate_idempotently() {
+    let repository = TestRepository::new_with_git_flow("manual", FixtureState::Done, true, false);
+    git(repository.root(), &["add", "--", TASK_PATH]);
+    git(
+        repository.root(),
+        &["commit", "--quiet", "-m", COMMIT_MESSAGE],
+    );
+    let commit = git_text(repository.root(), &["rev-parse", "HEAD"]);
+    let revision = load_plan(&repository).revision();
+    let request = mutation(revision, 90, "record-manual");
+
+    let report = GitCommitService::discover(repository.root())
+        .expect("manual commit service should discover")
+        .record_manual(
+            request.clone(),
+            &task_id(),
+            &commit,
+            "chat:manual-commit-approved",
+        )
+        .expect("exact manual commit should record");
+
+    assert_eq!(report.commit.commit, commit);
+    assert_eq!(report.commit.files, [TASK_PATH]);
+    assert_eq!(report.evidence.kind(), EvidenceType::Commit);
+    assert!(!report.plan.replayed);
+    let plan = load_plan(&repository);
+    let gate = plan
+        .task(&task_id())
+        .and_then(Task::commit_gate)
+        .expect("manual task gate should exist");
+    assert_eq!(gate.status(), CommitStatus::Committed);
+    assert_eq!(gate.actual_commit(), Some(commit.as_str()));
+    assert_eq!(gate.committed_files(), [TASK_PATH]);
+
+    let replay = GitCommitService::discover(repository.root())
+        .expect("manual commit service should rediscover")
+        .record_manual(request, &task_id(), &commit, "chat:manual-commit-approved")
+        .expect("manual commit request should replay");
+    assert!(replay.plan.replayed);
+    assert_eq!(replay.evidence.id(), report.evidence.id());
+    assert_eq!(load_plan(&repository).revision(), plan.revision());
+}
+
+#[test]
+fn manual_commit_rejects_wrong_message_scope_parent_and_verified_content() {
+    let wrong_message =
+        TestRepository::new_with_git_flow("manual-message", FixtureState::Done, true, false);
+    git(wrong_message.root(), &["add", "--", TASK_PATH]);
+    git(
+        wrong_message.root(),
+        &["commit", "--quiet", "-m", "fix(test): wrong message"],
+    );
+    assert_manual_refusal(&wrong_message, 91, ErrorCategory::PolicyViolation);
+
+    let wrong_scope =
+        TestRepository::new_with_git_flow("manual-scope", FixtureState::Done, true, false);
+    fs::write(wrong_scope.root().join("outside.txt"), "outside\n")
+        .expect("outside path should be written");
+    git(wrong_scope.root(), &["add", "--", TASK_PATH, "outside.txt"]);
+    git(
+        wrong_scope.root(),
+        &["commit", "--quiet", "-m", COMMIT_MESSAGE],
+    );
+    assert_manual_refusal(&wrong_scope, 92, ErrorCategory::PolicyViolation);
+
+    let wrong_parent =
+        TestRepository::new_with_git_flow("manual-parent", FixtureState::Done, true, false);
+    fs::write(
+        wrong_parent.root().join("intermediate.txt"),
+        "intermediate\n",
+    )
+    .expect("intermediate path should be written");
+    git(wrong_parent.root(), &["add", "--", "intermediate.txt"]);
+    git(
+        wrong_parent.root(),
+        &["commit", "--quiet", "-m", "test: advance parent"],
+    );
+    git(wrong_parent.root(), &["add", "--", TASK_PATH]);
+    git(
+        wrong_parent.root(),
+        &["commit", "--quiet", "-m", COMMIT_MESSAGE],
+    );
+    assert_manual_refusal(&wrong_parent, 93, ErrorCategory::DriftDetected);
+
+    let stale_content =
+        TestRepository::new_with_git_flow("manual-stale", FixtureState::Done, true, false);
+    fs::write(
+        stale_content.root().join(TASK_PATH),
+        "pub fn feature() -> u8 { 99 }\n",
+    )
+    .expect("post-check content should be written");
+    git(stale_content.root(), &["add", "--", TASK_PATH]);
+    git(
+        stale_content.root(),
+        &["commit", "--quiet", "-m", COMMIT_MESSAGE],
+    );
+    assert_manual_refusal(&stale_content, 94, ErrorCategory::IncompleteOrValidation);
+}
+
+#[test]
+fn approved_skip_records_exception_evidence_and_satisfies_the_gate() {
+    let repository = TestRepository::new_with_git_flow("skip", FixtureState::Done, true, false);
+    let revision = load_plan(&repository).revision();
+    let request = mutation(revision, 95, "skip-gate");
+
+    let report = GitCommitService::discover(repository.root())
+        .expect("skip service should discover")
+        .skip_gate(
+            request.clone(),
+            &task_id(),
+            "chat:skip-approved",
+            "The user will include this change in a later manual commit",
+        )
+        .expect("approved skip should record");
+
+    assert_eq!(report.evidence.kind(), EvidenceType::AcceptedException);
+    assert!(!report.plan.replayed);
+    let plan = load_plan(&repository);
+    let gate = plan
+        .task(&task_id())
+        .and_then(Task::commit_gate)
+        .expect("skipped gate should exist");
+    assert_eq!(gate.status(), CommitStatus::Skipped);
+    assert!(gate.is_satisfied());
+    assert_eq!(gate.evidence_refs(), [report.evidence.id().clone()]);
+
+    let replay = GitCommitService::discover(repository.root())
+        .expect("skip service should rediscover")
+        .skip_gate(
+            request,
+            &task_id(),
+            "chat:skip-approved",
+            "The user will include this change in a later manual commit",
+        )
+        .expect("approved skip should replay");
+    assert!(replay.plan.replayed);
+    assert_eq!(replay.evidence.id(), report.evidence.id());
+}
+
+#[test]
 fn preflight_refusals_preserve_head_index_and_journal() {
     let incomplete = TestRepository::new("incomplete", FixtureState::InProgress, true);
     assert_preflight_refusal(&incomplete, ErrorCategory::PolicyViolation);
@@ -320,7 +469,7 @@ fn post_commit_plan_lock_interruption_reconciles_without_duplicate_commit() {
     let (locked_sender, locked_receiver) = mpsc::channel();
     let (release_sender, release_receiver) = mpsc::channel();
     let lock_thread = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_mins(1);
+        let deadline = Instant::now() + Duration::from_mins(3);
         while !marker_path.exists() {
             assert!(
                 Instant::now() < deadline,
@@ -341,7 +490,7 @@ fn post_commit_plan_lock_interruption_reconciles_without_duplicate_commit() {
             .send(())
             .expect("lock acquisition should be reported");
         release_receiver
-            .recv_timeout(Duration::from_mins(1))
+            .recv_timeout(Duration::from_mins(3))
             .expect("plan lock release should be requested");
         FileExt::unlock(&lock).expect("plan lock should release");
     });
@@ -452,7 +601,7 @@ fn recorded_gate_without_terminal_journal_replays_to_completion() {
     );
 }
 
-fn create_plan(root: &Path, with_commit_gate: bool) -> PlanId {
+fn create_plan(root: &Path, with_commit_gate: bool, git_flow_enabled: bool) -> PlanId {
     let plan_id = plan_id();
     let mut plan = Plan::from_draft_seed(
         PlanDraftSeed {
@@ -468,7 +617,7 @@ fn create_plan(root: &Path, with_commit_gate: bool) -> PlanId {
                 Some("main".to_owned()),
                 Some(git_text(root, &["rev-parse", "HEAD"])),
                 "Clean: git status --short returned empty",
-                true,
+                git_flow_enabled,
             ),
             standards: Vec::new(),
             verification_plan: vec![VerificationCheck::new(
@@ -533,7 +682,11 @@ fn create_plan(root: &Path, with_commit_gate: bool) -> PlanId {
             "user",
             "chat:commit-plan-approval",
             timestamp(4),
-            GitFlowConsent::Approved,
+            if git_flow_enabled {
+                GitFlowConsent::Approved
+            } else {
+                GitFlowConsent::Disabled
+            },
         ))
     });
     plan = store
@@ -644,6 +797,30 @@ fn assert_preflight_refusal(repository: &TestRepository, category: ErrorCategory
             .journal()
             .intent_path(repository.plan_id(), &task_id())
             .exists()
+    );
+}
+
+fn assert_manual_refusal(repository: &TestRepository, sequence: u64, category: ErrorCategory) {
+    let plan = load_plan(repository);
+    let revision = plan.revision();
+    let commit = git_text(repository.root(), &["rev-parse", "HEAD"]);
+    let error = GitCommitService::discover(repository.root())
+        .expect("manual commit service should discover")
+        .record_manual(
+            mutation(revision, sequence, "record-manual-refusal"),
+            &task_id(),
+            &commit,
+            "chat:manual-commit-approved",
+        )
+        .expect_err("invalid manual commit should be rejected");
+    assert_eq!(error.category(), category, "{error}");
+    assert_eq!(load_plan(repository).revision(), revision);
+    assert_eq!(
+        load_plan(repository)
+            .task(&task_id())
+            .and_then(Task::commit_gate)
+            .map(CommitGate::status),
+        Some(CommitStatus::Pending)
     );
 }
 

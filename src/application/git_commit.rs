@@ -9,10 +9,13 @@ use crate::application::completion::{
     FreshnessScope, reconcile_stale_checks, validate_task_deviations, validate_task_evidence,
 };
 use crate::application::git_binding::map_git_error;
-use crate::application::plan::{PlanMutationRequest, PlanService, derived_request_id};
+use crate::application::plan::{
+    PlanMutationRequest, PlanOperationReport, PlanService, derived_request_id,
+};
 use crate::domain::{
-    CommitStatus, Evidence, EvidenceId, EvidenceType, GitFlowConsent, Plan, PlanId, PlanStatus,
-    RequestId, Task, TaskId, TaskStatus, Timestamp,
+    CheckStatus, CommitStatus, CriterionStatus, Evidence, EvidenceId, EvidenceType, FileChange,
+    GitFlowConsent, Plan, PlanId, PlanStatus, RequestId, Task, TaskId, TaskStatus, Timestamp,
+    VerificationCheck, WorkspaceRepositoryMode,
 };
 use crate::evidence::{
     AddEvidenceRequest, EvidenceError, EvidenceErrorKind, EvidenceRequestContext, EvidenceSource,
@@ -22,10 +25,14 @@ use crate::git::{
     ActiveBindingStatus, ActiveBindingStore, CommitFileSnapshot, GitAdapter, GitBranchJournalStore,
     GitCommitCompletion, GitCommitCompletionInput, GitCommitIntent, GitCommitJournal,
     GitCommitJournalStore, GitCommitObject, GitFacts, GitStagedCommit, capture_commit_snapshots,
-    ensure_no_clean_filters, inspect_commit, run_task_commit, stage_commit_paths,
-    task_commit_entries, validate_commit_snapshot_scope, verify_commit_snapshots, write_index_tree,
+    ensure_no_clean_filters, inspect_commit, matches_file_map_path, run_task_commit,
+    stage_commit_paths, task_commit_entries, validate_commit_snapshot_scope,
+    verify_commit_snapshots, write_index_tree,
 };
 use crate::runner::Redactor;
+use crate::workspace::{
+    WorkspaceDeltaEntry, WorkspaceDeltaKind, recapture_workspace_fingerprint, workspace_delta,
+};
 use crate::{ErrorCategory, MinoError};
 
 /// Complete read-only commit eligibility and exact-path snapshot.
@@ -68,6 +75,28 @@ pub struct GitTaskCommitReport {
     pub replayed: bool,
     /// Whether an already-created commit was reconciled after interruption.
     pub reconciled: bool,
+}
+
+/// A caller-created commit verified and attached to one required task gate.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GitManualCommitReport {
+    /// Verified immutable commit object.
+    pub commit: GitCommitObject,
+    /// Immutable commit evidence attached to the gate.
+    pub evidence: Evidence,
+    /// Plan mutation that recorded the terminal gate.
+    pub plan: PlanOperationReport,
+    /// Live Git identity proving the commit is current branch HEAD.
+    pub facts: GitFacts,
+}
+
+/// An explicitly approved exception that satisfies one required task gate.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GitCommitSkipReport {
+    /// Immutable accepted-exception evidence attached to the gate.
+    pub evidence: Evidence,
+    /// Plan mutation that recorded the skipped gate.
+    pub plan: PlanOperationReport,
 }
 
 /// Application boundary for recoverable task-level Git commits.
@@ -142,6 +171,197 @@ impl GitCommitService {
             Some(journal) => self.execute_journal(&store, journal),
             None => self.prepare_and_execute(&store, plan_id, task_id),
         }
+    }
+
+    /// Verifies and records a caller-created commit without mutating Git.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error unless the commit is current branch HEAD, has the
+    /// legal parent, exact planned message and scope, and contains the bytes
+    /// covered by the task's current verification evidence.
+    pub fn record_manual(
+        &self,
+        request: PlanMutationRequest,
+        task_id: &TaskId,
+        commit_id: &str,
+        approval_reference: &str,
+    ) -> Result<GitManualCommitReport, MinoError> {
+        require_approval_reference(approval_reference)?;
+        let current = self.plans.load_verified(&request.plan_id)?;
+        let is_replay = mutation_is_replay(&current, &request)?;
+        let task = validate_manual_commit_gate(&current, task_id, is_replay)?;
+        let facts = self.inspect_git()?;
+        validate_live_identity(&self.root, &current, &facts)?;
+        let commit =
+            inspect_commit(&self.root, commit_id).map_err(|error| map_git_error(&error))?;
+        validate_manual_commit_identity(&current, task, &commit, &facts)?;
+        let evidence = if is_replay {
+            terminal_gate_evidence(&self.evidence, &current, task, EvidenceType::Commit)?
+        } else {
+            let evidence = self
+                .evidence
+                .list(current.id())
+                .map_err(|error| map_evidence_error(&error))?;
+            validate_manual_task_evidence(&self.root, &current, task, &evidence, &commit)?;
+            validate_manual_commit_scope(&self.root, &current, task, &commit)?;
+            self.add_manual_commit_evidence(&request, task_id, &commit, approval_reference)?
+        };
+        let commit_for_mutation = commit.clone();
+        let task_for_mutation = task_id.clone();
+        let evidence_for_mutation = evidence.id().clone();
+        let plan = self.plans.commit_semantic(
+            request,
+            commit_changed_fields(task_id),
+            |_| Ok(None),
+            move |plan, at| {
+                plan.record_task_commit(
+                    &task_for_mutation,
+                    &commit_for_mutation.commit,
+                    commit_for_mutation.files.clone(),
+                    evidence_for_mutation.clone(),
+                    at,
+                )
+            },
+        )?;
+        Ok(GitManualCommitReport {
+            commit,
+            evidence,
+            plan,
+            facts,
+        })
+    }
+
+    /// Records an explicitly approved exception for one required commit gate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for stale verification, an illegal gate state,
+    /// missing approval metadata, or a revision/request conflict.
+    pub fn skip_gate(
+        &self,
+        request: PlanMutationRequest,
+        task_id: &TaskId,
+        approval_reference: &str,
+        reason: &str,
+    ) -> Result<GitCommitSkipReport, MinoError> {
+        require_approval_reference(approval_reference)?;
+        if reason.trim().is_empty() {
+            return Err(MinoError::new(
+                ErrorCategory::IncompleteOrValidation,
+                "Commit-gate skip requires a non-empty reason",
+            ));
+        }
+        let current = self.plans.load_verified(&request.plan_id)?;
+        let is_replay = mutation_is_replay(&current, &request)?;
+        let task = validate_skip_gate(&current, task_id, is_replay)?;
+        let evidence = if is_replay {
+            terminal_gate_evidence(
+                &self.evidence,
+                &current,
+                task,
+                EvidenceType::AcceptedException,
+            )?
+        } else {
+            let existing = self
+                .evidence
+                .list(current.id())
+                .map_err(|error| map_evidence_error(&error))?;
+            if let Some((report, stale)) = reconcile_stale_checks(
+                &self.plans,
+                &self.root,
+                &current,
+                &existing,
+                FreshnessScope::Task(task.id()),
+                &request.actor,
+                &request.updated_at,
+            )? {
+                return Err(stale_commit_error(&report, &stale));
+            }
+            validate_task_evidence(&self.root, &current, task, &existing)?;
+            validate_task_deviations(&current, task)?;
+            self.add_skip_evidence(&request, task_id, approval_reference, reason)?
+        };
+        let task_for_mutation = task_id.clone();
+        let evidence_for_mutation = evidence.id().clone();
+        let plan = self.plans.commit_semantic(
+            request,
+            vec![
+                format!("tasks.{task_id}.commit_gate.status"),
+                format!("tasks.{task_id}.commit_gate.evidence_refs"),
+            ],
+            |_| Ok(None),
+            move |plan, at| {
+                plan.skip_task_commit(&task_for_mutation, evidence_for_mutation.clone(), at)
+            },
+        )?;
+        Ok(GitCommitSkipReport { evidence, plan })
+    }
+
+    fn add_manual_commit_evidence(
+        &self,
+        request: &PlanMutationRequest,
+        task_id: &TaskId,
+        commit: &GitCommitObject,
+        approval_reference: &str,
+    ) -> Result<Evidence, MinoError> {
+        self.add_gate_evidence(
+            request,
+            task_id,
+            EvidenceType::Commit,
+            commit.commit.clone(),
+            format!(
+                "Manual task commit {} approved by {} with message {}",
+                commit.commit, approval_reference, commit.message
+            ),
+        )
+    }
+
+    fn add_skip_evidence(
+        &self,
+        request: &PlanMutationRequest,
+        task_id: &TaskId,
+        approval_reference: &str,
+        reason: &str,
+    ) -> Result<Evidence, MinoError> {
+        self.add_gate_evidence(
+            request,
+            task_id,
+            EvidenceType::AcceptedException,
+            approval_reference.to_owned(),
+            format!("Approved commit-gate skip: {}", reason.trim()),
+        )
+    }
+
+    fn add_gate_evidence(
+        &self,
+        request: &PlanMutationRequest,
+        task_id: &TaskId,
+        kind: EvidenceType,
+        reference: String,
+        description: String,
+    ) -> Result<Evidence, MinoError> {
+        let context = EvidenceRequestContext::new(
+            request.plan_id.clone(),
+            request.expected_revision,
+            request.request_id.clone(),
+            request.actor.clone(),
+            request.command.clone(),
+            request.updated_at.clone(),
+        )
+        .map_err(|error| map_evidence_error(&error))?;
+        let evidence = AddEvidenceRequest::new(
+            context,
+            kind,
+            EvidenceSource::Reference(reference),
+            description,
+        )
+        .map_err(|error| map_evidence_error(&error))?
+        .with_task(task_id.clone());
+        self.evidence
+            .add(&evidence, &Redactor::default())
+            .map(|report| report.evidence().clone())
+            .map_err(|error| map_evidence_error(&error))
     }
 
     fn prepare_and_execute(
@@ -752,6 +972,51 @@ fn validate_common_plan_gate<'a>(
     task_id: &TaskId,
     allow_blocked_gate: bool,
 ) -> Result<&'a Task, MinoError> {
+    if !plan.has_plan_approval()
+        || !plan.git_readiness().git_flow_enabled()
+        || plan.git_readiness().git_flow_consent() != GitFlowConsent::Approved
+    {
+        return Err(MinoError::new(
+            ErrorCategory::ApprovalRequired,
+            "Task commit requires current plan approval and Approved Git Flow consent",
+        ));
+    }
+    let mut allowed = vec![CommitStatus::Pending];
+    if allow_blocked_gate {
+        allowed.extend([CommitStatus::Blocked, CommitStatus::Committed]);
+    }
+    validate_task_commit_gate(plan, task_id, &allowed)
+}
+
+fn validate_manual_commit_gate<'a>(
+    plan: &'a Plan,
+    task_id: &TaskId,
+    is_replay: bool,
+) -> Result<&'a Task, MinoError> {
+    let mut allowed = vec![CommitStatus::Pending, CommitStatus::Blocked];
+    if is_replay {
+        allowed.push(CommitStatus::Committed);
+    }
+    validate_task_commit_gate(plan, task_id, &allowed)
+}
+
+fn validate_skip_gate<'a>(
+    plan: &'a Plan,
+    task_id: &TaskId,
+    is_replay: bool,
+) -> Result<&'a Task, MinoError> {
+    let mut allowed = vec![CommitStatus::Pending, CommitStatus::Blocked];
+    if is_replay {
+        allowed.push(CommitStatus::Skipped);
+    }
+    validate_task_commit_gate(plan, task_id, &allowed)
+}
+
+fn validate_task_commit_gate<'a>(
+    plan: &'a Plan,
+    task_id: &TaskId,
+    allowed_statuses: &[CommitStatus],
+) -> Result<&'a Task, MinoError> {
     validate_no_pending_amendment(plan)?;
     if plan.status() != PlanStatus::InProgress {
         return Err(MinoError::new(
@@ -762,13 +1027,10 @@ fn validate_common_plan_gate<'a>(
             ),
         ));
     }
-    if !plan.has_plan_approval()
-        || !plan.git_readiness().git_flow_enabled()
-        || plan.git_readiness().git_flow_consent() != GitFlowConsent::Approved
-    {
+    if !plan.has_plan_approval() {
         return Err(MinoError::new(
             ErrorCategory::ApprovalRequired,
-            "Task commit requires current plan approval and Approved Git Flow consent",
+            "Task commit requires current plan approval",
         ));
     }
     let task = plan.task(task_id).ok_or_else(|| {
@@ -792,13 +1054,7 @@ fn validate_common_plan_gate<'a>(
                 format!("Task {task_id} has no required commit gate"),
             )
         })?;
-    let status_allowed = gate.status() == CommitStatus::Pending
-        || allow_blocked_gate
-            && matches!(
-                gate.status(),
-                CommitStatus::Blocked | CommitStatus::Committed
-            );
-    if !status_allowed {
+    if !allowed_statuses.contains(&gate.status()) {
         return Err(MinoError::new(
             ErrorCategory::PolicyViolation,
             format!("Task {task_id} commit gate is {:?}", gate.status()),
@@ -825,6 +1081,347 @@ fn validate_no_pending_amendment(plan: &Plan) -> Result<(), MinoError> {
     Ok(())
 }
 
+fn mutation_is_replay(plan: &Plan, request: &PlanMutationRequest) -> Result<bool, MinoError> {
+    let replay_revision = request.expected_revision.checked_add(1).ok_or_else(|| {
+        MinoError::new(
+            ErrorCategory::RevisionConflict,
+            "Expected revision overflowed",
+        )
+    })?;
+    if plan.revision() == request.expected_revision {
+        Ok(false)
+    } else if plan.revision() == replay_revision {
+        Ok(true)
+    } else {
+        Err(MinoError::new(
+            ErrorCategory::RevisionConflict,
+            format!(
+                "Plan {} is revision {}, not expected revision {}",
+                plan.id(),
+                plan.revision(),
+                request.expected_revision
+            ),
+        ))
+    }
+}
+
+fn require_approval_reference(reference: &str) -> Result<(), MinoError> {
+    if reference.trim().is_empty() {
+        Err(MinoError::new(
+            ErrorCategory::ApprovalRequired,
+            "Commit-gate mutation requires a non-empty approval reference",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn commit_changed_fields(task_id: &TaskId) -> Vec<String> {
+    vec![
+        format!("tasks.{task_id}.commit_gate.status"),
+        format!("tasks.{task_id}.commit_gate.actual_commit"),
+        format!("tasks.{task_id}.commit_gate.committed_files"),
+        format!("tasks.{task_id}.commit_gate.evidence_refs"),
+    ]
+}
+
+fn terminal_gate_evidence(
+    store: &EvidenceStore,
+    plan: &Plan,
+    task: &Task,
+    kind: EvidenceType,
+) -> Result<Evidence, MinoError> {
+    let gate = task.commit_gate().ok_or_else(|| {
+        MinoError::new(
+            ErrorCategory::DriftDetected,
+            format!("Task {} has no commit gate", task.id()),
+        )
+    })?;
+    let evidence_id = gate.evidence_refs().first().ok_or_else(|| {
+        MinoError::new(
+            ErrorCategory::DriftDetected,
+            format!("Task {} terminal commit gate has no evidence", task.id()),
+        )
+    })?;
+    store
+        .list(plan.id())
+        .map_err(|error| map_evidence_error(&error))?
+        .into_iter()
+        .find(|evidence| {
+            evidence.id() == evidence_id
+                && evidence.kind() == kind
+                && evidence.task_id() == Some(task.id())
+        })
+        .ok_or_else(|| {
+            MinoError::new(
+                ErrorCategory::DriftDetected,
+                format!(
+                    "Task {} terminal commit-gate evidence is missing",
+                    task.id()
+                ),
+            )
+        })
+}
+
+fn validate_manual_commit_identity(
+    plan: &Plan,
+    task: &Task,
+    commit: &GitCommitObject,
+    facts: &GitFacts,
+) -> Result<(), MinoError> {
+    if facts.head.as_deref() != Some(commit.commit.as_str()) {
+        return Err(MinoError::new(
+            ErrorCategory::DriftDetected,
+            "Manual commit must be the current branch HEAD",
+        ));
+    }
+    if !facts.staged_paths.is_empty()
+        || facts
+            .unstaged_paths
+            .iter()
+            .any(|path| commit.files.contains(path))
+    {
+        return Err(MinoError::new(
+            ErrorCategory::DriftDetected,
+            "Manual commit paths must match the current index and worktree",
+        ));
+    }
+    let gate = task.commit_gate().expect("validated commit gate exists");
+    if commit.message != gate.planned_message() {
+        return Err(MinoError::new(
+            ErrorCategory::PolicyViolation,
+            "Manual commit message differs from the exact planned message",
+        ));
+    }
+    let expected = expected_parent(plan, task.id(), Some(&commit.parent))?;
+    if expected != commit.parent {
+        return Err(MinoError::new(
+            ErrorCategory::DriftDetected,
+            "Manual commit parent differs from the legal task parent",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_manual_commit_scope(
+    root: &Path,
+    plan: &Plan,
+    task: &Task,
+    commit: &GitCommitObject,
+) -> Result<(), MinoError> {
+    let workspace = plan
+        .workspace_state()
+        .map_err(|error| MinoError::new(ErrorCategory::DriftDetected, error.to_string()))?;
+    let baseline = workspace.task_baseline(task.id()).ok_or_else(|| {
+        MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            format!(
+                "Task {} has no recorded workspace start baseline",
+                task.id()
+            ),
+        )
+    })?;
+    let delta = workspace_delta(root, plan, baseline)?;
+    let delta_paths = delta
+        .entries()
+        .iter()
+        .map(|entry| entry.path().to_owned())
+        .collect::<Vec<_>>();
+    if delta_paths != commit.files {
+        return Err(MinoError::new(
+            ErrorCategory::PolicyViolation,
+            "Manual commit paths do not equal the task-local workspace delta",
+        ));
+    }
+    let gate = task.commit_gate().expect("validated commit gate exists");
+    let outside = delta.entries().iter().find(|entry| {
+        !task.file_map().iter().any(|file| {
+            matches_file_map_path(file.path(), entry.path())
+                && manual_change_is_compatible(file.change(), entry)
+        }) || !gate
+            .scope()
+            .iter()
+            .any(|scope| matches_file_map_path(scope, entry.path()))
+    });
+    if let Some(entry) = outside {
+        Err(MinoError::new(
+            ErrorCategory::PolicyViolation,
+            format!(
+                "Manual commit path {} is outside File Map or Commit Scope",
+                entry.path()
+            ),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn manual_change_is_compatible(change: FileChange, entry: &WorkspaceDeltaEntry) -> bool {
+    match change {
+        FileChange::Create => entry.kind() == WorkspaceDeltaKind::Created,
+        FileChange::Modify => entry.kind() == WorkspaceDeltaKind::Modified,
+        FileChange::Delete => entry.kind() == WorkspaceDeltaKind::Deleted,
+        FileChange::Test => true,
+        FileChange::NotApplicable => false,
+    }
+}
+
+fn validate_manual_task_evidence(
+    root: &Path,
+    plan: &Plan,
+    task: &Task,
+    evidence: &[Evidence],
+    commit: &GitCommitObject,
+) -> Result<(), MinoError> {
+    let superseded = evidence
+        .iter()
+        .filter_map(Evidence::supersedes)
+        .collect::<BTreeSet<_>>();
+    for check in task
+        .verification_checks()
+        .iter()
+        .filter(|check| check.is_required())
+    {
+        validate_manual_check(root, plan, task, check, evidence, &superseded, commit)?;
+    }
+    for criterion in task.acceptance_criteria() {
+        let evidence_id = criterion.evidence_refs().last().ok_or_else(|| {
+            MinoError::new(
+                ErrorCategory::IncompleteOrValidation,
+                format!("Criterion {} has no evidence", criterion.id()),
+            )
+        })?;
+        let record = manual_evidence_by_id(plan, task, evidence, &superseded, evidence_id)?;
+        match criterion.status() {
+            CriterionStatus::AcceptedException
+                if record.kind() == EvidenceType::AcceptedException
+                    && record.criterion_id() == Some(criterion.id()) => {}
+            CriterionStatus::Passed if record.kind() == EvidenceType::Command => {
+                let check_id = record.check_id().ok_or_else(|| {
+                    MinoError::new(
+                        ErrorCategory::IncompleteOrValidation,
+                        format!("Criterion {} command evidence has no check", criterion.id()),
+                    )
+                })?;
+                let check = task
+                    .verification_checks()
+                    .iter()
+                    .find(|check| check.id() == check_id)
+                    .ok_or_else(|| {
+                        MinoError::new(
+                            ErrorCategory::IncompleteOrValidation,
+                            format!("Criterion {} references a foreign check", criterion.id()),
+                        )
+                    })?;
+                validate_manual_check(root, plan, task, check, evidence, &superseded, commit)?;
+            }
+            _ => {
+                return Err(MinoError::new(
+                    ErrorCategory::IncompleteOrValidation,
+                    format!("Criterion {} evidence is incomplete", criterion.id()),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_manual_check(
+    root: &Path,
+    plan: &Plan,
+    task: &Task,
+    check: &VerificationCheck,
+    evidence: &[Evidence],
+    superseded: &BTreeSet<&EvidenceId>,
+    commit: &GitCommitObject,
+) -> Result<(), MinoError> {
+    if check.status() != CheckStatus::Passed {
+        return Err(MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            format!("Check {} has not passed", check.id()),
+        ));
+    }
+    let evidence_id = check.evidence_refs().last().ok_or_else(|| {
+        MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            format!("Check {} has no evidence", check.id()),
+        )
+    })?;
+    let record = manual_evidence_by_id(plan, task, evidence, superseded, evidence_id)?;
+    if record.kind() != EvidenceType::Command
+        || record.check_id() != Some(check.id())
+        || record.exit_code() != Some(check.expected_exit_code())
+    {
+        return Err(MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            format!("Check {} evidence is incompatible", check.id()),
+        ));
+    }
+    let fingerprint = record.workspace_fingerprint().ok_or_else(|| {
+        MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            format!("Check {} evidence has no workspace fingerprint", check.id()),
+        )
+    })?;
+    let current = recapture_workspace_fingerprint(root, plan, fingerprint)?;
+    let mismatch = if fingerprint.repository_mode() != WorkspaceRepositoryMode::Git
+        || current.repository_mode() != WorkspaceRepositoryMode::Git
+    {
+        Some("repository mode")
+    } else if fingerprint.head() != Some(commit.parent.as_str()) {
+        Some("verified parent")
+    } else if current.head() != Some(commit.commit.as_str()) {
+        Some("current HEAD")
+    } else if current.file_snapshots() != fingerprint.file_snapshots() {
+        Some("verified file snapshots")
+    } else {
+        None
+    };
+    if let Some(mismatch) = mismatch {
+        return Err(MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            format!(
+                "Check {} did not verify the manual commit {mismatch}",
+                check.id()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn manual_evidence_by_id<'a>(
+    plan: &Plan,
+    task: &Task,
+    evidence: &'a [Evidence],
+    superseded: &BTreeSet<&EvidenceId>,
+    evidence_id: &EvidenceId,
+) -> Result<&'a Evidence, MinoError> {
+    let record = evidence
+        .iter()
+        .find(|record| record.id() == evidence_id)
+        .ok_or_else(|| {
+            MinoError::new(
+                ErrorCategory::IncompleteOrValidation,
+                format!("Evidence {evidence_id} is missing"),
+            )
+        })?;
+    if superseded.contains(evidence_id)
+        || plan.is_evidence_stale(evidence_id)
+        || record.plan_id() != plan.id()
+        || record.task_id() != Some(task.id())
+        || record
+            .captured_revision()
+            .is_none_or(|revision| revision > plan.revision())
+    {
+        Err(MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            format!("Evidence {evidence_id} is stale or incompatible"),
+        ))
+    } else {
+        Ok(record)
+    }
+}
+
 fn validate_commit_order(
     plan: &Plan,
     task_id: &TaskId,
@@ -843,7 +1440,7 @@ fn validate_commit_order(
     let prior_incomplete = plan.task_order()[..position].iter().find(|candidate| {
         plan.task(candidate).is_some_and(|candidate| {
             candidate.commit_gate().is_some_and(|candidate_gate| {
-                candidate_gate.is_required() && candidate_gate.status() != CommitStatus::Committed
+                candidate_gate.is_required() && !candidate_gate.is_satisfied()
             })
         })
     });
@@ -853,14 +1450,13 @@ fn validate_commit_order(
             format!("Task {candidate} must be committed before task {task_id}"),
         ));
     }
-    if gate.status() != CommitStatus::Committed {
+    if !gate.is_satisfied() {
         let first_pending = plan.task_order()[position..]
             .iter()
             .filter_map(|candidate| plan.task(candidate))
             .find(|candidate| {
                 candidate.commit_gate().is_some_and(|candidate_gate| {
-                    candidate_gate.is_required()
-                        && candidate_gate.status() != CommitStatus::Committed
+                    candidate_gate.is_required() && !candidate_gate.is_satisfied()
                 })
             });
         if first_pending.is_none_or(|candidate| candidate.id() != task_id) {
@@ -957,28 +1553,31 @@ fn expected_parent(
                 format!("Task {task_id} is missing from implementation order"),
             )
         })?;
-    let prior_commit = plan.task_order()[..position]
+    let mut prior_commit = None;
+    for gate in plan.task_order()[..position]
         .iter()
         .filter_map(|prior_id| plan.task(prior_id))
         .filter_map(Task::commit_gate)
         .filter(|gate| gate.is_required())
-        .map(|gate| {
-            if gate.status() == CommitStatus::Committed {
-                gate.actual_commit().map(str::to_owned).ok_or_else(|| {
+    {
+        match gate.status() {
+            CommitStatus::Committed => {
+                prior_commit = Some(gate.actual_commit().map(str::to_owned).ok_or_else(|| {
                     MinoError::new(
                         ErrorCategory::DriftDetected,
                         "Committed prior task has no actual commit",
                     )
-                })
-            } else {
-                Err(MinoError::new(
+                })?);
+            }
+            CommitStatus::Skipped => {}
+            _ => {
+                return Err(MinoError::new(
                     ErrorCategory::PolicyViolation,
                     "A prior required task commit is incomplete",
-                ))
+                ));
             }
-        })
-        .collect::<Result<Vec<_>, _>>()?
-        .pop();
+        }
+    }
     if let Some(prior_commit) = prior_commit {
         if prior_commit.eq_ignore_ascii_case(live_head) {
             return Ok(live_head.to_ascii_lowercase());

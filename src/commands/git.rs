@@ -8,8 +8,9 @@ use crate::application::git_binding::GitBindingService;
 use crate::application::git_branch::GitBranchService;
 use crate::application::git_commit::GitCommitService;
 use crate::application::git_hooks::GitHookService;
+use crate::application::plan::PlanMutationRequest;
 use crate::commands::CommandResponse;
-use crate::domain::{PlanId, TaskId};
+use crate::domain::{PlanId, RequestId, TaskId, Timestamp};
 use crate::git::GitHookName;
 use crate::{ErrorCategory, MinoError};
 
@@ -23,6 +24,8 @@ pub(crate) enum GitAction {
     Branch(BranchArguments),
     /// Create or recover one approved task-level commit.
     Commit(CommitArguments),
+    /// Manage required task commit-gate exceptions.
+    Gate(GateArguments),
     /// Inspect, install, or invoke optional advisory repository hooks.
     Hook(HookArguments),
 }
@@ -80,12 +83,82 @@ struct BranchCreateArguments {
 
 #[derive(Debug, Args)]
 pub(crate) struct CommitArguments {
+    #[command(subcommand)]
+    action: Option<GitCommitAction>,
+    /// Approved plan containing the task commit gate.
+    #[arg(long)]
+    plan: Option<String>,
+    /// Done task whose exact commit gate should execute.
+    #[arg(long)]
+    task: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum GitCommitAction {
+    /// Verify and record a commit created outside Mino.
+    RecordManual(RecordManualArguments),
+}
+
+#[derive(Debug, Args)]
+struct RecordManualArguments {
     /// Approved plan containing the task commit gate.
     #[arg(long)]
     plan: String,
-    /// Done task whose exact commit gate should execute.
+    /// Done task whose required gate should record the commit.
     #[arg(long)]
     task: String,
+    /// Full commit object ID already at current branch HEAD.
+    #[arg(long)]
+    commit: String,
+    /// Auditable external reference approving this manual commit.
+    #[arg(long)]
+    approval_ref: String,
+    /// Required optimistic-concurrency revision.
+    #[arg(long)]
+    expect_revision: u64,
+    /// Idempotency UUID for this record request.
+    #[arg(long)]
+    request_id: String,
+    /// Actor recorded in the event and evidence logs.
+    #[arg(long, default_value = "user")]
+    actor: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct GateArguments {
+    #[command(subcommand)]
+    action: GitGateAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum GitGateAction {
+    /// Satisfy a required gate with an explicitly approved exception.
+    Skip(SkipGateArguments),
+}
+
+#[derive(Debug, Args)]
+struct SkipGateArguments {
+    /// Approved plan containing the task commit gate.
+    #[arg(long)]
+    plan: String,
+    /// Done task whose required commit gate should be skipped.
+    #[arg(long)]
+    task: String,
+    /// Auditable external reference approving the exception.
+    #[arg(long)]
+    approval_ref: String,
+    /// Human-readable reason for the exception.
+    #[arg(long)]
+    reason: String,
+    /// Required optimistic-concurrency revision.
+    #[arg(long)]
+    expect_revision: u64,
+    /// Idempotency UUID for this skip request.
+    #[arg(long)]
+    request_id: String,
+    /// Actor recorded in the event and evidence logs.
+    #[arg(long, default_value = "user")]
+    actor: String,
 }
 
 #[derive(Debug, Args)]
@@ -160,13 +233,8 @@ pub(crate) fn execute(start: &Path, action: GitAction) -> Result<CommandResponse
             )
         }
         GitAction::Branch(arguments) => execute_branch(start, arguments.action)?,
-        GitAction::Commit(arguments) => (
-            "Task commit created, evidenced, and recorded.",
-            serde_json::to_value(GitCommitService::discover(start)?.commit(
-                &parse_plan_id(&arguments.plan)?,
-                &parse_task_id(&arguments.task)?,
-            )?),
-        ),
+        GitAction::Commit(arguments) => execute_commit(start, arguments)?,
+        GitAction::Gate(arguments) => execute_gate(start, arguments.action)?,
         GitAction::Hook(arguments) => return execute_hook(start, arguments.action),
     };
     let payload = payload.map_err(|error| {
@@ -181,6 +249,128 @@ pub(crate) fn execute(start: &Path, action: GitAction) -> Result<CommandResponse
         payload,
         missing: Vec::new(),
         next_actions: Vec::new(),
+    })
+}
+
+fn execute_commit(
+    start: &Path,
+    arguments: CommitArguments,
+) -> Result<(&'static str, Result<serde_json::Value, serde_json::Error>), MinoError> {
+    let service = GitCommitService::discover(start)?;
+    match arguments.action {
+        Some(GitCommitAction::RecordManual(arguments)) => {
+            let request = manual_commit_request(&arguments)?;
+            Ok((
+                "Manual task commit verified, evidenced, and recorded.",
+                serde_json::to_value(service.record_manual(
+                    request,
+                    &parse_task_id(&arguments.task)?,
+                    &arguments.commit,
+                    &arguments.approval_ref,
+                )?),
+            ))
+        }
+        None => {
+            let plan = arguments.plan.as_deref().ok_or_else(|| {
+                MinoError::new(
+                    ErrorCategory::IncompleteOrValidation,
+                    "Automatic git commit requires --plan",
+                )
+            })?;
+            let task = arguments.task.as_deref().ok_or_else(|| {
+                MinoError::new(
+                    ErrorCategory::IncompleteOrValidation,
+                    "Automatic git commit requires --task",
+                )
+            })?;
+            Ok((
+                "Task commit created, evidenced, and recorded.",
+                serde_json::to_value(service.commit(&parse_plan_id(plan)?, &parse_task_id(task)?)?),
+            ))
+        }
+    }
+}
+
+fn execute_gate(
+    start: &Path,
+    action: GitGateAction,
+) -> Result<(&'static str, Result<serde_json::Value, serde_json::Error>), MinoError> {
+    let service = GitCommitService::discover(start)?;
+    match action {
+        GitGateAction::Skip(arguments) => {
+            let request = skip_gate_request(&arguments)?;
+            Ok((
+                "Required task commit gate skipped with approved evidence.",
+                serde_json::to_value(service.skip_gate(
+                    request,
+                    &parse_task_id(&arguments.task)?,
+                    &arguments.approval_ref,
+                    &arguments.reason,
+                )?),
+            ))
+        }
+    }
+}
+
+fn manual_commit_request(
+    arguments: &RecordManualArguments,
+) -> Result<PlanMutationRequest, MinoError> {
+    Ok(PlanMutationRequest {
+        plan_id: parse_plan_id(&arguments.plan)?,
+        expected_revision: arguments.expect_revision,
+        request_id: parse_request_id(&arguments.request_id)?,
+        actor: arguments.actor.clone(),
+        command: vec![
+            "mino".to_owned(),
+            "git".to_owned(),
+            "commit".to_owned(),
+            "record-manual".to_owned(),
+            "--plan".to_owned(),
+            arguments.plan.clone(),
+            "--task".to_owned(),
+            arguments.task.clone(),
+            "--commit".to_owned(),
+            arguments.commit.clone(),
+            "--approval-ref".to_owned(),
+            arguments.approval_ref.clone(),
+            "--expect-revision".to_owned(),
+            arguments.expect_revision.to_string(),
+            "--request-id".to_owned(),
+            arguments.request_id.clone(),
+            "--actor".to_owned(),
+            arguments.actor.clone(),
+        ],
+        updated_at: Timestamp::now_utc(),
+    })
+}
+
+fn skip_gate_request(arguments: &SkipGateArguments) -> Result<PlanMutationRequest, MinoError> {
+    Ok(PlanMutationRequest {
+        plan_id: parse_plan_id(&arguments.plan)?,
+        expected_revision: arguments.expect_revision,
+        request_id: parse_request_id(&arguments.request_id)?,
+        actor: arguments.actor.clone(),
+        command: vec![
+            "mino".to_owned(),
+            "git".to_owned(),
+            "gate".to_owned(),
+            "skip".to_owned(),
+            "--plan".to_owned(),
+            arguments.plan.clone(),
+            "--task".to_owned(),
+            arguments.task.clone(),
+            "--approval-ref".to_owned(),
+            arguments.approval_ref.clone(),
+            "--reason".to_owned(),
+            arguments.reason.clone(),
+            "--expect-revision".to_owned(),
+            arguments.expect_revision.to_string(),
+            "--request-id".to_owned(),
+            arguments.request_id.clone(),
+            "--actor".to_owned(),
+            arguments.actor.clone(),
+        ],
+        updated_at: Timestamp::now_utc(),
     })
 }
 
@@ -263,5 +453,10 @@ fn parse_plan_id(value: &str) -> Result<PlanId, MinoError> {
 
 fn parse_task_id(value: &str) -> Result<TaskId, MinoError> {
     TaskId::parse(value)
+        .map_err(|error| MinoError::new(ErrorCategory::IncompleteOrValidation, error.to_string()))
+}
+
+fn parse_request_id(value: &str) -> Result<RequestId, MinoError> {
+    RequestId::parse(value)
         .map_err(|error| MinoError::new(ErrorCategory::IncompleteOrValidation, error.to_string()))
 }

@@ -382,6 +382,16 @@ impl CommitGate {
         self.status
     }
 
+    /// Returns whether this gate permits ordered execution to continue.
+    #[must_use]
+    pub const fn is_satisfied(&self) -> bool {
+        !self.required
+            || matches!(
+                self.status,
+                CommitStatus::NotRequired | CommitStatus::Skipped | CommitStatus::Committed
+            )
+    }
+
     /// Returns the exact planned Conventional Commit message.
     #[must_use]
     pub fn planned_message(&self) -> &str {
@@ -449,6 +459,20 @@ impl CommitGate {
         self.status = CommitStatus::Committed;
         self.actual_commit = Some(commit.to_ascii_lowercase());
         self.committed_files = files;
+        self.evidence_refs.push(evidence_id);
+        Ok(())
+    }
+
+    fn skip(&mut self, evidence_id: EvidenceId) -> Result<(), DomainError> {
+        if !self.required || !matches!(self.status, CommitStatus::Pending | CommitStatus::Blocked) {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Only a pending or blocked required commit gate can be skipped",
+            ));
+        }
+        self.status = CommitStatus::Skipped;
+        self.actual_commit = None;
+        self.committed_files.clear();
         self.evidence_refs.push(evidence_id);
         Ok(())
     }
@@ -987,6 +1011,21 @@ impl Task {
                 )
             })?
             .record_commit(commit, files, evidence_id)
+    }
+
+    pub(crate) fn skip_commit(&mut self, evidence_id: EvidenceId) -> Result<(), DomainError> {
+        if self.status != TaskStatus::Done {
+            return Err(self.invalid_transition("skip its Git commit"));
+        }
+        self.commit_gate
+            .as_mut()
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no commit gate", self.id),
+                )
+            })?
+            .skip(evidence_id)
     }
 
     pub(crate) fn block(&mut self, reason: impl Into<String>) -> Result<(), DomainError> {

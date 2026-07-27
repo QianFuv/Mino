@@ -112,6 +112,15 @@ fn satisfy_commit(plan: &mut Plan, task_id: &TaskId, evidence: u16, minute: u8) 
     .expect("task commit should be recorded");
 }
 
+fn satisfy_commit_skip(plan: &mut Plan, task_id: &TaskId, evidence: u16, minute: u8) {
+    plan.skip_task_commit(
+        task_id,
+        evidence_id(&format!("E{evidence:04}")),
+        timestamp(minute),
+    )
+    .expect("approved commit skip should be recorded");
+}
+
 fn approved_two_task_plan() -> (Plan, TaskId, TaskId) {
     let first_id = task_id("T1");
     let second_id = task_id("T2");
@@ -411,6 +420,37 @@ fn only_the_first_dependency_complete_task_can_run() {
         .expect("plan should enter review");
     plan.validate_invariants()
         .expect("ordered lifecycle should satisfy invariants");
+}
+
+#[test]
+fn approved_commit_skips_satisfy_task_order_finish_and_acceptance() {
+    let (mut plan, first_id, second_id) = approved_two_task_plan();
+    plan.start_task(&first_id, timestamp(8))
+        .expect("first task should start");
+    satisfy_task(&mut plan, &first_id, 1, 9);
+    plan.complete_task(&first_id, timestamp(11))
+        .expect("first task should complete");
+    satisfy_commit_skip(&mut plan, &first_id, 3, 12);
+
+    plan.start_task(&second_id, timestamp(13))
+        .expect("skipped first gate should permit the second task");
+    satisfy_task(&mut plan, &second_id, 4, 14);
+    plan.complete_task(&second_id, timestamp(16))
+        .expect("second task should complete");
+    satisfy_commit_skip(&mut plan, &second_id, 6, 17);
+    satisfy_global(&mut plan, 7, 18);
+
+    plan.finish_execution(timestamp(19))
+        .expect("skipped required gates should permit review");
+    plan.accept_review(
+        "reviewer".to_owned(),
+        "chat:skips-accepted".to_owned(),
+        timestamp(20),
+    )
+    .expect("skipped required gates should permit acceptance");
+    assert_eq!(plan.status(), PlanStatus::Done);
+    plan.validate_invariants()
+        .expect("skipped commit lifecycle should remain valid");
 }
 
 #[test]

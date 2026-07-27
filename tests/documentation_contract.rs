@@ -123,9 +123,13 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     (&["exec", "criterion", "--help"], &["pass", "help"]),
     (
         &["git", "--help"],
-        &["inspect", "bind", "branch", "commit", "hook", "help"],
+        &[
+            "inspect", "bind", "branch", "commit", "gate", "hook", "help",
+        ],
     ),
     (&["git", "branch", "--help"], &["propose", "create", "help"]),
+    (&["git", "commit", "--help"], &["record-manual", "help"]),
+    (&["git", "gate", "--help"], &["skip", "help"]),
     (
         &["git", "hook", "--help"],
         &["propose", "status", "install", "run", "help"],
@@ -158,6 +162,8 @@ const LEAF_COMMANDS: &[&str] = &[
     "git branch create",
     "git branch propose",
     "git commit",
+    "git commit record-manual",
+    "git gate skip",
     "git hook install",
     "git hook propose",
     "git hook run",
@@ -339,6 +345,8 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             .collect::<Vec<_>>(),
         [
             "git.branch.create",
+            "git.commit.record-manual",
+            "git.gate.skip",
             "git.hook.install",
             "plan.amend.approve",
             "plan.approve",

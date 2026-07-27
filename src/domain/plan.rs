@@ -2094,9 +2094,9 @@ impl Plan {
             })?;
         if let Some(prior_id) = self.task_order[..task_position].iter().find(|prior_id| {
             self.task(prior_id).is_some_and(|prior| {
-                prior.commit_gate().is_some_and(|gate| {
-                    gate.is_required() && gate.status() != CommitStatus::Committed
-                })
+                prior
+                    .commit_gate()
+                    .is_some_and(|gate| gate.is_required() && !gate.is_satisfied())
             })
         }) {
             return Err(DomainError::new(
@@ -2462,6 +2462,25 @@ impl Plan {
         self.validate_invariants()
     }
 
+    /// Records an explicitly approved exception for one required commit gate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan is In Progress and the task is Done
+    /// with a pending or blocked required commit gate.
+    pub fn skip_task_commit(
+        &mut self,
+        task_id: &TaskId,
+        evidence_id: EvidenceId,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.require_status(PlanStatus::InProgress, "skip a task commit")?;
+        let next_revision = self.next_revision()?;
+        self.task_mut(task_id)?.skip_commit(evidence_id)?;
+        self.record_revision(next_revision, updated_at);
+        self.validate_invariants()
+    }
+
     /// Records passing evidence for a criterion on the active task.
     ///
     /// # Errors
@@ -2653,7 +2672,7 @@ impl Plan {
         }
         if let Some(task) = self.tasks.iter().find(|task| {
             task.commit_gate()
-                .is_some_and(|gate| gate.is_required() && gate.status() != CommitStatus::Committed)
+                .is_some_and(|gate| gate.is_required() && !gate.is_satisfied())
         }) {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
@@ -2879,7 +2898,7 @@ impl Plan {
         if task.status() != TaskStatus::Done
             || task
                 .commit_gate()
-                .is_some_and(|gate| gate.is_required() && gate.status() != CommitStatus::Committed)
+                .is_some_and(|gate| gate.is_required() && !gate.is_satisfied())
         {
             return Err(DomainError::new(
                 DomainErrorKind::InvalidTransition,
@@ -2918,9 +2937,9 @@ impl Plan {
         }
         if self.tasks.iter().any(|task| {
             task.status() != TaskStatus::Done
-                || task.commit_gate().is_some_and(|gate| {
-                    gate.is_required() && gate.status() != CommitStatus::Committed
-                })
+                || task
+                    .commit_gate()
+                    .is_some_and(|gate| gate.is_required() && !gate.is_satisfied())
         }) || !self.global_verification_is_satisfied()
         {
             return Err(DomainError::new(

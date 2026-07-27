@@ -8,8 +8,8 @@ use crate::application::plan::{
 };
 use crate::domain::{
     AcceptanceCriterion, CheckStatus, CommitStatus, CriterionId, CriterionStatus, Evidence,
-    EvidenceId, EvidenceType, FileChange, GitFlowConsent, Plan, RequestId, ReviewClassification,
-    ReviewStatus, Task, TaskId, Timestamp, VerificationCheck,
+    EvidenceId, EvidenceType, FileChange, Plan, RequestId, ReviewClassification, ReviewStatus,
+    Task, TaskId, Timestamp, VerificationCheck,
 };
 use crate::evidence::{EvidenceError, EvidenceErrorKind, EvidenceStore};
 use crate::git::matches_file_map_path;
@@ -513,10 +513,7 @@ fn validate_commit_precondition(
     let Some(gate) = task.commit_gate().filter(|gate| gate.is_required()) else {
         return Ok(());
     };
-    if !plan.git_readiness().git_flow_enabled()
-        || plan.git_readiness().git_flow_consent() != GitFlowConsent::Approved
-        || gate.status() != CommitStatus::Pending
-    {
+    if gate.status() != CommitStatus::Pending {
         return Err(incomplete(format!(
             "Task {} required commit gate is not eligible",
             task.id()
@@ -687,23 +684,26 @@ pub(crate) fn validate_review_evidence(
     let superseded = superseded_ids(evidence);
     for task in plan.tasks() {
         validate_task_evidence(root, plan, task, evidence)?;
-        if let Some(gate) = task
-            .commit_gate()
-            .filter(|gate| gate.is_required() && gate.status() == CommitStatus::Committed)
-        {
+        if let Some(gate) = task.commit_gate().filter(|gate| gate.is_required()) {
             let evidence_id = gate.evidence_refs().first().ok_or_else(|| {
                 incomplete(format!("Task {} commit evidence is missing", task.id()))
             })?;
             let record = evidence_by_id(evidence, evidence_id)?;
-            if superseded.contains(record.id())
-                || plan.is_evidence_stale(record.id())
-                || record.kind() != EvidenceType::Commit
-                || record.plan_id() != plan.id()
-                || record.task_id() != Some(task.id())
-                || record.artifact_path() != gate.actual_commit()
-            {
+            let has_valid_binding = !superseded.contains(record.id())
+                && !plan.is_evidence_stale(record.id())
+                && record.plan_id() == plan.id()
+                && record.task_id() == Some(task.id());
+            let has_valid_terminal_evidence = match gate.status() {
+                CommitStatus::Committed => {
+                    record.kind() == EvidenceType::Commit
+                        && record.artifact_path() == gate.actual_commit()
+                }
+                CommitStatus::Skipped => record.kind() == EvidenceType::AcceptedException,
+                _ => false,
+            };
+            if !has_valid_binding || !has_valid_terminal_evidence {
                 return Err(incompatible(format!(
-                    "Task {} commit evidence {} is stale or incompatible",
+                    "Task {} commit-gate evidence {} is stale or incompatible",
                     task.id(),
                     record.id()
                 )));
@@ -772,10 +772,10 @@ fn validate_global_evidence(
     }
     if let Some(task) = plan.tasks().iter().find(|task| {
         task.commit_gate()
-            .is_some_and(|gate| gate.is_required() && gate.status() != CommitStatus::Committed)
+            .is_some_and(|gate| gate.is_required() && !gate.is_satisfied())
     }) {
         return Err(incomplete(format!(
-            "Task {} required commit gate is not Committed",
+            "Task {} required commit gate is not satisfied",
             task.id()
         )));
     }

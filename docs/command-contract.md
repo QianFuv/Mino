@@ -23,7 +23,7 @@
 - 修改现有计划或证据的命令要求当前 `--expect-revision` 和 UUID `--request-id`；authored mutation 还要求 `--actor`。
 - 每项不同修改必须使用新的 UUID；只有输入完全相同时才能复用 request ID 进行重试。
 - 修改成功后必须丢弃旧 revision，重新读取 context。
-- `git bind`、`git branch create` 和 `git commit` 不接受调用方自定义的计划 mutation 元数据。它们使用各自的绑定、审批或恢复日志契约。
+- `git bind`、`git branch create` 和自动 `git commit` 不接受调用方自定义的计划 mutation 元数据。`git commit record-manual` 与 `git gate skip` 是显式的 revision/request mutation，并要求 approval reference。
 
 ## 命令总览
 
@@ -171,6 +171,8 @@ schedule spec 把当前 `--plan`、`--expect-revision` 和 `--check` 绑定到�
 | `mino git branch propose` | 无 | 派生 `mino/<plan-id>`，交由 Git 校验，并报告 clean/base/source/ref blockers。 |
 | `mino git branch create` | 本地分支、journal、binding | 要求 `--approval-ref`；可选 `--branch` 必须与提案完全一致。重新核对工作树和 base 后创建并切换。 |
 | `mino git commit` | 精确 index、一个本地 commit、evidence、plan、journal | 只为第一个符合条件且 commit gate 待处理的 Done 任务执行。 |
+| `mino git commit record-manual` | commit evidence、plan | 不修改 Git；要求当前分支 HEAD 的完整 commit ID、approval reference、revision 和 request ID，并验证 parent、消息、File Map、Commit Scope 与检查覆盖的文件内容。 |
+| `mino git gate skip` | accepted-exception evidence、plan | 要求 approval reference、原因、revision 和 request ID；把 Pending/Blocked required gate 记录为可审计的 Skipped。 |
 | `mino git hook propose` | 无 | 读取默认 hooks、ownership marker、模板/实际摘要和 custom hook 配置，生成稳定 proposal hash。 |
 | `mino git hook status` | 无 | 返回同一组有界 ownership 与内容事实。 |
 | `mino git hook install` | 仅 hook 文件，审批边界 | 要求当前 proposal hash 和 approval reference；只安装或修复 absent/Mino-owned 默认 hooks。 |
@@ -181,6 +183,8 @@ schedule spec 把当前 `--plan`、`--expect-revision` 和 `--check` 绑定到�
 branch create 是独立审批边界，计划批准和 Git Flow consent 不能替代它。Mino 先写 `.mino/git/branches/<plan-id>/intent.json`，再以禁用 hooks 的精确 `git switch -c` 操作 base HEAD，确认 post-state 后才写 binding 和 `completion.json`。精确重试能够区分未变化的失败、已创建待协调的分支和已完成操作。
 
 git commit 不是新的会话审批边界；它只消费当前计划批准中明确的 Approved Git Flow 范围。前置检查会拒绝已有 staged path、index/worktree 混合内容、范围外路径、submodule、symlink、rename、clean filter、branch 或 parent drift。Mino 在 `git add -- <exact paths>` 前保存 intent，随后记录 staged tree，使用计划中的单行消息运行正常 hooks，并验证 parent/tree/message/files 后写 Commit evidence、plan gate 和 completion。失败现场会保留，不会自动 reset 或 unstage，也不会使用 `--no-verify`。
+
+关闭 Git Flow 时，required commit gate 仍可在任务完成后通过人工路径闭环。`git commit record-manual` 只记录调用方已经创建的当前 HEAD；它不会运行 `git add` 或 `git commit`，并要求 task check 的 fingerprint 文件快照与该 commit 的当前工作树内容一致。`git gate skip` 是独立审批边界，保存 AcceptedException evidence；任务顺序、finish 和 review 接受 Committed、Not Required 或已批准的 Skipped。
 
 hooks 是可选建议层。Absent、Current 和 Mino-Owned-Drifted 可以进入幂等安装；用户 hooks、符号链接和 custom `core.hooksPath` 只返回手工集成说明。已安装脚本只调用 `mino git hook run`，即使 Mino 不可用或拒绝操作也会正常退出；运行时不修改 Git 或 Mino 状态。
 

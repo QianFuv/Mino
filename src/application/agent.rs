@@ -44,6 +44,8 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("git.branch.create", false, true),
     ("git.branch.propose", false, false),
     ("git.commit", false, false),
+    ("git.commit.record-manual", true, true),
+    ("git.gate.skip", true, true),
     ("git.hook.install", false, true),
     ("git.hook.propose", false, false),
     ("git.hook.run", false, false),
@@ -735,6 +737,8 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
         .iter()
         .find(|task| task.status() == TaskStatus::InProgress);
     let can_commit = pending_commit_task(plan).is_some();
+    let has_automatic_commit_consent = plan.git_readiness().git_flow_enabled()
+        && plan.git_readiness().git_flow_consent() == crate::domain::GitFlowConsent::Approved;
     let (mut allowed_actions, next_actions) = if let Some(task) = active {
         let next_actions = next_execution_check(plan).map_or_else(
             || {
@@ -763,10 +767,22 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
             next_actions,
         )
     } else if let Some(task_id) = pending_commit_task(plan) {
-        (
-            action_ids(&["git.commit", "exec.block"]),
-            vec![commit_action(plan, task_id)],
-        )
+        if has_automatic_commit_consent {
+            (
+                action_ids(&[
+                    "git.commit",
+                    "git.commit.record-manual",
+                    "git.gate.skip",
+                    "exec.block",
+                ]),
+                vec![commit_action(plan, task_id)],
+            )
+        } else {
+            (
+                action_ids(&["git.commit.record-manual", "git.gate.skip", "exec.block"]),
+                Vec::new(),
+            )
+        }
     } else if let Some(task_id) = first_incomplete_task(plan) {
         (
             action_ids(&["exec.start", "exec.block"]),
@@ -786,15 +802,20 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
     allowed_actions.push("plan.amend.propose".to_owned());
     Guidance {
         allowed_actions,
-        blocked_actions: if can_commit {
+        blocked_actions: if can_commit && has_automatic_commit_consent {
             Vec::new()
+        } else if can_commit {
+            vec![blocked(
+                "git.commit",
+                "Automatic commit requires Approved Git Flow consent; record a manually approved commit or approved skip",
+            )]
         } else {
             vec![blocked(
                 "git.commit",
                 "Task verification or completion is incomplete",
             )]
         },
-        approval_required: false,
+        approval_required: can_commit && !has_automatic_commit_consent,
         next_actions,
     }
 }
