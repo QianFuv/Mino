@@ -207,14 +207,14 @@ fn cli_binding_is_idempotent_branch_aware_and_cannot_cross_worktrees() {
     assert_eq!(replay["replayed"], true);
     assert_eq!(fs::read(&binding_path).unwrap(), binding_bytes);
 
-    assert_explicit_rebinding(&main, &plan_id);
+    let selected_plan_id = assert_explicit_rebinding(&main, &plan_id);
     let context = agent_context(&main);
-    assert_eq!(context["active_plan"]["id"], plan_id.as_str());
+    assert_eq!(context["active_plan"]["id"], selected_plan_id.as_str());
     assert_eq!(context["git"]["binding_status"], "current");
 
     git(&main, &["switch", "--quiet", "-c", "other"]);
     let stale = agent_context(&main);
-    assert_eq!(stale["active_plan"], Value::Null);
+    assert_eq!(stale["active_plan"]["id"], selected_plan_id.as_str());
     assert_eq!(stale["git"]["binding_status"], "stale_branch");
     let doctor = json_success(&run_mino(&main, &["project", "doctor"]));
     assert!(doctor["findings"].as_array().is_some_and(|findings| {
@@ -237,7 +237,7 @@ fn cli_binding_is_idempotent_branch_aware_and_cannot_cross_worktrees() {
     assert!(detached_binding["binding"]["detached_head"].is_string());
     git(&main, &["switch", "--quiet", "other"]);
     let stale_head = agent_context(&main);
-    assert_eq!(stale_head["active_plan"], Value::Null);
+    assert_eq!(stale_head["active_plan"]["id"], selected_plan_id.as_str());
     assert_eq!(stale_head["git"]["binding_status"], "stale_head");
     json_success(&run_mino(
         &main,
@@ -274,7 +274,7 @@ fn cli_binding_is_idempotent_branch_aware_and_cannot_cross_worktrees() {
     );
 }
 
-fn assert_explicit_rebinding(root: &Path, original_plan_id: &PlanId) {
+fn assert_explicit_rebinding(root: &Path, original_plan_id: &PlanId) -> PlanId {
     let second_plan_id = create_additional_plan(root);
     let replacement = json_success(&run_mino(
         root,
@@ -287,6 +287,30 @@ fn assert_explicit_rebinding(root: &Path, original_plan_id: &PlanId) {
         ],
     ));
     assert_eq!(replacement["binding"]["plan_id"], second_plan_id.as_str());
+    let unresolved = agent_context(root);
+    assert_eq!(unresolved["active_plan"], Value::Null);
+    let alternatives = json_success(&run_mino(root, &["plan", "alternatives"]));
+    assert_eq!(alternatives["selection_revision"], 0);
+    assert_eq!(alternatives["selected_plan"], Value::Null);
+    json_success(&run_mino(
+        root,
+        &[
+            "plan",
+            "select",
+            "--plan",
+            second_plan_id.as_str(),
+            "--expect-selection-revision",
+            "0",
+            "--request-id",
+            "61000000-0000-0000-0000-000000000003",
+            "--actor",
+            "codex",
+            "--approval-ref",
+            "test:explicit-selection",
+            "--reason",
+            "Select the second project alternative",
+        ],
+    ));
     assert_eq!(
         agent_context(root)["active_plan"]["id"],
         second_plan_id.as_str()
@@ -301,6 +325,11 @@ fn assert_explicit_rebinding(root: &Path, original_plan_id: &PlanId) {
             "--current",
         ],
     ));
+    assert_eq!(
+        agent_context(root)["active_plan"]["id"],
+        second_plan_id.as_str()
+    );
+    second_plan_id
 }
 
 fn add_status_matrix(area: &TestArea, repository: &Path) {
