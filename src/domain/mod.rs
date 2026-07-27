@@ -16,6 +16,7 @@ mod state;
 mod task;
 mod timestamp;
 mod version;
+mod workspace;
 
 pub use amendment::{
     Amendment, AmendmentClassification, AmendmentImpact, AmendmentOperation, AmendmentPatch,
@@ -58,4 +59,8 @@ pub use timestamp::Timestamp;
 pub use version::{
     CURRENT_PROTOCOL_REVISION, CURRENT_PROTOCOL_VERSION, CURRENT_SCHEMA_VERSION, ProtocolVersion,
     SchemaVersion,
+};
+pub use workspace::{
+    WorkspaceFileKind, WorkspaceFileSnapshot, WorkspaceFingerprint, WorkspaceFingerprintScope,
+    WorkspaceRepositoryMode, WorkspaceScopeKind, WorkspaceStatusEntry,
 };

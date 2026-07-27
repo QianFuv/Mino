@@ -46,6 +46,8 @@ pub enum CheckStatus {
     Running,
     /// The latest required run passed.
     Passed,
+    /// Previously passing evidence no longer matches current workspace content.
+    Stale,
     /// The latest required run failed.
     Failed,
     /// The check cannot currently run.

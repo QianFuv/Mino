@@ -2,6 +2,7 @@
 
 mod commands;
 mod managed_fs;
+mod workspace;
 
 /// Application services that coordinate domain state, storage, and projections.
 pub mod application;

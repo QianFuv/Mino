@@ -378,6 +378,7 @@ impl EvidenceStore {
             output_digest: Some(sha256_digest(prepared.description.as_bytes())),
             artifact_path: prepared.source.clone(),
             artifact_digest,
+            workspace_fingerprint: None,
             actor: request.context().actor().to_owned(),
             captured_at: request.context().captured_at().clone(),
             redactions: prepared.redactions,
@@ -1093,6 +1094,7 @@ fn command_evidence(
         output_digest: Some(result.output_digest().to_owned()),
         artifact_path: None,
         artifact_digest: None,
+        workspace_fingerprint: lease.workspace_fingerprint().cloned(),
         actor: lease.actor().to_owned(),
         captured_at: result.finished_at().clone(),
         redactions: result

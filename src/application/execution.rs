@@ -17,6 +17,7 @@ use crate::runner::{
 };
 use crate::store::sha256_digest;
 use crate::validation::{validate_plan, validation_failure};
+use crate::workspace::capture_workspace_fingerprint;
 use crate::{ErrorCategory, MinoError};
 
 const DEFAULT_CHECK_TIMEOUT: Duration = Duration::from_mins(5);
@@ -271,6 +272,8 @@ impl ExecutionService {
             leased_plan.metadata().updated_at().clone(),
         )
         .map_err(|error| map_domain_error(&error))?;
+        let fingerprint =
+            capture_workspace_fingerprint(&self.root, &leased_plan, leased_check.task_id.as_ref())?;
         let lease = CheckRunLease::new(
             context,
             &leased_check.check,
@@ -279,6 +282,7 @@ impl ExecutionService {
             self.environment.digest(),
             self.redactor.policy_digest(),
         )
+        .and_then(|lease| lease.bind_workspace_fingerprint(fingerprint))
         .map_err(|error| map_domain_error(&error))?;
         let journal_directory = PathBuf::from(".mino")
             .join("plans")

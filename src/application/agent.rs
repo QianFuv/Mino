@@ -927,7 +927,12 @@ fn next_execution_check(plan: &Plan) -> Option<&CheckId> {
         return task
             .verification_checks()
             .iter()
-            .find(|check| matches!(check.status(), CheckStatus::Pending | CheckStatus::Failed))
+            .find(|check| {
+                matches!(
+                    check.status(),
+                    CheckStatus::Pending | CheckStatus::Failed | CheckStatus::Stale
+                )
+            })
             .map(crate::domain::VerificationCheck::id);
     }
     if plan
@@ -938,7 +943,12 @@ fn next_execution_check(plan: &Plan) -> Option<&CheckId> {
         return plan
             .global_verification()
             .iter()
-            .find(|check| matches!(check.status(), CheckStatus::Pending | CheckStatus::Failed))
+            .find(|check| {
+                matches!(
+                    check.status(),
+                    CheckStatus::Pending | CheckStatus::Failed | CheckStatus::Stale
+                )
+            })
             .map(crate::domain::VerificationCheck::id);
     }
     None

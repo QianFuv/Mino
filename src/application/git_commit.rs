@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::application::completion::{validate_task_deviations, validate_task_evidence};
+use crate::application::completion::{
+    FreshnessScope, reconcile_stale_checks, validate_task_deviations, validate_task_evidence,
+};
 use crate::application::git_binding::map_git_error;
 use crate::application::plan::{PlanMutationRequest, PlanService, derived_request_id};
 use crate::domain::{
@@ -185,11 +187,6 @@ impl GitCommitService {
     ) -> Result<GitTaskCommitReport, MinoError> {
         let plan = self.plans.load_verified(&journal.intent.plan_id)?;
         let task = validate_prepared_plan(&plan, &journal.intent)?;
-        let evidence = self
-            .evidence
-            .list(plan.id())
-            .map_err(|error| map_evidence_error(&error))?;
-        validate_task_evidence(&plan, task, &evidence)?;
         validate_task_deviations(&plan, task)?;
         validate_commit_snapshot_scope(task, &journal.intent.files)
             .map_err(|error| map_git_error(&error))?;
@@ -679,7 +676,18 @@ impl GitCommitService {
             .evidence
             .list(plan.id())
             .map_err(|error| map_evidence_error(&error))?;
-        validate_task_evidence(plan, task, &evidence)?;
+        if let Some((report, stale)) = reconcile_stale_checks(
+            &self.plans,
+            &self.root,
+            plan,
+            &evidence,
+            FreshnessScope::Task(task.id()),
+            "mino",
+            &Timestamp::now_utc(),
+        )? {
+            return Err(stale_commit_error(&report, &stale));
+        }
+        validate_task_evidence(&self.root, plan, task, &evidence)?;
         validate_task_deviations(plan, task)?;
         let facts = self.inspect_git()?;
         validate_live_identity(&self.root, plan, &facts)?;
@@ -1083,4 +1091,22 @@ fn map_evidence_error(error: &EvidenceError) -> MinoError {
         | EvidenceErrorKind::LockTimeout => ErrorCategory::EnvironmentUnavailable,
     };
     MinoError::new(category, error.message())
+}
+
+fn stale_commit_error(
+    report: &crate::application::plan::PlanOperationReport,
+    stale: &[crate::domain::CheckId],
+) -> MinoError {
+    MinoError::new(
+        ErrorCategory::IncompleteOrValidation,
+        format!(
+            "Task checks {} became Stale at plan revision {}; rerun verification before commit",
+            stale
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            report.revision
+        ),
+    )
 }

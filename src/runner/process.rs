@@ -226,7 +226,7 @@ impl CheckRunJournal {
             existing
                 .validate()
                 .map_err(|error| corrupt(error.to_string()))?;
-            if existing != *lease {
+            if existing != *lease && !existing.is_legacy_compatible_with(lease) {
                 return Err(RunnerError::new(
                     RunnerErrorKind::JournalConflict,
                     format!(
@@ -240,6 +240,18 @@ impl CheckRunJournal {
         let bytes = canonical_bytes(lease)?;
         publish_immutable(&self.filesystem, &lease_path, &bytes)?;
         Ok(true)
+    }
+
+    fn lease(&self, request_id: &RequestId) -> Result<Option<CheckRunLease>, RunnerError> {
+        let path = self.lease_path(request_id);
+        if !self.filesystem.exists(&path).map_err(managed_error)? {
+            return Ok(None);
+        }
+        let lease: CheckRunLease = read_canonical(&self.filesystem, &path)?;
+        lease
+            .validate()
+            .map_err(|error| corrupt(error.to_string()))?;
+        Ok(Some(lease))
     }
 
     /// Loads the immutable terminal result for a request when present.
@@ -420,8 +432,20 @@ impl ProcessRunner {
                 )
             })?;
         let is_new = journal.begin(&lease)?;
+        let effective_lease = if is_new {
+            lease.clone()
+        } else {
+            journal.lease(lease.request_id())?.ok_or_else(|| {
+                corrupt(format!(
+                    "Check request {} lost its persisted lease",
+                    lease.request_id()
+                ))
+            })?
+        };
         if let Some(result) = journal.result(lease.request_id())? {
-            if result.lease() != &lease {
+            if result.lease() != &effective_lease
+                || effective_lease != lease && !effective_lease.is_legacy_compatible_with(&lease)
+            {
                 return Err(RunnerError::new(
                     RunnerErrorKind::JournalConflict,
                     format!(
@@ -436,7 +460,7 @@ impl ProcessRunner {
             });
         }
         if !is_new {
-            let result = interrupted_result(lease);
+            let result = interrupted_result(effective_lease);
             journal.complete(&result)?;
             return Ok(JournaledRun {
                 disposition: RunDisposition::RecoveredInterrupted,

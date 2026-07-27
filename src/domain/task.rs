@@ -293,6 +293,17 @@ impl VerificationCheck {
         Ok(())
     }
 
+    pub(crate) fn mark_stale(&mut self) -> Result<(), DomainError> {
+        if self.status != CheckStatus::Passed {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Check {} is not Passed", self.id),
+            ));
+        }
+        self.status = CheckStatus::Stale;
+        Ok(())
+    }
+
     pub(crate) fn reset_for_rework(&mut self) {
         self.status = CheckStatus::Pending;
     }
@@ -1223,6 +1234,45 @@ impl Task {
                 )
             })?;
         check.record_run(evidence_id, passed)
+    }
+
+    pub(crate) fn mark_check_stale(&mut self, check_id: &CheckId) -> Result<bool, DomainError> {
+        let evidence_refs = self
+            .verification_checks
+            .iter()
+            .find(|check| &check.id == check_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no check {check_id}", self.id),
+                )
+            })?
+            .evidence_refs
+            .clone();
+        self.verification_checks
+            .iter_mut()
+            .find(|check| &check.id == check_id)
+            .expect("validated check exists")
+            .mark_stale()?;
+        for criterion in &mut self.acceptance_criteria {
+            if criterion
+                .evidence_refs
+                .iter()
+                .any(|evidence_id| evidence_refs.contains(evidence_id))
+            {
+                criterion.reset_for_rework();
+            }
+        }
+        let reopened = self.status == TaskStatus::Done;
+        if reopened {
+            if let Some(commit_gate) = &mut self.commit_gate {
+                commit_gate.reset_for_material_amendment();
+            }
+            self.status = TaskStatus::Ready;
+            self.resume_status = None;
+            self.blocker = None;
+        }
+        Ok(reopened)
     }
 
     pub(crate) fn validate_invariants(&self) -> Result<(), DomainError> {

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CheckId, CriterionId, DomainError, DomainErrorKind, EvidenceId, PlanId, TaskId, Timestamp,
+    WorkspaceFingerprint,
 };
 
 /// Supported evidence kinds.
@@ -78,6 +79,7 @@ pub(crate) struct EvidenceFields {
     pub output_digest: Option<String>,
     pub artifact_path: Option<String>,
     pub artifact_digest: Option<String>,
+    pub workspace_fingerprint: Option<WorkspaceFingerprint>,
     pub actor: String,
     pub captured_at: Timestamp,
     pub redactions: Vec<Redaction>,
@@ -105,6 +107,8 @@ pub struct Evidence {
     output_digest: Option<String>,
     artifact_path: Option<String>,
     artifact_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_fingerprint: Option<WorkspaceFingerprint>,
     actor: String,
     captured_at: Timestamp,
     redactions: Vec<Redaction>,
@@ -131,6 +135,8 @@ struct UncheckedEvidence {
     output_digest: Option<String>,
     artifact_path: Option<String>,
     artifact_digest: Option<String>,
+    #[serde(default)]
+    workspace_fingerprint: Option<WorkspaceFingerprint>,
     actor: String,
     captured_at: Timestamp,
     redactions: Vec<Redaction>,
@@ -157,6 +163,7 @@ impl TryFrom<UncheckedEvidence> for Evidence {
             output_digest: unchecked.output_digest,
             artifact_path: unchecked.artifact_path,
             artifact_digest: unchecked.artifact_digest,
+            workspace_fingerprint: unchecked.workspace_fingerprint,
             actor: unchecked.actor,
             captured_at: unchecked.captured_at,
             redactions: unchecked.redactions,
@@ -195,6 +202,7 @@ impl Evidence {
             output_digest: fields.output_digest,
             artifact_path: fields.artifact_path,
             artifact_digest: fields.artifact_digest,
+            workspace_fingerprint: fields.workspace_fingerprint,
             actor: fields.actor,
             captured_at: fields.captured_at,
             redactions: fields.redactions,
@@ -294,6 +302,12 @@ impl Evidence {
         self.artifact_digest.as_deref()
     }
 
+    /// Returns the exact workspace identity captured for command evidence.
+    #[must_use]
+    pub const fn workspace_fingerprint(&self) -> Option<&WorkspaceFingerprint> {
+        self.workspace_fingerprint.as_ref()
+    }
+
     /// Returns the actor responsible for the observation.
     #[must_use]
     pub fn actor(&self) -> &str {
@@ -350,6 +364,9 @@ impl Evidence {
             ));
         }
         validate_redactions(&self.redactions)?;
+        if let Some(fingerprint) = &self.workspace_fingerprint {
+            fingerprint.validate()?;
+        }
         match self.kind {
             EvidenceType::Command => self.validate_command(),
             EvidenceType::File
@@ -380,6 +397,7 @@ impl Evidence {
 
     fn validate_artifact(&self) -> Result<(), DomainError> {
         if !self.command.is_empty()
+            || self.workspace_fingerprint.is_some()
             || self.artifact_path.as_deref().is_none_or(str::is_empty)
             || self.artifact_digest.as_deref().is_none_or(str::is_empty)
         {
@@ -393,6 +411,7 @@ impl Evidence {
 
     fn validate_reference(&self) -> Result<(), DomainError> {
         if !self.command.is_empty()
+            || self.workspace_fingerprint.is_some()
             || self.artifact_path.as_deref().is_none_or(str::is_empty)
             || self.output_summary.as_deref().is_none_or(str::is_empty)
         {
@@ -406,6 +425,7 @@ impl Evidence {
 
     fn validate_observation(&self, requires_reference: bool) -> Result<(), DomainError> {
         if !self.command.is_empty()
+            || self.workspace_fingerprint.is_some()
             || self.output_summary.as_deref().is_none_or(str::is_empty)
             || requires_reference && self.artifact_path.as_deref().is_none_or(str::is_empty)
         {

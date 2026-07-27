@@ -211,7 +211,7 @@ fn preflight_refusals_preserve_head_index_and_journal() {
 
     let staged = TestRepository::new("staged", FixtureState::Done, true);
     git(staged.root(), &["add", "--", TASK_PATH]);
-    assert_preflight_refusal(&staged, ErrorCategory::PolicyViolation);
+    assert_preflight_refusal(&staged, ErrorCategory::IncompleteOrValidation);
 
     let mixed = TestRepository::new("mixed", FixtureState::Done, true);
     git(mixed.root(), &["add", "--", TASK_PATH]);
@@ -220,7 +220,7 @@ fn preflight_refusals_preserve_head_index_and_journal() {
         "pub fn feature() -> u8 { 3 }\n",
     )
     .expect("mixed worktree content should be written");
-    assert_preflight_refusal(&mixed, ErrorCategory::PolicyViolation);
+    assert_preflight_refusal(&mixed, ErrorCategory::IncompleteOrValidation);
 
     let outside = TestRepository::new("outside", FixtureState::Done, true);
     fs::write(outside.root().join("outside.txt"), "outside\n")
@@ -235,7 +235,7 @@ fn preflight_refusals_preserve_head_index_and_journal() {
         advanced.root(),
         &["commit", "--quiet", "-m", "test: advance fixture head"],
     );
-    assert_preflight_refusal(&advanced, ErrorCategory::DriftDetected);
+    assert_preflight_refusal(&advanced, ErrorCategory::IncompleteOrValidation);
 }
 
 #[test]
@@ -554,6 +554,8 @@ fn prepare_task(root: &Path, plan_id: &PlanId, state: FixtureState) {
         .start_task(mutation(5, 10, "start"), task_id())
         .expect("task should start");
     if matches!(state, FixtureState::Done) {
+        fs::write(root.join(TASK_PATH), "pub fn feature() -> u8 { 2 }\n")
+            .expect("task file should be written before verification");
         let checked = execution
             .run_check(
                 &mutation(started.revision, 11, "check"),
@@ -570,8 +572,6 @@ fn prepare_task(root: &Path, plan_id: &PlanId, state: FixtureState) {
                 checked.evidence().id().clone(),
             )
             .expect("criterion should bind to command evidence");
-        fs::write(root.join(TASK_PATH), "pub fn feature() -> u8 { 2 }\n")
-            .expect("task file should be written");
         completion
             .complete_task(mutation(criterion.revision, 13, "complete"), task_id())
             .expect("task should complete");

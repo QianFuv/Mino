@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::application::completion::validate_review_evidence;
+use crate::application::completion::{
+    FreshnessScope, reconcile_stale_checks, validate_review_evidence,
+};
 use crate::application::plan::{PlanMutationRequest, PlanOperationReport, PlanService};
 use crate::domain::{DraftTaskInput, Plan, ReviewClassification, ReviewStatus, TaskId};
 use crate::evidence::EvidenceStore;
@@ -170,7 +172,18 @@ impl ReviewService {
             .evidence
             .list(&request.plan_id)
             .map_err(|error| map_evidence_error(&error))?;
-        validate_review_evidence(&current, &evidence)?;
+        if let Some((report, stale)) = reconcile_stale_checks(
+            &self.plans,
+            &self.root,
+            &current,
+            &evidence,
+            FreshnessScope::All,
+            &request.actor,
+            &request.updated_at,
+        )? {
+            return Err(stale_review_error(&report, &stale));
+        }
+        validate_review_evidence(&self.root, &current, &evidence)?;
         self.plans.commit_semantic(
             request,
             changed_fields,
@@ -200,7 +213,18 @@ impl ReviewService {
             .evidence
             .list(&request.plan_id)
             .map_err(|error| map_evidence_error(&error))?;
-        validate_review_evidence(&current, &evidence)?;
+        if let Some((report, stale)) = reconcile_stale_checks(
+            &self.plans,
+            &self.root,
+            &current,
+            &evidence,
+            FreshnessScope::All,
+            &request.actor,
+            &request.updated_at,
+        )? {
+            return Err(stale_review_error(&report, &stale));
+        }
+        validate_review_evidence(&self.root, &current, &evidence)?;
         let actor = request.actor.clone();
         self.plans.commit_semantic(
             request,
@@ -284,4 +308,22 @@ fn map_evidence_error(error: &crate::evidence::EvidenceError) -> MinoError {
         crate::evidence::EvidenceErrorKind::CorruptStore => ErrorCategory::DriftDetected,
     };
     MinoError::new(category, error.to_string())
+}
+
+fn stale_review_error(
+    report: &crate::application::plan::PlanOperationReport,
+    stale: &[crate::domain::CheckId],
+) -> MinoError {
+    MinoError::new(
+        ErrorCategory::IncompleteOrValidation,
+        format!(
+            "Review evidence for checks {} became Stale at plan revision {}; rerun verification",
+            stale
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            report.revision
+        ),
+    )
 }

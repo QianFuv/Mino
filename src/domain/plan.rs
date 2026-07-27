@@ -2241,6 +2241,64 @@ impl Plan {
         self.validate_invariants()
     }
 
+    /// Marks passing verification checks stale after workspace content drift.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless every identifier names a currently Passed check
+    /// in an executable or review-state plan.
+    pub fn mark_checks_stale(
+        &mut self,
+        check_ids: &[CheckId],
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if check_ids.is_empty()
+            || !matches!(
+                self.status,
+                PlanStatus::InProgress | PlanStatus::Blocked | PlanStatus::Review
+            )
+        {
+            return Err(self.invalid_transition("mark verification checks stale"));
+        }
+        let mut candidate = self.clone();
+        let mut reopened_task = false;
+        for check_id in check_ids {
+            if let Some(task_index) = candidate.tasks.iter().position(|task| {
+                task.verification_checks()
+                    .iter()
+                    .any(|check| check.id() == check_id)
+            }) {
+                reopened_task |= candidate.tasks[task_index].mark_check_stale(check_id)?;
+            } else {
+                candidate
+                    .global_verification
+                    .iter_mut()
+                    .find(|check| check.id() == check_id)
+                    .ok_or_else(|| {
+                        DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            format!("Check {check_id} does not exist"),
+                        )
+                    })?
+                    .mark_stale()?;
+            }
+        }
+        if reopened_task {
+            for check in &mut candidate.global_verification {
+                check.reset_for_rework();
+            }
+        }
+        if candidate.status != PlanStatus::InProgress {
+            candidate.status = PlanStatus::InProgress;
+            candidate.resume_status = None;
+            candidate.blocker = None;
+        }
+        candidate.record_revision(candidate.next_revision()?, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Completes the active task after its local evidence gates are satisfied.
     ///
     /// # Errors

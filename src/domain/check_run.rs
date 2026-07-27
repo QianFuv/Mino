@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CheckId, DomainError, DomainErrorKind, PlanId, RequestId, TaskId, Timestamp, VerificationCheck,
+    WorkspaceFingerprint,
 };
 
 /// Version identifier for persisted check-run leases and terminal records.
@@ -143,6 +144,8 @@ pub struct CheckRunLease {
     cwd: String,
     expected_exit_code: i32,
     limits: CheckRunLimits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_fingerprint: Option<WorkspaceFingerprint>,
     environment_variables: Vec<String>,
     environment_digest: String,
     redaction_policy_digest: String,
@@ -173,12 +176,28 @@ impl CheckRunLease {
             cwd: check.cwd().to_owned(),
             expected_exit_code: check.expected_exit_code(),
             limits,
+            workspace_fingerprint: None,
             environment_variables,
             environment_digest: environment_digest.into(),
             redaction_policy_digest: redaction_policy_digest.into(),
         };
         lease.validate()?;
         Ok(lease)
+    }
+
+    /// Binds the exact workspace content observed before process execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when the supplied fingerprint is malformed.
+    pub fn bind_workspace_fingerprint(
+        mut self,
+        fingerprint: WorkspaceFingerprint,
+    ) -> Result<Self, DomainError> {
+        fingerprint.validate()?;
+        self.workspace_fingerprint = Some(fingerprint);
+        self.validate()?;
+        Ok(self)
     }
 
     /// Returns the invocation context.
@@ -253,6 +272,27 @@ impl CheckRunLease {
         self.limits
     }
 
+    /// Returns the exact verified workspace identity when the lease is current-format.
+    #[must_use]
+    pub const fn workspace_fingerprint(&self) -> Option<&WorkspaceFingerprint> {
+        self.workspace_fingerprint.as_ref()
+    }
+
+    pub(crate) fn is_legacy_compatible_with(&self, current: &Self) -> bool {
+        self.workspace_fingerprint.is_none()
+            && current.workspace_fingerprint.is_some()
+            && self.schema_version == current.schema_version
+            && self.context == current.context
+            && self.check_id == current.check_id
+            && self.command == current.command
+            && self.cwd == current.cwd
+            && self.expected_exit_code == current.expected_exit_code
+            && self.limits == current.limits
+            && self.environment_variables == current.environment_variables
+            && self.environment_digest == current.environment_digest
+            && self.redaction_policy_digest == current.redaction_policy_digest
+    }
+
     /// Returns the names of environment variables admitted to the child.
     #[must_use]
     pub fn environment_variables(&self) -> &[String] {
@@ -274,6 +314,9 @@ impl CheckRunLease {
     pub(crate) fn validate(&self) -> Result<(), DomainError> {
         self.context.validate()?;
         self.limits.validate()?;
+        if let Some(fingerprint) = &self.workspace_fingerprint {
+            fingerprint.validate()?;
+        }
         if self.schema_version != CHECK_RUN_SCHEMA_VERSION {
             return Err(DomainError::new(
                 DomainErrorKind::UnsupportedSchemaVersion,

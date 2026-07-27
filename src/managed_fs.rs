@@ -251,12 +251,28 @@ impl ProjectFs {
         path: &ManagedPath,
         maximum_bytes: u64,
     ) -> Result<Vec<u8>, ManagedFsError> {
+        self.read_bounded_with_metadata(path, maximum_bytes)
+            .map(|(bytes, _)| bytes)
+    }
+
+    pub(crate) fn read_bounded_with_metadata(
+        &self,
+        path: &ManagedPath,
+        maximum_bytes: u64,
+    ) -> Result<(Vec<u8>, std::fs::Metadata), ManagedFsError> {
         self.require_file(path)?;
         let file = self
             .directory
             .open(path.as_path())
             .map(cap_std::fs::File::into_std)
             .map_err(|error| io_error("open managed file", &self.display_path(path), &error))?;
+        let metadata = file.metadata().map_err(|error| {
+            io_error(
+                "inspect opened managed file",
+                &self.display_path(path),
+                &error,
+            )
+        })?;
         let mut bytes = Vec::new();
         file.take(maximum_bytes.saturating_add(1))
             .read_to_end(&mut bytes)
@@ -270,7 +286,7 @@ impl ProjectFs {
                 ),
             ));
         }
-        Ok(bytes)
+        Ok((bytes, metadata))
     }
 
     pub(crate) fn create_new_file(

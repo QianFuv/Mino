@@ -10,9 +10,10 @@ use mino::application::completion::CompletionService;
 use mino::application::execution::ExecutionService;
 use mino::application::plan::PlanMutationRequest;
 use mino::domain::{
-    AcceptanceCriterion, Approval, CheckId, CheckpointKind, CriterionId, CriterionStatus,
-    EvidenceId, EvidenceType, FileChange, FileMapEntry, GitFlowConsent, GitReadiness, Plan,
-    PlanDraftSeed, PlanId, PlanStatus, RequestId, Task, TaskId, Timestamp, VerificationCheck,
+    AcceptanceCriterion, Approval, CheckId, CheckStatus, CheckpointKind, CriterionId,
+    CriterionStatus, EvidenceId, EvidenceType, FileChange, FileMapEntry, GitFlowConsent,
+    GitReadiness, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId, Task, TaskId, TaskStatus,
+    Timestamp, VerificationCheck,
 };
 use mino::evidence::{AddEvidenceRequest, EvidenceRequestContext, EvidenceSource, EvidenceStore};
 use mino::git::matches_file_map_path;
@@ -327,18 +328,23 @@ fn start_active_task(project: &TestProject, sequence: u64) -> u64 {
 #[test]
 fn cli_completion_flow_rejects_scope_drift_then_enters_review() {
     let project = TestProject::new("flow", "pass");
+    let completed = complete_task_after_scope_and_freshness_rejections(&project);
+    assert_final_and_review_freshness(&project, &completed);
+}
+
+fn complete_task_after_scope_and_freshness_rejections(project: &TestProject) -> Value {
     let started = parse_success(&run_mino(
-        &project,
+        project,
         &mutation_arguments("start", project.base_revision, 10, &["--task", "T1"]),
     ));
     assert_eq!(started["revision"], project.base_revision + 1);
     let task_check = parse_success(&run_mino(
-        &project,
+        project,
         &check_arguments(project.base_revision + 1, 11, "TASK-CHECK"),
     ));
     assert_eq!(task_check["evidence"]["id"], "E0001");
     let criterion = parse_success(&run_mino(
-        &project,
+        project,
         &criterion_arguments(project.base_revision + 3, 12, "E0001"),
     ));
     assert_eq!(criterion["revision"], project.base_revision + 4);
@@ -346,7 +352,7 @@ fn cli_completion_flow_rejects_scope_drift_then_enters_review() {
     fs::write(project.path().join("outside.txt"), "outside\n")
         .expect("outside change should be written");
     let rejected = run_mino(
-        &project,
+        project,
         &mutation_arguments("complete", project.base_revision + 4, 13, &["--task", "T1"]),
     );
     assert_eq!(rejected.status.code(), Some(5));
@@ -361,24 +367,118 @@ fn cli_completion_flow_rejects_scope_drift_then_enters_review() {
     )
     .expect("planned change should be written");
 
-    let completed = parse_success(&run_mino(
-        &project,
+    let stale = run_mino(
+        project,
         &mutation_arguments("complete", project.base_revision + 4, 14, &["--task", "T1"]),
+    );
+    assert_eq!(stale.status.code(), Some(2));
+    let stale: Value = serde_json::from_slice(&stale.stdout).expect("failure should be JSON");
+    assert_eq!(stale["error"]["code"], "incomplete_or_validation");
+    assert_eq!(stale["missing"], serde_json::json!(["TASK-CHECK"]));
+    let stale_plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("stale transition should persist");
+    assert_eq!(stale_plan.revision(), project.base_revision + 5);
+    assert_eq!(
+        stale_plan
+            .task(&task_id())
+            .expect("task should exist")
+            .verification_checks()[0]
+            .status(),
+        CheckStatus::Stale
+    );
+    assert_eq!(
+        stale_plan
+            .task(&task_id())
+            .expect("task should exist")
+            .acceptance_criteria()[0]
+            .status(),
+        CriterionStatus::Pending
+    );
+    let rerun = parse_success(&run_mino(
+        project,
+        &check_arguments(project.base_revision + 5, 15, "TASK-CHECK"),
     ));
-    assert_eq!(completed["revision"], project.base_revision + 5);
+    assert_eq!(rerun["evidence"]["id"], "E0002");
+    let rebound = parse_success(&run_mino(
+        project,
+        &criterion_arguments(project.base_revision + 7, 16, "E0002"),
+    ));
+    let completed = parse_success(&run_mino(
+        project,
+        &mutation_arguments("complete", result_revision(&rebound), 17, &["--task", "T1"]),
+    ));
+    assert_eq!(completed["revision"], project.base_revision + 9);
     assert_eq!(completed["next_actions"][0]["id"], "exec.check.run");
+    completed
+}
+
+fn assert_final_and_review_freshness(project: &TestProject, completed: &Value) {
     let global = parse_success(&run_mino(
-        &project,
-        &check_arguments(project.base_revision + 5, 15, "GLOBAL-CHECK"),
+        project,
+        &check_arguments(result_revision(completed), 18, "GLOBAL-CHECK"),
     ));
-    assert_eq!(global["evidence"]["id"], "E0002");
+    assert_eq!(global["evidence"]["id"], "E0003");
     assert_eq!(global["next_actions"][0]["id"], "exec.finish");
-    let finish_arguments = mutation_arguments("finish", project.base_revision + 7, 16, &[]);
-    let finished = parse_success(&run_mino(&project, &finish_arguments));
+    fs::write(
+        project.path().join("src/feature.rs"),
+        "pub fn feature() -> u8 { 3 }\n",
+    )
+    .expect("post-global change should be written");
+    let stale_finish = run_mino(
+        project,
+        &mutation_arguments("finish", project.base_revision + 11, 19, &[]),
+    );
+    assert_eq!(stale_finish.status.code(), Some(2));
+    let stale_finish: Value =
+        serde_json::from_slice(&stale_finish.stdout).expect("failure should be JSON");
+    assert_eq!(
+        stale_finish["missing"],
+        serde_json::json!(["GLOBAL-CHECK", "TASK-CHECK"])
+    );
+    let stale_plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("stale final evidence should persist");
+    assert_eq!(stale_plan.revision(), project.base_revision + 12);
+    assert_eq!(
+        stale_plan
+            .task(&task_id())
+            .expect("task should exist")
+            .status(),
+        TaskStatus::Ready
+    );
+    let restarted = parse_success(&run_mino(
+        project,
+        &mutation_arguments("start", project.base_revision + 12, 20, &["--task", "T1"]),
+    ));
+    let rechecked = parse_success(&run_mino(
+        project,
+        &check_arguments(result_revision(&restarted), 21, "TASK-CHECK"),
+    ));
+    let recriterion = parse_success(&run_mino(
+        project,
+        &criterion_arguments(result_revision(&rechecked), 22, "E0004"),
+    ));
+    let recompleted = parse_success(&run_mino(
+        project,
+        &mutation_arguments(
+            "complete",
+            result_revision(&recriterion),
+            23,
+            &["--task", "T1"],
+        ),
+    ));
+    let reglobal = parse_success(&run_mino(
+        project,
+        &check_arguments(result_revision(&recompleted), 24, "GLOBAL-CHECK"),
+    ));
+    assert_eq!(reglobal["evidence"]["id"], "E0005");
+    let finish_arguments = mutation_arguments("finish", result_revision(&reglobal), 25, &[]);
+    let finished = parse_success(&run_mino(project, &finish_arguments));
     assert_eq!(finished["status"], "Review");
     fs::remove_file(project.path().join(projection_relative()))
         .expect("projection should be removed for replay recovery");
-    let replay = parse_success(&run_mino(&project, &finish_arguments));
+    let replay = parse_success(&run_mino(project, &finish_arguments));
     assert_eq!(replay["replayed"], true);
     assert!(project.path().join(projection_relative()).exists());
     assert_eq!(
@@ -387,6 +487,27 @@ fn cli_completion_flow_rejects_scope_drift_then_enters_review() {
             .expect("plan should load")
             .status(),
         PlanStatus::Review
+    );
+    fs::write(
+        project.path().join("src/feature.rs"),
+        "pub fn feature() -> u8 { 4 }\n",
+    )
+    .expect("post-review change should be written");
+    let mut accept_arguments = vec!["review".to_owned(), "accept".to_owned()];
+    accept_arguments.extend(common_mutation_arguments(result_revision(&finished), 26));
+    accept_arguments.extend(["--approval-ref".to_owned(), "chat:stale-review".to_owned()]);
+    let stale_review = run_mino(project, &accept_arguments);
+    assert_eq!(stale_review.status.code(), Some(2));
+    let reopened = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("review drift should persist");
+    assert_eq!(reopened.status(), PlanStatus::InProgress);
+    assert_eq!(
+        reopened
+            .task(&task_id())
+            .expect("task should exist")
+            .status(),
+        TaskStatus::Ready
     );
 }
 
@@ -449,6 +570,11 @@ fn incomplete_evidence_and_unresolved_deviation_never_complete_a_task() {
         .expect_err("pending verification should block completion");
     assert_eq!(incomplete.category(), ErrorCategory::IncompleteOrValidation);
     let execution = ExecutionService::discover(project.path()).expect("service should discover");
+    fs::write(
+        project.path().join("src/feature.rs"),
+        "pub fn feature() {}\n",
+    )
+    .expect("planned path should be written before verification");
     let check = execution
         .run_check(
             &mutation(
@@ -500,11 +626,6 @@ fn incomplete_evidence_and_unresolved_deviation_never_complete_a_task() {
             "An undeclared file would be required".to_owned(),
         )
         .expect("deviation should record");
-    fs::write(
-        project.path().join("src/feature.rs"),
-        "pub fn feature() {}\n",
-    )
-    .expect("planned path should be written");
     let deviation = completion
         .complete_task(
             mutation(
@@ -523,6 +644,13 @@ fn incomplete_evidence_and_unresolved_deviation_never_complete_a_task() {
             .revision(),
         checkpoint.revision
     );
+}
+
+fn result_revision(value: &Value) -> u64 {
+    value["revision"]
+        .as_u64()
+        .or_else(|| value["plan"]["revision"].as_u64())
+        .expect("operation result should include a revision")
 }
 
 #[test]

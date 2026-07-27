@@ -9,11 +9,18 @@ use crate::application::plan::{
 use crate::domain::{
     AcceptanceCriterion, CheckStatus, CommitStatus, CriterionId, CriterionStatus, Evidence,
     EvidenceId, EvidenceType, FileChange, GitFlowConsent, Plan, RequestId, ReviewClassification,
-    ReviewStatus, Task, TaskId, VerificationCheck,
+    ReviewStatus, Task, TaskId, Timestamp, VerificationCheck,
 };
 use crate::evidence::{EvidenceError, EvidenceErrorKind, EvidenceStore};
 use crate::git::{ChangedFile, GitChangeError, inspect_changes, matches_file_map_path};
+use crate::workspace::workspace_fingerprint_is_current;
 use crate::{ErrorCategory, MinoError, NextAction};
+
+#[derive(Clone, Copy)]
+pub(crate) enum FreshnessScope<'a> {
+    Task(&'a TaskId),
+    All,
+}
 
 /// Application boundary for evidence binding and execution completion gates.
 #[derive(Clone, Debug)]
@@ -69,7 +76,25 @@ impl CompletionService {
             .evidence
             .list(&request.plan_id)
             .map_err(|error| map_evidence_error(&error))?;
-        validate_criterion_binding(&current, &task_id, &criterion_id, &evidence, &all_evidence)?;
+        if let Some((report, stale)) = reconcile_stale_checks(
+            &self.plans,
+            &self.root,
+            &current,
+            &all_evidence,
+            FreshnessScope::Task(&task_id),
+            &request.actor,
+            &request.updated_at,
+        )? {
+            return Err(stale_error(&report, &stale));
+        }
+        validate_criterion_binding(
+            &self.root,
+            &current,
+            &task_id,
+            &criterion_id,
+            &evidence,
+            &all_evidence,
+        )?;
         let is_accepted_exception = evidence.kind() == EvidenceType::AcceptedException;
         self.plans.commit_semantic(
             request,
@@ -114,7 +139,18 @@ impl CompletionService {
             .evidence
             .list(&request.plan_id)
             .map_err(|error| map_evidence_error(&error))?;
-        validate_task_evidence(&current, task, &evidence)?;
+        if let Some((report, stale)) = reconcile_stale_checks(
+            &self.plans,
+            &self.root,
+            &current,
+            &evidence,
+            FreshnessScope::Task(&task_id),
+            &request.actor,
+            &request.updated_at,
+        )? {
+            return Err(stale_error(&report, &stale));
+        }
+        validate_task_evidence(&self.root, &current, task, &evidence)?;
         validate_task_deviations(&current, task)?;
         let changed_files = task_changed_files(&self.root, &current, task)?;
         validate_commit_precondition(&current, task, &changed_files)?;
@@ -143,7 +179,18 @@ impl CompletionService {
             .evidence
             .list(&request.plan_id)
             .map_err(|error| map_evidence_error(&error))?;
-        validate_global_evidence(&current, &evidence)?;
+        if let Some((report, stale)) = reconcile_stale_checks(
+            &self.plans,
+            &self.root,
+            &current,
+            &evidence,
+            FreshnessScope::All,
+            &request.actor,
+            &request.updated_at,
+        )? {
+            return Err(stale_error(&report, &stale));
+        }
+        validate_global_evidence(&self.root, &current, &evidence)?;
         validate_all_deviations(&current)?;
         self.plans.commit_semantic(
             request,
@@ -177,13 +224,14 @@ fn criterion_task<'a>(plan: &'a Plan, criterion_id: &CriterionId) -> Result<&'a 
 }
 
 fn validate_criterion_binding(
+    root: &Path,
     plan: &Plan,
     task_id: &TaskId,
     criterion_id: &CriterionId,
     evidence: &Evidence,
     all_evidence: &[Evidence],
 ) -> Result<(), MinoError> {
-    validate_current_evidence(plan, evidence, all_evidence)?;
+    validate_current_evidence(root, plan, evidence, all_evidence)?;
     if evidence.task_id() != Some(task_id) {
         return Err(incompatible(format!(
             "Evidence {} is not bound to task {task_id}",
@@ -191,7 +239,7 @@ fn validate_criterion_binding(
         )));
     }
     if evidence.kind() == EvidenceType::Command {
-        validate_command_criterion(plan, task_id, evidence)
+        validate_command_criterion(root, plan, task_id, evidence)
     } else if evidence.criterion_id() == Some(criterion_id) {
         Ok(())
     } else {
@@ -203,6 +251,7 @@ fn validate_criterion_binding(
 }
 
 fn validate_command_criterion(
+    root: &Path,
     plan: &Plan,
     task_id: &TaskId,
     evidence: &Evidence,
@@ -221,29 +270,31 @@ fn validate_command_criterion(
                 .find(|check| check.id() == check_id)
         })
         .ok_or_else(|| incompatible(format!("Check {check_id} does not belong to {task_id}")))?;
-    validate_passing_check_evidence(check, evidence)
+    validate_passing_check_evidence(root, plan, check, evidence)
 }
 
 pub(crate) fn validate_task_evidence(
+    root: &Path,
     plan: &Plan,
     task: &Task,
     evidence: &[Evidence],
 ) -> Result<(), MinoError> {
     let superseded = superseded_ids(evidence);
     for criterion in task.acceptance_criteria() {
-        validate_completed_criterion(plan, task.id(), criterion, evidence, &superseded)?;
+        validate_completed_criterion(root, plan, task.id(), criterion, evidence, &superseded)?;
     }
     for check in task
         .verification_checks()
         .iter()
         .filter(|check| check.is_required())
     {
-        validate_completed_check(plan, Some(task.id()), check, evidence, &superseded)?;
+        validate_completed_check(root, plan, Some(task.id()), check, evidence, &superseded)?;
     }
     Ok(())
 }
 
 fn validate_completed_criterion(
+    root: &Path,
     plan: &Plan,
     task_id: &TaskId,
     criterion: &AcceptanceCriterion,
@@ -270,7 +321,7 @@ fn validate_completed_criterion(
         )));
     }
     let record = evidence_by_id(evidence, evidence_id)?;
-    validate_criterion_binding(plan, task_id, criterion.id(), record, evidence)?;
+    validate_criterion_binding(root, plan, task_id, criterion.id(), record, evidence)?;
     let is_exception = record.kind() == EvidenceType::AcceptedException;
     if (criterion.status() == CriterionStatus::AcceptedException) != is_exception {
         return Err(incompatible(format!(
@@ -282,6 +333,7 @@ fn validate_completed_criterion(
 }
 
 fn validate_completed_check(
+    root: &Path,
     plan: &Plan,
     task_id: Option<&TaskId>,
     check: &VerificationCheck,
@@ -302,7 +354,7 @@ fn validate_completed_check(
         )));
     }
     let record = evidence_by_id(evidence, evidence_id)?;
-    validate_current_evidence(plan, record, evidence)?;
+    validate_current_evidence(root, plan, record, evidence)?;
     if record.kind() != EvidenceType::Command
         || record.task_id() != task_id
         || record.check_id() != Some(check.id())
@@ -312,16 +364,26 @@ fn validate_completed_check(
             check.id()
         )));
     }
-    validate_passing_check_evidence(check, record)
+    validate_passing_check_evidence(root, plan, check, record)
 }
 
 fn validate_passing_check_evidence(
+    root: &Path,
+    plan: &Plan,
     check: &VerificationCheck,
     evidence: &Evidence,
 ) -> Result<(), MinoError> {
     if check.status() == CheckStatus::Passed
         && check.evidence_refs().last() == Some(evidence.id())
         && evidence.exit_code() == Some(check.expected_exit_code())
+        && evidence.workspace_fingerprint().is_some()
+        && workspace_fingerprint_is_current(
+            root,
+            plan,
+            evidence
+                .workspace_fingerprint()
+                .expect("checked workspace fingerprint exists"),
+        )?
     {
         Ok(())
     } else {
@@ -334,6 +396,7 @@ fn validate_passing_check_evidence(
 }
 
 fn validate_current_evidence(
+    root: &Path,
     plan: &Plan,
     evidence: &Evidence,
     all_evidence: &[Evidence],
@@ -353,6 +416,20 @@ fn validate_current_evidence(
             "Evidence {} does not belong to the current plan history",
             evidence.id()
         )));
+    }
+    if evidence.kind() == EvidenceType::Command {
+        let fingerprint = evidence.workspace_fingerprint().ok_or_else(|| {
+            incomplete(format!(
+                "Evidence {} predates workspace fingerprint binding",
+                evidence.id()
+            ))
+        })?;
+        if !workspace_fingerprint_is_current(root, plan, fingerprint)? {
+            return Err(incomplete(format!(
+                "Evidence {} is stale for the current workspace",
+                evidence.id()
+            )));
+        }
     }
     if all_evidence
         .iter()
@@ -463,13 +540,148 @@ fn validate_commit_precondition(
     }
 }
 
+pub(crate) fn reconcile_stale_checks(
+    plans: &PlanService,
+    root: &Path,
+    plan: &Plan,
+    evidence: &[Evidence],
+    scope: FreshnessScope<'_>,
+    actor: &str,
+    updated_at: &Timestamp,
+) -> Result<Option<(PlanOperationReport, Vec<crate::domain::CheckId>)>, MinoError> {
+    let stale = stale_check_ids(root, plan, evidence, scope)?;
+    if stale.is_empty() {
+        return Ok(None);
+    }
+    let action = format!(
+        "workspace.stale.{}",
+        stale
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(".")
+    );
+    let request_id = RequestId::parse(derived_request_id(plan, &action))
+        .expect("derived request identifiers are valid");
+    let command = vec![
+        "mino-internal".to_owned(),
+        "workspace".to_owned(),
+        "mark-stale".to_owned(),
+        "--plan".to_owned(),
+        plan.id().to_string(),
+        "--checks".to_owned(),
+        stale
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+        "--expect-revision".to_owned(),
+        plan.revision().to_string(),
+        "--actor".to_owned(),
+        actor.to_owned(),
+    ];
+    let changed_fields = stale
+        .iter()
+        .map(|check_id| format!("verification.{check_id}.status"))
+        .chain(["status".to_owned(), "tasks.status".to_owned()])
+        .collect::<Vec<_>>();
+    let stale_for_mutation = stale.clone();
+    let report = plans.commit_semantic(
+        PlanMutationRequest {
+            plan_id: plan.id().clone(),
+            expected_revision: plan.revision(),
+            request_id,
+            actor: actor.to_owned(),
+            command,
+            updated_at: updated_at.clone(),
+        },
+        changed_fields,
+        |_| Ok(None),
+        move |candidate, at| candidate.mark_checks_stale(&stale_for_mutation, at),
+    )?;
+    Ok(Some((report, stale)))
+}
+
+fn stale_check_ids(
+    root: &Path,
+    plan: &Plan,
+    evidence: &[Evidence],
+    scope: FreshnessScope<'_>,
+) -> Result<Vec<crate::domain::CheckId>, MinoError> {
+    let checks = match scope {
+        FreshnessScope::Task(task_id) => plan
+            .task(task_id)
+            .ok_or_else(|| incomplete(format!("Task {task_id} does not exist")))?
+            .verification_checks()
+            .iter()
+            .collect::<Vec<_>>(),
+        FreshnessScope::All => plan
+            .tasks()
+            .iter()
+            .flat_map(Task::verification_checks)
+            .chain(plan.global_verification())
+            .collect::<Vec<_>>(),
+    };
+    let mut stale = Vec::new();
+    for check in checks
+        .into_iter()
+        .filter(|check| check.status() == CheckStatus::Passed)
+    {
+        let Some(evidence_id) = check.evidence_refs().last() else {
+            continue;
+        };
+        let record = evidence_by_id(evidence, evidence_id)?;
+        let is_current = if record.kind() == EvidenceType::Command {
+            match record.workspace_fingerprint() {
+                Some(fingerprint) => workspace_fingerprint_is_current(root, plan, fingerprint)?,
+                None => false,
+            }
+        } else {
+            false
+        };
+        if !is_current {
+            stale.push(check.id().clone());
+        }
+    }
+    stale.sort();
+    stale.dedup();
+    Ok(stale)
+}
+
+fn stale_error(report: &PlanOperationReport, stale: &[crate::domain::CheckId]) -> MinoError {
+    let checks = stale.iter().map(ToString::to_string).collect::<Vec<_>>();
+    MinoError::new(
+        ErrorCategory::IncompleteOrValidation,
+        format!(
+            "Workspace content changed after checks {}; they are Stale at plan revision {}",
+            checks.join(", "),
+            report.revision
+        ),
+    )
+    .with_remediation(
+        checks,
+        vec![NextAction {
+            id: "agent.next".to_owned(),
+            argv: vec![
+                "mino".to_owned(),
+                "agent".to_owned(),
+                "next".to_owned(),
+                "--format".to_owned(),
+                "json".to_owned(),
+                "--no-input".to_owned(),
+            ],
+        }],
+    )
+}
+
 pub(crate) fn validate_review_evidence(
+    root: &Path,
     plan: &Plan,
     evidence: &[Evidence],
 ) -> Result<(), MinoError> {
     let superseded = superseded_ids(evidence);
     for task in plan.tasks() {
-        validate_task_evidence(plan, task, evidence)?;
+        validate_task_evidence(root, plan, task, evidence)?;
         if let Some(gate) = task
             .commit_gate()
             .filter(|gate| gate.is_required() && gate.status() == CommitStatus::Committed)
@@ -493,7 +705,7 @@ pub(crate) fn validate_review_evidence(
             }
         }
     }
-    validate_global_evidence(plan, evidence)?;
+    validate_global_evidence(root, plan, evidence)?;
     validate_all_deviations(plan)
 }
 
@@ -541,7 +753,11 @@ fn validate_all_deviations(plan: &Plan) -> Result<(), MinoError> {
     }
 }
 
-fn validate_global_evidence(plan: &Plan, evidence: &[Evidence]) -> Result<(), MinoError> {
+fn validate_global_evidence(
+    root: &Path,
+    plan: &Plan,
+    evidence: &[Evidence],
+) -> Result<(), MinoError> {
     if plan
         .tasks()
         .iter()
@@ -564,7 +780,7 @@ fn validate_global_evidence(plan: &Plan, evidence: &[Evidence]) -> Result<(), Mi
         .iter()
         .filter(|check| check.is_required())
     {
-        validate_completed_check(plan, None, check, evidence, &superseded)?;
+        validate_completed_check(root, plan, None, check, evidence, &superseded)?;
     }
     Ok(())
 }

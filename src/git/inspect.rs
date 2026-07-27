@@ -128,6 +128,13 @@ impl GitAdapter {
         }
     }
 
+    pub(crate) fn index_entries(&self) -> Result<Vec<u8>, GitError> {
+        let root = canonical_directory(&self.start)?;
+        let output = run_read_only(&root, ["ls-files", "--stage", "-z", "--full-name"])?;
+        require_success(&output, "Git index inspection")?;
+        Ok(output.stdout)
+    }
+
     pub(crate) fn probe_readiness(&self) -> Result<GitReadinessProbe, GitError> {
         let root = canonical_directory(&self.start)?;
         let inside = run_probe(&root, ["rev-parse", "--is-inside-work-tree"])?;
