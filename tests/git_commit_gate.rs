@@ -137,43 +137,7 @@ fn commit_journal_rejects_a_symlinked_git_state_directory() {
     assert!(!external.root.join("commit.lock").exists());
 }
 
-#[test]
-fn auto_commit_blob_matches_checked_expected_blob_and_is_idempotent() {
-    let repository = TestRepository::new("success", FixtureState::Done, true);
-    let base = git_text(repository.root(), &["rev-parse", "HEAD"]);
-    let output = json_success(&run_commit(&repository));
-    let commit = output["completion"]["commit"]
-        .as_str()
-        .expect("commit report should contain an object ID")
-        .to_owned();
-
-    assert_ne!(commit, base);
-    assert_eq!(output["completion"]["message"], COMMIT_MESSAGE);
-    assert_eq!(
-        output["completion"]["files"],
-        serde_json::json!([TASK_PATH])
-    );
-    assert_eq!(output["replayed"], false);
-    assert_eq!(
-        git_text(
-            repository.root(),
-            &["rev-list", "--count", &format!("{base}..HEAD")]
-        ),
-        "1"
-    );
-    assert_eq!(
-        git_text(repository.root(), &["show", "-s", "--format=%B", "HEAD"]),
-        COMMIT_MESSAGE
-    );
-    assert_eq!(
-        git_text(
-            repository.root(),
-            &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]
-        ),
-        TASK_PATH
-    );
-    assert!(git_status(repository.root()).is_empty());
-
+fn assert_checked_blob_and_committed_gate(repository: &TestRepository, commit: &str) -> u64 {
     let all_evidence = EvidenceStore::new(repository.root())
         .list(repository.plan_id())
         .expect("evidence should load");
@@ -224,26 +188,65 @@ fn auto_commit_blob_matches_checked_expected_blob_and_is_idempotent() {
         index_status: '.',
         worktree_status: 'D',
     };
-    verify_tree_matches_commit_snapshots(repository.root(), &commit, &[deleted])
+    verify_tree_matches_commit_snapshots(repository.root(), commit, &[deleted])
         .expect("a checked deletion should be absent from the commit tree");
 
-    let plan = load_plan(&repository);
+    let plan = load_plan(repository);
     let gate = plan
         .task(&task_id())
         .and_then(Task::commit_gate)
         .expect("task commit gate should exist");
     assert_eq!(gate.status(), CommitStatus::Committed);
-    assert_eq!(gate.actual_commit(), Some(commit.as_str()));
+    assert_eq!(gate.actual_commit(), Some(commit));
     assert_eq!(gate.committed_files(), [TASK_PATH]);
     let commit_evidence = all_evidence
         .iter()
         .filter(|evidence| evidence.kind() == EvidenceType::Commit)
         .collect::<Vec<_>>();
     assert_eq!(commit_evidence.len(), 1);
-    assert_eq!(commit_evidence[0].artifact_path(), Some(commit.as_str()));
+    assert_eq!(commit_evidence[0].artifact_path(), Some(commit));
     assert!(gate.evidence_refs().contains(commit_evidence[0].id()));
+    plan.revision()
+}
 
-    let revision = plan.revision();
+#[test]
+fn auto_commit_blob_matches_checked_expected_blob_and_is_idempotent() {
+    let repository = TestRepository::new("success", FixtureState::Done, true);
+    let base = git_text(repository.root(), &["rev-parse", "HEAD"]);
+    let output = json_success(&run_commit(&repository));
+    let commit = output["completion"]["commit"]
+        .as_str()
+        .expect("commit report should contain an object ID")
+        .to_owned();
+
+    assert_ne!(commit, base);
+    assert_eq!(output["completion"]["message"], COMMIT_MESSAGE);
+    assert_eq!(
+        output["completion"]["files"],
+        serde_json::json!([TASK_PATH])
+    );
+    assert_eq!(output["replayed"], false);
+    assert_eq!(
+        git_text(
+            repository.root(),
+            &["rev-list", "--count", &format!("{base}..HEAD")]
+        ),
+        "1"
+    );
+    assert_eq!(
+        git_text(repository.root(), &["show", "-s", "--format=%B", "HEAD"]),
+        COMMIT_MESSAGE
+    );
+    assert_eq!(
+        git_text(
+            repository.root(),
+            &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]
+        ),
+        TASK_PATH
+    );
+    assert!(git_status(repository.root()).is_empty());
+
+    let revision = assert_checked_blob_and_committed_gate(&repository, &commit);
     let journal_before = journal_bytes(&repository);
     let replay = json_success(&run_commit(&repository));
     assert_eq!(replay["replayed"], true);

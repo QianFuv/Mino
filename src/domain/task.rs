@@ -1696,6 +1696,40 @@ impl Task {
     }
 
     pub(crate) fn validate_invariants(&self) -> Result<(), DomainError> {
+        self.validate_authored_definition()?;
+        if self.status != TaskStatus::Draft {
+            self.validate_execution_definition()?;
+        }
+        if let Some(commit_gate) = &self.commit_gate {
+            commit_gate.validate(self.status)?;
+        }
+        self.validate_running_checks()?;
+        if self.status == TaskStatus::Blocked {
+            if self.resume_status != Some(TaskStatus::InProgress)
+                || self.blocker.as_deref().is_none_or(str::is_empty)
+            {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!(
+                        "Blocked task {} requires an In Progress resume state and reason",
+                        self.id
+                    ),
+                ));
+            }
+        } else if self.resume_status.is_some() || self.blocker.is_some() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!(
+                    "Only a Blocked task {} may retain resume state or a blocker",
+                    self.id
+                ),
+            ));
+        }
+        self.validate_completion_state()?;
+        Ok(())
+    }
+
+    fn validate_authored_definition(&self) -> Result<(), DomainError> {
         if self.title.trim().is_empty() {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
@@ -1773,35 +1807,6 @@ impl Task {
                 format!("Task {} has duplicate check identifiers", self.id),
             ));
         }
-        if self.status != TaskStatus::Draft {
-            self.validate_execution_definition()?;
-        }
-        if let Some(commit_gate) = &self.commit_gate {
-            commit_gate.validate(self.status)?;
-        }
-        self.validate_running_checks()?;
-        if self.status == TaskStatus::Blocked {
-            if self.resume_status != Some(TaskStatus::InProgress)
-                || self.blocker.as_deref().is_none_or(str::is_empty)
-            {
-                return Err(DomainError::new(
-                    DomainErrorKind::InvariantViolation,
-                    format!(
-                        "Blocked task {} requires an In Progress resume state and reason",
-                        self.id
-                    ),
-                ));
-            }
-        } else if self.resume_status.is_some() || self.blocker.is_some() {
-            return Err(DomainError::new(
-                DomainErrorKind::InvariantViolation,
-                format!(
-                    "Only a Blocked task {} may retain resume state or a blocker",
-                    self.id
-                ),
-            ));
-        }
-        self.validate_completion_state()?;
         Ok(())
     }
 

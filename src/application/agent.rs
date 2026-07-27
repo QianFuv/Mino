@@ -14,7 +14,7 @@ use crate::domain::{
 };
 use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitHeadState};
 use crate::project::ProjectPlanSelection;
-use crate::validation::validate_plan;
+use crate::validation::{ValidationReport, validate_plan};
 use crate::{ErrorCategory, MinoError, NextAction};
 
 use super::AGENT_EXECUTOR_IDENTITY;
@@ -887,85 +887,15 @@ fn ready_guidance(
     plan: &Plan,
     git: Option<&AgentGitContext>,
 ) -> Result<Guidance, MinoError> {
-    let has_open_deviation = plan
-        .execution_state()
-        .map_err(|error| {
-            MinoError::new(
-                ErrorCategory::DriftDetected,
-                format!("Execution state is malformed: {error}"),
-            )
-        })?
-        .deviations()
-        .iter()
-        .any(crate::domain::Deviation::is_open);
+    let has_open_deviation = plan_has_open_deviation(plan)?;
     let validation = validate_plan(root, plan)?;
     if !validation.valid {
-        let requires_conflict_decision = validation
-            .findings
-            .iter()
-            .any(|finding| finding.id == "POLICY-STANDARD-CONFLICT-UNRESOLVED");
-        let mut allowed_actions = action_ids(&[
-            "plan.show",
-            "plan.validate",
-            "plan.amend.propose",
-            "standards.apply",
-            "standards.conflict.list",
-            "standards.conflict.refresh",
-            "standards.conflict.resolve",
-        ]);
-        append_ready_deviation_actions(&mut allowed_actions, has_open_deviation);
-        return Ok(Guidance {
-            allowed_actions,
-            blocked_actions: vec![
-                blocked(
-                    "plan.approve",
-                    "Current repository or standards validation is blocking",
-                ),
-                blocked(
-                    "exec.start",
-                    "Current repository or standards validation is blocking",
-                ),
-            ],
-            approval_required: requires_conflict_decision,
-            next_actions: validation.next_actions,
-        });
+        return Ok(invalid_ready_guidance(validation, has_open_deviation));
     }
     if !plan.has_plan_approval() {
-        let mut allowed_actions = action_ids(&[
-            "plan.show",
-            "plan.validate",
-            "plan.review",
-            "plan.amend.propose",
-            "standards.conflict.list",
-            "standards.conflict.refresh",
-            "standards.conflict.resolve",
-        ]);
-        append_ready_deviation_actions(&mut allowed_actions, has_open_deviation);
-        return Ok(Guidance {
-            allowed_actions,
-            blocked_actions: vec![
-                blocked(
-                    "plan.approve",
-                    "Explicit user approval is required; the Agent must stop",
-                ),
-                blocked(
-                    "exec.start",
-                    "Plan execution requires explicit user approval",
-                ),
-            ],
-            approval_required: true,
-            next_actions: Vec::new(),
-        });
+        return Ok(unapproved_ready_guidance(has_open_deviation));
     }
-    let mut allowed_actions = action_ids(&[
-        "plan.show",
-        "plan.validate",
-        "plan.review",
-        "plan.amend.propose",
-        "standards.conflict.list",
-        "standards.conflict.refresh",
-        "standards.conflict.resolve",
-    ]);
+    let mut allowed_actions = ready_plan_actions();
     let requires_binding = has_automatic_git_flow(plan) && !has_current_plan_binding(plan, git);
     let next_actions = if requires_binding {
         allowed_actions.insert(4, "git.bind".to_owned());
@@ -995,6 +925,84 @@ fn ready_guidance(
     })
 }
 
+fn plan_has_open_deviation(plan: &Plan) -> Result<bool, MinoError> {
+    Ok(plan
+        .execution_state()
+        .map_err(|error| {
+            MinoError::new(
+                ErrorCategory::DriftDetected,
+                format!("Execution state is malformed: {error}"),
+            )
+        })?
+        .deviations()
+        .iter()
+        .any(crate::domain::Deviation::is_open))
+}
+
+fn ready_plan_actions() -> Vec<String> {
+    action_ids(&[
+        "plan.show",
+        "plan.validate",
+        "plan.review",
+        "plan.amend.propose",
+        "standards.conflict.list",
+        "standards.conflict.refresh",
+        "standards.conflict.resolve",
+    ])
+}
+
+fn invalid_ready_guidance(validation: ValidationReport, has_open_deviation: bool) -> Guidance {
+    let requires_conflict_decision = validation
+        .findings
+        .iter()
+        .any(|finding| finding.id == "POLICY-STANDARD-CONFLICT-UNRESOLVED");
+    let mut allowed_actions = action_ids(&[
+        "plan.show",
+        "plan.validate",
+        "plan.amend.propose",
+        "standards.apply",
+        "standards.conflict.list",
+        "standards.conflict.refresh",
+        "standards.conflict.resolve",
+    ]);
+    append_ready_deviation_actions(&mut allowed_actions, has_open_deviation);
+    Guidance {
+        allowed_actions,
+        blocked_actions: vec![
+            blocked(
+                "plan.approve",
+                "Current repository or standards validation is blocking",
+            ),
+            blocked(
+                "exec.start",
+                "Current repository or standards validation is blocking",
+            ),
+        ],
+        approval_required: requires_conflict_decision,
+        next_actions: validation.next_actions,
+    }
+}
+
+fn unapproved_ready_guidance(has_open_deviation: bool) -> Guidance {
+    let mut allowed_actions = ready_plan_actions();
+    append_ready_deviation_actions(&mut allowed_actions, has_open_deviation);
+    Guidance {
+        allowed_actions,
+        blocked_actions: vec![
+            blocked(
+                "plan.approve",
+                "Explicit user approval is required; the Agent must stop",
+            ),
+            blocked(
+                "exec.start",
+                "Plan execution requires explicit user approval",
+            ),
+        ],
+        approval_required: true,
+        next_actions: Vec::new(),
+    }
+}
+
 fn append_ready_deviation_actions(actions: &mut Vec<String>, has_open_deviation: bool) {
     if has_open_deviation {
         actions.extend(action_ids(&[
@@ -1005,35 +1013,45 @@ fn append_ready_deviation_actions(actions: &mut Vec<String>, has_open_deviation:
 }
 
 fn in_progress_guidance(plan: &Plan, git: Option<&AgentGitContext>) -> Guidance {
-    let active = plan
-        .tasks()
-        .iter()
-        .find(|task| task.status() == TaskStatus::InProgress);
     let can_commit = pending_commit_task(plan).is_some();
     let has_automatic_commit_consent = has_automatic_git_flow(plan);
     let requires_binding =
         can_commit && has_automatic_commit_consent && !has_current_plan_binding(plan, git);
-    let (mut allowed_actions, next_actions) = if let Some(task) = active {
-        let next_actions = next_execution_check(plan).map_or_else(
-            || {
-                if task.acceptance_criteria().iter().any(|criterion| {
-                    !matches!(
-                        criterion.status(),
-                        crate::domain::CriterionStatus::Passed
-                            | crate::domain::CriterionStatus::AcceptedException
-                    )
-                }) {
-                    vec![evidence_list_action(plan, task.id())]
-                } else {
-                    vec![complete_action(plan, task.id())]
-                }
-            },
-            |check_id| vec![check_action(plan, check_id)],
+    let (mut allowed_actions, next_actions) =
+        in_progress_next_actions(plan, requires_binding, has_automatic_commit_consent);
+    allowed_actions.push("plan.amend.propose".to_owned());
+    let blocked_actions = in_progress_blocked_actions(
+        plan,
+        can_commit,
+        has_automatic_commit_consent,
+        requires_binding,
+    );
+    Guidance {
+        allowed_actions,
+        blocked_actions,
+        approval_required: can_commit && !has_automatic_commit_consent,
+        next_actions,
+    }
+}
+
+fn in_progress_next_actions(
+    plan: &Plan,
+    requires_binding: bool,
+    has_automatic_commit_consent: bool,
+) -> (Vec<String>, Vec<NextAction>) {
+    if let Some(task) = plan
+        .tasks()
+        .iter()
+        .find(|task| task.status() == TaskStatus::InProgress)
+    {
+        return (
+            in_progress_task_actions(),
+            active_task_next_actions(plan, task),
         );
-        (in_progress_task_actions(), next_actions)
-    } else if let Some(task_id) = pending_commit_task(plan) {
+    }
+    if let Some(task_id) = pending_commit_task(plan) {
         if requires_binding {
-            (
+            return (
                 action_ids(&[
                     "git.bind",
                     "git.commit.record-manual",
@@ -1041,9 +1059,9 @@ fn in_progress_guidance(plan: &Plan, git: Option<&AgentGitContext>) -> Guidance 
                     "exec.block",
                 ]),
                 vec![bind_action(plan)],
-            )
+            );
         } else if has_automatic_commit_consent {
-            (
+            return (
                 action_ids(&[
                     "git.commit",
                     "git.commit.record-manual",
@@ -1051,20 +1069,21 @@ fn in_progress_guidance(plan: &Plan, git: Option<&AgentGitContext>) -> Guidance 
                     "exec.block",
                 ]),
                 vec![commit_action(plan, task_id)],
-            )
-        } else {
-            (
-                action_ids(&["git.commit.record-manual", "git.gate.skip", "exec.block"]),
-                Vec::new(),
-            )
+            );
         }
-    } else if let Some(task_id) = first_incomplete_task(plan) {
-        (
+        return (
+            action_ids(&["git.commit.record-manual", "git.gate.skip", "exec.block"]),
+            Vec::new(),
+        );
+    }
+    if let Some(task_id) = first_incomplete_task(plan) {
+        return (
             action_ids(&["exec.start", "exec.block"]),
             vec![start_action(plan, task_id)],
-        )
-    } else if let Some(check_id) = failed_required_global_check(plan) {
-        (
+        );
+    }
+    if let Some(check_id) = failed_required_global_check(plan) {
+        return (
             action_ids(&["exec.check.run", "exec.rework", "exec.block"]),
             plan.task_order()
                 .iter()
@@ -1072,21 +1091,47 @@ fn in_progress_guidance(plan: &Plan, git: Option<&AgentGitContext>) -> Guidance 
                 .filter(|task| task.status() == TaskStatus::Done)
                 .map(|task| rework_action(plan, task.id(), check_id))
                 .collect(),
-        )
-    } else if let Some(check_id) = next_execution_check(plan) {
-        (
+        );
+    }
+    if let Some(check_id) = next_execution_check(plan) {
+        return (
             action_ids(&["exec.check.run", "exec.block"]),
             vec![check_action(plan, check_id)],
-        )
+        );
     } else if !plan.final_outcome().is_complete() {
-        (action_ids(&["plan.outcome.set", "exec.block"]), Vec::new())
-    } else {
-        (
-            action_ids(&["exec.finish", "exec.block"]),
-            vec![finish_action(plan)],
-        )
-    };
-    allowed_actions.push("plan.amend.propose".to_owned());
+        return (action_ids(&["plan.outcome.set", "exec.block"]), Vec::new());
+    }
+    (
+        action_ids(&["exec.finish", "exec.block"]),
+        vec![finish_action(plan)],
+    )
+}
+
+fn active_task_next_actions(plan: &Plan, task: &crate::domain::Task) -> Vec<NextAction> {
+    next_execution_check(plan).map_or_else(
+        || {
+            if task.acceptance_criteria().iter().any(|criterion| {
+                !matches!(
+                    criterion.status(),
+                    crate::domain::CriterionStatus::Passed
+                        | crate::domain::CriterionStatus::AcceptedException
+                )
+            }) {
+                vec![evidence_list_action(plan, task.id())]
+            } else {
+                vec![complete_action(plan, task.id())]
+            }
+        },
+        |check_id| vec![check_action(plan, check_id)],
+    )
+}
+
+fn in_progress_blocked_actions(
+    plan: &Plan,
+    can_commit: bool,
+    has_automatic_commit_consent: bool,
+    requires_binding: bool,
+) -> Vec<BlockedAction> {
     let mut blocked_actions = if requires_binding {
         vec![blocked(
             "git.commit",
@@ -1111,12 +1156,7 @@ fn in_progress_guidance(plan: &Plan, git: Option<&AgentGitContext>) -> Guidance 
             "A complete Final Outcome is required before Review",
         ));
     }
-    Guidance {
-        allowed_actions,
-        blocked_actions,
-        approval_required: can_commit && !has_automatic_commit_consent,
-        next_actions,
-    }
+    blocked_actions
 }
 
 fn has_automatic_git_flow(plan: &Plan) -> bool {

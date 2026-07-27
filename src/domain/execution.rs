@@ -131,27 +131,28 @@ pub struct Deviation {
     disposed_at: Option<Timestamp>,
 }
 
+struct OpenDeviation {
+    task_id: TaskId,
+    classification: DeviationClassification,
+    summary: String,
+    affected_paths: Vec<String>,
+    actor: String,
+    recorded_at: Timestamp,
+    legacy_checkpoint_sequence: Option<u64>,
+}
+
 impl Deviation {
-    fn open(
-        id: String,
-        task_id: TaskId,
-        classification: DeviationClassification,
-        summary: String,
-        affected_paths: Vec<String>,
-        actor: String,
-        recorded_at: Timestamp,
-        legacy_checkpoint_sequence: Option<u64>,
-    ) -> Result<Self, DomainError> {
+    fn open(id: String, input: OpenDeviation) -> Result<Self, DomainError> {
         let deviation = Self {
             id,
-            task_id,
-            classification,
+            task_id: input.task_id,
+            classification: input.classification,
             status: DeviationStatus::Open,
-            summary,
-            affected_paths,
-            actor,
-            recorded_at,
-            legacy_checkpoint_sequence,
+            summary: input.summary,
+            affected_paths: input.affected_paths,
+            actor: input.actor,
+            recorded_at: input.recorded_at,
+            legacy_checkpoint_sequence: input.legacy_checkpoint_sequence,
             resolution: None,
             disposition_actor: None,
             disposition_reference: None,
@@ -487,15 +488,15 @@ impl ExecutionState {
             recorded_at: recorded_at.clone(),
         });
         if kind == CheckpointKind::Deviation {
-            self.push_deviation(
+            self.push_deviation(OpenDeviation {
                 task_id,
-                DeviationClassification::Unclassified,
+                classification: DeviationClassification::Unclassified,
                 summary,
-                Vec::new(),
+                affected_paths: Vec::new(),
                 actor,
                 recorded_at,
-                Some(sequence),
-            )?;
+                legacy_checkpoint_sequence: Some(sequence),
+            })?;
         }
         Ok(())
     }
@@ -510,15 +511,15 @@ impl ExecutionState {
         recorded_at: Timestamp,
     ) -> Result<String, DomainError> {
         self.materialize_legacy_deviations()?;
-        self.push_deviation(
+        self.push_deviation(OpenDeviation {
             task_id,
             classification,
             summary,
             affected_paths,
             actor,
             recorded_at,
-            None,
-        )
+            legacy_checkpoint_sequence: None,
+        })
     }
 
     pub(crate) fn resolve_deviation(
@@ -576,15 +577,15 @@ impl ExecutionState {
             .cloned()
             .collect::<Vec<_>>();
         for checkpoint in checkpoints {
-            self.push_deviation(
-                checkpoint.task_id,
-                DeviationClassification::Unclassified,
-                checkpoint.summary,
-                Vec::new(),
-                checkpoint.actor,
-                checkpoint.recorded_at,
-                Some(checkpoint.sequence),
-            )?;
+            self.push_deviation(OpenDeviation {
+                task_id: checkpoint.task_id,
+                classification: DeviationClassification::Unclassified,
+                summary: checkpoint.summary,
+                affected_paths: Vec::new(),
+                actor: checkpoint.actor,
+                recorded_at: checkpoint.recorded_at,
+                legacy_checkpoint_sequence: Some(checkpoint.sequence),
+            })?;
         }
         Ok(())
     }
@@ -632,27 +633,9 @@ impl ExecutionState {
         Ok(())
     }
 
-    fn push_deviation(
-        &mut self,
-        task_id: TaskId,
-        classification: DeviationClassification,
-        summary: String,
-        affected_paths: Vec<String>,
-        actor: String,
-        recorded_at: Timestamp,
-        legacy_checkpoint_sequence: Option<u64>,
-    ) -> Result<String, DomainError> {
+    fn push_deviation(&mut self, input: OpenDeviation) -> Result<String, DomainError> {
         let id = self.next_deviation_id()?;
-        self.deviations.push(Deviation::open(
-            id.clone(),
-            task_id,
-            classification,
-            summary,
-            affected_paths,
-            actor,
-            recorded_at,
-            legacy_checkpoint_sequence,
-        )?);
+        self.deviations.push(Deviation::open(id.clone(), input)?);
         Ok(id)
     }
 

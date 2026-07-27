@@ -678,10 +678,8 @@ fn out_of_scope_change_blocks_review_resolve_without_mutation() {
     assert_eq!(plan.status(), PlanStatus::Review);
 }
 
-#[test]
-fn resolved_minor_deviation_authorizes_only_its_exact_final_path() {
-    let project = TestProject::new_without_git("resolved-final-deviation", "pass");
-    let started = start_active_task(&project, 110);
+fn complete_task_with_resolved_minor_deviation(project: &TestProject) -> u64 {
+    let started = start_active_task(project, 110);
     fs::write(
         project.path().join("src/feature.rs"),
         "pub fn feature() -> u8 { 11 }\n",
@@ -756,16 +754,24 @@ fn resolved_minor_deviation_authorizes_only_its_exact_final_path() {
             task_id(),
         )
         .expect("task should complete before the final support path is created");
+    completed.revision
+}
+
+#[test]
+fn resolved_minor_deviation_authorizes_only_its_exact_final_path() {
+    let project = TestProject::new_without_git("resolved-final-deviation", "pass");
+    let completed_revision = complete_task_with_resolved_minor_deviation(&project);
     fs::create_dir(project.path().join("support")).expect("support directory should be created");
     fs::write(
         project.path().join("support/authorized.txt"),
         "authorized by resolved Minor deviation\n",
     )
     .expect("authorized support path should be written");
+    let execution = ExecutionService::discover(project.path()).expect("service should discover");
     let global = execution
         .run_check(
             &mutation(
-                completed.revision,
+                completed_revision,
                 116,
                 vec!["mino".to_owned(), "exec".to_owned(), "check".to_owned()],
             ),

@@ -524,18 +524,13 @@ fn draft_agent_loop_reconciles_third_file_map_language_and_finalizes() {
     assert_eq!(plan.status(), mino::domain::PlanStatus::Ready);
 }
 
-#[test]
-fn ready_agent_loop_reconciles_standards_and_invalidates_approval() {
-    let project = TestProject::new("ready-reconciliation");
-    let plan_id = create_plan(&project, "Ready standards drift", 60);
-    apply_fixture(&project, &plan_id, "complete.yaml", 61);
-
-    let mut finalize = base_arguments(&project);
+fn finalize_and_approve_ready_plan(project: &TestProject, plan_id: &str) {
+    let mut finalize = base_arguments(project);
     finalize.extend([
         "plan".to_owned(),
         "finalize".to_owned(),
         "--plan".to_owned(),
-        plan_id.clone(),
+        plan_id.to_owned(),
         "--expect-revision".to_owned(),
         "2".to_owned(),
         "--request-id".to_owned(),
@@ -546,12 +541,12 @@ fn ready_agent_loop_reconciles_standards_and_invalidates_approval() {
     let finalized = run_mino(&finalize);
     assert!(finalized.status.success());
 
-    let mut approve = base_arguments(&project);
+    let mut approve = base_arguments(project);
     approve.extend([
         "plan".to_owned(),
         "approve".to_owned(),
         "--plan".to_owned(),
-        plan_id.clone(),
+        plan_id.to_owned(),
         "--expect-revision".to_owned(),
         "3".to_owned(),
         "--request-id".to_owned(),
@@ -565,8 +560,13 @@ fn ready_agent_loop_reconciles_standards_and_invalidates_approval() {
     ]);
     let approved = run_mino(&approve);
     assert!(approved.status.success());
+}
 
-    let typed_id = PlanId::parse(&plan_id).expect("plan ID should parse");
+fn remove_catalog_checks_from_ready_plan(
+    project: &TestProject,
+    plan_id: &str,
+) -> (PlanId, PlanStore) {
+    let typed_id = PlanId::parse(plan_id).expect("plan ID should parse");
     let store = PlanStore::new(project.path());
     let prior = store
         .load_plan(&typed_id)
@@ -618,6 +618,16 @@ fn ready_agent_loop_reconciles_standards_and_invalidates_approval() {
     );
     write_projection(&projection, &drifted_rendered, Some(&prior_rendered))
         .expect("drifted projection should update");
+    (typed_id, store)
+}
+
+#[test]
+fn ready_agent_loop_reconciles_standards_and_invalidates_approval() {
+    let project = TestProject::new("ready-reconciliation");
+    let plan_id = create_plan(&project, "Ready standards drift", 60);
+    apply_fixture(&project, &plan_id, "complete.yaml", 61);
+    finalize_and_approve_ready_plan(&project, &plan_id);
+    let (typed_id, store) = remove_catalog_checks_from_ready_plan(&project, &plan_id);
 
     let mut context_arguments = base_arguments(&project);
     context_arguments.extend(["agent".to_owned(), "context".to_owned()]);

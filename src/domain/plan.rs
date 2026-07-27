@@ -24,6 +24,25 @@ use super::{
 
 const PROJECT_SCAN_EXTENSION_KEY: &str = "project_scan";
 
+#[derive(Default)]
+struct AmendmentImpactAccumulator {
+    affected_fields: BTreeSet<String>,
+    affected_tasks: BTreeSet<TaskId>,
+    affected_checks: BTreeSet<CheckId>,
+    stale_evidence: BTreeSet<EvidenceId>,
+}
+
+impl AmendmentImpactAccumulator {
+    fn finish(self) -> Result<AmendmentImpact, DomainError> {
+        AmendmentImpact::new(
+            self.affected_fields.into_iter().collect(),
+            self.affected_tasks.into_iter().collect(),
+            self.affected_checks.into_iter().collect(),
+            self.stale_evidence.into_iter().collect(),
+        )
+    }
+}
+
 /// Human and repository metadata associated with a plan.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -5400,10 +5419,7 @@ impl Plan {
         operations: &[AmendmentOperation],
         classification: AmendmentClassification,
     ) -> Result<AmendmentImpact, DomainError> {
-        let mut affected_fields = BTreeSet::new();
-        let mut affected_tasks = BTreeSet::new();
-        let mut affected_checks = BTreeSet::new();
-        let mut stale_evidence = BTreeSet::new();
+        let mut impact = AmendmentImpactAccumulator::default();
         let mut preview = self.clone();
         let mut next_task_id = self.next_task_id()?;
         for operation in operations {
@@ -5417,178 +5433,264 @@ impl Plan {
                 next_task_id = increment_task_id(&next_task_id)?;
             }
             preview.apply_amendment_operation(operation.clone())?;
-            match operation {
-                AmendmentOperation::AddTaskFile { task_id, path, .. }
-                | AmendmentOperation::ExpandTaskFile { task_id, path, .. } => {
-                    let task = self.amendment_target_task(task_id, classification)?;
-                    if task.file_map().iter().any(|entry| entry.path() == path) {
-                        return Err(DomainError::new(
-                            DomainErrorKind::InvariantViolation,
-                            format!("Task {task_id} already owns file path {path}"),
-                        ));
-                    }
-                    affected_tasks.insert(task_id.clone());
-                    affected_fields.insert("approach.file_map".to_owned());
-                    affected_fields.insert(format!("tasks.{task_id}.file_map"));
-                    affected_fields.insert(format!("tasks.{task_id}.commit_gate.scope"));
-                }
-                AmendmentOperation::ReplaceTaskVerification {
-                    task_id, check_id, ..
-                } => {
-                    let task = self.amendment_target_task(task_id, classification)?;
-                    let check = task
-                        .verification_checks()
-                        .iter()
-                        .find(|check| check.id() == check_id)
-                        .ok_or_else(|| {
-                            DomainError::new(
-                                DomainErrorKind::InvariantViolation,
-                                format!("Task {task_id} has no check {check_id}"),
-                            )
-                        })?;
-                    affected_tasks.insert(task_id.clone());
-                    affected_checks.insert(check_id.clone());
-                    stale_evidence.extend(check.evidence_refs().iter().cloned());
-                    affected_fields
-                        .insert(format!("tasks.{task_id}.verification_checks.{check_id}"));
-                }
-                AmendmentOperation::AddImplementationNote { task_id, .. } => {
-                    self.amendment_target_task(task_id, classification)?;
-                    affected_tasks.insert(task_id.clone());
-                    affected_fields.insert(format!("tasks.{task_id}.implementation_notes"));
-                }
-                AmendmentOperation::AddTask { task } => {
-                    let task_id = task.id.as_ref().expect("validated AddTask ID exists");
-                    affected_tasks.insert(task_id.clone());
-                    affected_fields.extend([
-                        "approach.file_map".to_owned(),
-                        "task_order".to_owned(),
-                        "tasks".to_owned(),
-                        format!("tasks.{task_id}"),
-                    ]);
-                }
-                AmendmentOperation::UpdateTaskDefinition { task_id, .. } => {
-                    affected_tasks.insert(task_id.clone());
-                    affected_fields.extend([
-                        format!("tasks.{task_id}.title"),
-                        format!("tasks.{task_id}.steps"),
-                    ]);
-                }
-                AmendmentOperation::RemoveTask { task_id } => {
-                    affected_tasks.insert(task_id.clone());
-                    affected_fields.extend([
-                        "approach.file_map".to_owned(),
-                        "extensions.workspace.task_baselines".to_owned(),
-                        "task_order".to_owned(),
-                        "tasks".to_owned(),
-                        format!("tasks.{task_id}"),
-                    ]);
-                }
-                AmendmentOperation::ReplaceTaskDependencies {
-                    task_id,
-                    depends_on: _,
-                } => {
-                    affected_tasks.insert(task_id.clone());
-                    affected_fields.insert(format!("tasks.{task_id}.depends_on"));
-                }
-                AmendmentOperation::AddCriterion { task_id, criterion } => {
-                    affected_tasks.insert(task_id.clone());
-                    let criterion_id = criterion
-                        .id
-                        .as_ref()
-                        .expect("validated criterion ID exists");
-                    affected_fields.insert(format!(
-                        "tasks.{task_id}.acceptance_criteria.{criterion_id}"
-                    ));
-                }
-                AmendmentOperation::UpdateCriterion {
-                    task_id,
-                    criterion_id,
-                    ..
-                }
-                | AmendmentOperation::RemoveCriterion {
-                    task_id,
-                    criterion_id,
-                } => {
-                    affected_tasks.insert(task_id.clone());
-                    affected_fields.insert(format!(
-                        "tasks.{task_id}.acceptance_criteria.{criterion_id}"
-                    ));
-                }
-                AmendmentOperation::AddTaskVerification {
-                    task_id,
-                    verification,
-                } => {
-                    affected_tasks.insert(task_id.clone());
-                    affected_checks.insert(verification.id.clone());
-                    affected_fields.insert(format!(
-                        "tasks.{task_id}.verification_checks.{}",
-                        verification.id
-                    ));
-                }
-                AmendmentOperation::UpdateTaskVerification {
-                    task_id, check_id, ..
-                }
-                | AmendmentOperation::RemoveTaskVerification { task_id, check_id } => {
-                    affected_tasks.insert(task_id.clone());
-                    affected_checks.insert(check_id.clone());
-                    affected_fields
-                        .insert(format!("tasks.{task_id}.verification_checks.{check_id}"));
-                }
-                AmendmentOperation::AddGlobalVerification { verification } => {
-                    affected_checks.insert(verification.id.clone());
-                    affected_fields.insert(format!("verification_plan.{}", verification.id));
-                }
-                AmendmentOperation::UpdateGlobalVerification { check_id, .. }
-                | AmendmentOperation::RemoveGlobalVerification { check_id } => {
-                    affected_checks.insert(check_id.clone());
-                    affected_fields.insert(format!("verification_plan.{check_id}"));
-                }
-                AmendmentOperation::ReplaceCommitGate { task_id, .. }
-                | AmendmentOperation::RemoveCommitGate { task_id } => {
-                    affected_tasks.insert(task_id.clone());
-                    affected_fields.insert(format!("tasks.{task_id}.commit_gate"));
-                }
-                AmendmentOperation::ReplaceSummary { .. } => {
-                    affected_fields.insert("summary".to_owned());
-                }
-                AmendmentOperation::ReplaceScope { .. } => {
-                    affected_fields.insert("scope".to_owned());
-                }
-                AmendmentOperation::ReplaceApproach { .. } => {
-                    affected_fields.insert("approach.summary".to_owned());
-                }
-                AmendmentOperation::ReplaceInterfaces { .. } => {
-                    affected_fields.insert("interfaces".to_owned());
-                }
-                AmendmentOperation::RecordProtectedDecision { .. } => {
-                    affected_fields.insert("decisions".to_owned());
-                }
-                AmendmentOperation::ReplaceTaskOrder { .. } => {
-                    affected_fields.insert("task_order".to_owned());
-                }
-            }
+            self.collect_amendment_operation_impact(operation, classification, &mut impact)?;
         }
         if classification == AmendmentClassification::Material {
             self.collect_material_amendment_impact(
-                &mut affected_fields,
-                &mut affected_tasks,
-                &mut affected_checks,
-                &mut stale_evidence,
+                &mut impact.affected_fields,
+                &mut impact.affected_tasks,
+                &mut impact.affected_checks,
+                &mut impact.stale_evidence,
             );
             preview.collect_material_amendment_impact(
-                &mut affected_fields,
-                &mut affected_tasks,
-                &mut affected_checks,
-                &mut stale_evidence,
+                &mut impact.affected_fields,
+                &mut impact.affected_tasks,
+                &mut impact.affected_checks,
+                &mut impact.stale_evidence,
             );
         }
-        AmendmentImpact::new(
-            affected_fields.into_iter().collect(),
-            affected_tasks.into_iter().collect(),
-            affected_checks.into_iter().collect(),
-            stale_evidence.into_iter().collect(),
-        )
+        impact.finish()
+    }
+
+    fn collect_amendment_operation_impact(
+        &self,
+        operation: &AmendmentOperation,
+        classification: AmendmentClassification,
+        impact: &mut AmendmentImpactAccumulator,
+    ) -> Result<(), DomainError> {
+        match operation {
+            AmendmentOperation::AddTaskFile { .. }
+            | AmendmentOperation::ExpandTaskFile { .. }
+            | AmendmentOperation::AddImplementationNote { .. }
+            | AmendmentOperation::AddTask { .. }
+            | AmendmentOperation::UpdateTaskDefinition { .. }
+            | AmendmentOperation::RemoveTask { .. }
+            | AmendmentOperation::ReplaceTaskDependencies { .. } => {
+                self.collect_task_structure_amendment_impact(operation, classification, impact)
+            }
+            AmendmentOperation::ReplaceTaskVerification { .. }
+            | AmendmentOperation::AddCriterion { .. }
+            | AmendmentOperation::UpdateCriterion { .. }
+            | AmendmentOperation::RemoveCriterion { .. }
+            | AmendmentOperation::AddTaskVerification { .. }
+            | AmendmentOperation::UpdateTaskVerification { .. }
+            | AmendmentOperation::RemoveTaskVerification { .. }
+            | AmendmentOperation::ReplaceCommitGate { .. }
+            | AmendmentOperation::RemoveCommitGate { .. } => {
+                self.collect_task_evidence_amendment_impact(operation, classification, impact)
+            }
+            AmendmentOperation::AddGlobalVerification { .. }
+            | AmendmentOperation::UpdateGlobalVerification { .. }
+            | AmendmentOperation::RemoveGlobalVerification { .. }
+            | AmendmentOperation::ReplaceSummary { .. }
+            | AmendmentOperation::ReplaceScope { .. }
+            | AmendmentOperation::ReplaceApproach { .. }
+            | AmendmentOperation::ReplaceInterfaces { .. }
+            | AmendmentOperation::RecordProtectedDecision { .. }
+            | AmendmentOperation::ReplaceTaskOrder { .. } => {
+                Self::collect_plan_amendment_impact(operation, impact);
+                Ok(())
+            }
+        }
+    }
+
+    fn collect_task_structure_amendment_impact(
+        &self,
+        operation: &AmendmentOperation,
+        classification: AmendmentClassification,
+        impact: &mut AmendmentImpactAccumulator,
+    ) -> Result<(), DomainError> {
+        match operation {
+            AmendmentOperation::AddTaskFile { task_id, path, .. }
+            | AmendmentOperation::ExpandTaskFile { task_id, path, .. } => {
+                let task = self.amendment_target_task(task_id, classification)?;
+                if task.file_map().iter().any(|entry| entry.path() == path) {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Task {task_id} already owns file path {path}"),
+                    ));
+                }
+                impact.affected_tasks.insert(task_id.clone());
+                impact
+                    .affected_fields
+                    .insert("approach.file_map".to_owned());
+                impact
+                    .affected_fields
+                    .insert(format!("tasks.{task_id}.file_map"));
+                impact
+                    .affected_fields
+                    .insert(format!("tasks.{task_id}.commit_gate.scope"));
+            }
+            AmendmentOperation::AddImplementationNote { task_id, .. } => {
+                self.amendment_target_task(task_id, classification)?;
+                impact.affected_tasks.insert(task_id.clone());
+                impact
+                    .affected_fields
+                    .insert(format!("tasks.{task_id}.implementation_notes"));
+            }
+            AmendmentOperation::AddTask { task } => {
+                let task_id = task.id.as_ref().expect("validated AddTask ID exists");
+                impact.affected_tasks.insert(task_id.clone());
+                impact.affected_fields.extend([
+                    "approach.file_map".to_owned(),
+                    "task_order".to_owned(),
+                    "tasks".to_owned(),
+                    format!("tasks.{task_id}"),
+                ]);
+            }
+            AmendmentOperation::UpdateTaskDefinition { task_id, .. } => {
+                impact.affected_tasks.insert(task_id.clone());
+                impact.affected_fields.extend([
+                    format!("tasks.{task_id}.title"),
+                    format!("tasks.{task_id}.steps"),
+                ]);
+            }
+            AmendmentOperation::RemoveTask { task_id } => {
+                impact.affected_tasks.insert(task_id.clone());
+                impact.affected_fields.extend([
+                    "approach.file_map".to_owned(),
+                    "extensions.workspace.task_baselines".to_owned(),
+                    "task_order".to_owned(),
+                    "tasks".to_owned(),
+                    format!("tasks.{task_id}"),
+                ]);
+            }
+            AmendmentOperation::ReplaceTaskDependencies { task_id, .. } => {
+                impact.affected_tasks.insert(task_id.clone());
+                impact
+                    .affected_fields
+                    .insert(format!("tasks.{task_id}.depends_on"));
+            }
+            _ => unreachable!("task structure amendment operation was preclassified"),
+        }
+        Ok(())
+    }
+
+    fn collect_task_evidence_amendment_impact(
+        &self,
+        operation: &AmendmentOperation,
+        classification: AmendmentClassification,
+        impact: &mut AmendmentImpactAccumulator,
+    ) -> Result<(), DomainError> {
+        match operation {
+            AmendmentOperation::ReplaceTaskVerification {
+                task_id, check_id, ..
+            } => {
+                let task = self.amendment_target_task(task_id, classification)?;
+                let check = task
+                    .verification_checks()
+                    .iter()
+                    .find(|check| check.id() == check_id)
+                    .ok_or_else(|| {
+                        DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            format!("Task {task_id} has no check {check_id}"),
+                        )
+                    })?;
+                impact.affected_tasks.insert(task_id.clone());
+                impact.affected_checks.insert(check_id.clone());
+                impact
+                    .stale_evidence
+                    .extend(check.evidence_refs().iter().cloned());
+                impact
+                    .affected_fields
+                    .insert(format!("tasks.{task_id}.verification_checks.{check_id}"));
+            }
+            AmendmentOperation::AddCriterion { task_id, criterion } => {
+                impact.affected_tasks.insert(task_id.clone());
+                let criterion_id = criterion
+                    .id
+                    .as_ref()
+                    .expect("validated criterion ID exists");
+                impact.affected_fields.insert(format!(
+                    "tasks.{task_id}.acceptance_criteria.{criterion_id}"
+                ));
+            }
+            AmendmentOperation::UpdateCriterion {
+                task_id,
+                criterion_id,
+                ..
+            }
+            | AmendmentOperation::RemoveCriterion {
+                task_id,
+                criterion_id,
+            } => {
+                impact.affected_tasks.insert(task_id.clone());
+                impact.affected_fields.insert(format!(
+                    "tasks.{task_id}.acceptance_criteria.{criterion_id}"
+                ));
+            }
+            AmendmentOperation::AddTaskVerification {
+                task_id,
+                verification,
+            } => {
+                impact.affected_tasks.insert(task_id.clone());
+                impact.affected_checks.insert(verification.id.clone());
+                impact.affected_fields.insert(format!(
+                    "tasks.{task_id}.verification_checks.{}",
+                    verification.id
+                ));
+            }
+            AmendmentOperation::UpdateTaskVerification {
+                task_id, check_id, ..
+            }
+            | AmendmentOperation::RemoveTaskVerification { task_id, check_id } => {
+                impact.affected_tasks.insert(task_id.clone());
+                impact.affected_checks.insert(check_id.clone());
+                impact
+                    .affected_fields
+                    .insert(format!("tasks.{task_id}.verification_checks.{check_id}"));
+            }
+            AmendmentOperation::ReplaceCommitGate { task_id, .. }
+            | AmendmentOperation::RemoveCommitGate { task_id } => {
+                impact.affected_tasks.insert(task_id.clone());
+                impact
+                    .affected_fields
+                    .insert(format!("tasks.{task_id}.commit_gate"));
+            }
+            _ => unreachable!("task evidence amendment operation was preclassified"),
+        }
+        Ok(())
+    }
+
+    fn collect_plan_amendment_impact(
+        operation: &AmendmentOperation,
+        impact: &mut AmendmentImpactAccumulator,
+    ) {
+        match operation {
+            AmendmentOperation::AddGlobalVerification { verification } => {
+                impact.affected_checks.insert(verification.id.clone());
+                impact
+                    .affected_fields
+                    .insert(format!("verification_plan.{}", verification.id));
+            }
+            AmendmentOperation::UpdateGlobalVerification { check_id, .. }
+            | AmendmentOperation::RemoveGlobalVerification { check_id } => {
+                impact.affected_checks.insert(check_id.clone());
+                impact
+                    .affected_fields
+                    .insert(format!("verification_plan.{check_id}"));
+            }
+            AmendmentOperation::ReplaceSummary { .. } => {
+                impact.affected_fields.insert("summary".to_owned());
+            }
+            AmendmentOperation::ReplaceScope { .. } => {
+                impact.affected_fields.insert("scope".to_owned());
+            }
+            AmendmentOperation::ReplaceApproach { .. } => {
+                impact.affected_fields.insert("approach.summary".to_owned());
+            }
+            AmendmentOperation::ReplaceInterfaces { .. } => {
+                impact.affected_fields.insert("interfaces".to_owned());
+            }
+            AmendmentOperation::RecordProtectedDecision { .. } => {
+                impact.affected_fields.insert("decisions".to_owned());
+            }
+            AmendmentOperation::ReplaceTaskOrder { .. } => {
+                impact.affected_fields.insert("task_order".to_owned());
+            }
+            _ => unreachable!("plan amendment operation was preclassified"),
+        }
     }
 
     fn contextual_amendment_minimum(
@@ -5698,6 +5800,41 @@ impl Plan {
         operation: AmendmentOperation,
     ) -> Result<(), DomainError> {
         match operation {
+            operation @ (AmendmentOperation::AddTaskFile { .. }
+            | AmendmentOperation::ExpandTaskFile { .. }
+            | AmendmentOperation::AddImplementationNote { .. }
+            | AmendmentOperation::AddTask { .. }
+            | AmendmentOperation::UpdateTaskDefinition { .. }
+            | AmendmentOperation::RemoveTask { .. }
+            | AmendmentOperation::ReplaceTaskDependencies { .. }) => {
+                self.apply_task_structure_amendment_operation(operation)?;
+            }
+            operation @ (AmendmentOperation::ReplaceTaskVerification { .. }
+            | AmendmentOperation::AddCriterion { .. }
+            | AmendmentOperation::UpdateCriterion { .. }
+            | AmendmentOperation::RemoveCriterion { .. }
+            | AmendmentOperation::AddTaskVerification { .. }
+            | AmendmentOperation::UpdateTaskVerification { .. }
+            | AmendmentOperation::RemoveTaskVerification { .. }
+            | AmendmentOperation::ReplaceCommitGate { .. }
+            | AmendmentOperation::RemoveCommitGate { .. }) => {
+                self.apply_task_evidence_amendment_operation(operation)?;
+            }
+            operation @ (AmendmentOperation::AddGlobalVerification { .. }
+            | AmendmentOperation::UpdateGlobalVerification { .. }
+            | AmendmentOperation::RemoveGlobalVerification { .. }) => {
+                self.apply_global_verification_amendment_operation(operation)?;
+            }
+            operation => self.apply_authored_plan_amendment_operation(operation),
+        }
+        Ok(())
+    }
+
+    fn apply_task_structure_amendment_operation(
+        &mut self,
+        operation: AmendmentOperation,
+    ) -> Result<(), DomainError> {
+        match operation {
             AmendmentOperation::AddTaskFile {
                 task_id,
                 path,
@@ -5715,20 +5852,6 @@ impl Plan {
                 self.task_mut(&task_id)?.add_amended_file(entry)?;
                 self.rebuild_authored_file_map();
             }
-            AmendmentOperation::ReplaceTaskVerification {
-                task_id,
-                check_id,
-                command,
-                cwd,
-                expected_exit_code,
-                required,
-            } => self.task_mut(&task_id)?.replace_amended_verification(
-                &check_id,
-                command,
-                cwd,
-                expected_exit_code,
-                required,
-            )?,
             AmendmentOperation::AddImplementationNote { task_id, note } => {
                 self.task_mut(&task_id)?.add_implementation_note(note)?;
             }
@@ -5784,6 +5907,30 @@ impl Plan {
             } => self
                 .task_mut(&task_id)?
                 .replace_amended_dependencies(depends_on)?,
+            _ => unreachable!("task structure amendment operation was preclassified"),
+        }
+        Ok(())
+    }
+
+    fn apply_task_evidence_amendment_operation(
+        &mut self,
+        operation: AmendmentOperation,
+    ) -> Result<(), DomainError> {
+        match operation {
+            AmendmentOperation::ReplaceTaskVerification {
+                task_id,
+                check_id,
+                command,
+                cwd,
+                expected_exit_code,
+                required,
+            } => self.task_mut(&task_id)?.replace_amended_verification(
+                &check_id,
+                command,
+                cwd,
+                expected_exit_code,
+                required,
+            )?,
             AmendmentOperation::AddCriterion { task_id, criterion } => {
                 let expected = self
                     .task(&task_id)
@@ -5847,6 +5994,29 @@ impl Plan {
             AmendmentOperation::RemoveTaskVerification { task_id, check_id } => self
                 .task_mut(&task_id)?
                 .remove_amended_verification(&check_id)?,
+            AmendmentOperation::ReplaceCommitGate {
+                task_id,
+                commit_gate,
+            } => self
+                .task_mut(&task_id)?
+                .replace_amended_commit_gate(Some(CommitGate::new(
+                    commit_gate.required,
+                    commit_gate.planned_message,
+                    commit_gate.scope,
+                )))?,
+            AmendmentOperation::RemoveCommitGate { task_id } => {
+                self.task_mut(&task_id)?.replace_amended_commit_gate(None)?;
+            }
+            _ => unreachable!("task evidence amendment operation was preclassified"),
+        }
+        Ok(())
+    }
+
+    fn apply_global_verification_amendment_operation(
+        &mut self,
+        operation: AmendmentOperation,
+    ) -> Result<(), DomainError> {
+        match operation {
             AmendmentOperation::AddGlobalVerification { verification } => {
                 self.add_global_verification_unversioned(verification.into_check())?;
             }
@@ -5889,19 +6059,13 @@ impl Plan {
                     })?;
                 self.global_verification.remove(index);
             }
-            AmendmentOperation::ReplaceCommitGate {
-                task_id,
-                commit_gate,
-            } => self
-                .task_mut(&task_id)?
-                .replace_amended_commit_gate(Some(CommitGate::new(
-                    commit_gate.required,
-                    commit_gate.planned_message,
-                    commit_gate.scope,
-                )))?,
-            AmendmentOperation::RemoveCommitGate { task_id } => {
-                self.task_mut(&task_id)?.replace_amended_commit_gate(None)?;
-            }
+            _ => unreachable!("global verification amendment operation was preclassified"),
+        }
+        Ok(())
+    }
+
+    fn apply_authored_plan_amendment_operation(&mut self, operation: AmendmentOperation) {
+        match operation {
             AmendmentOperation::ReplaceSummary { summary } => self.summary = summary,
             AmendmentOperation::ReplaceScope {
                 goal,
@@ -5938,8 +6102,8 @@ impl Plan {
                 self.task_order = task_order;
                 self.rebuild_authored_file_map();
             }
+            _ => unreachable!("authored plan amendment operation was preclassified"),
         }
-        Ok(())
     }
 
     fn invalidate_plan_approval(&mut self) {
