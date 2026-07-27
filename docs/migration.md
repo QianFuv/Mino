@@ -64,6 +64,19 @@ binary、plugin 与项目本地协议是三个相关但独立的版本边界。�
 
 回滚同样以完整 prior binary 或 plugin artifact 为单位。使用旧版本前先确认它仍支持项目当前 protocol lock；如果不兼容，应停止并恢复匹配的完整 artifact，而不是手工降级 `.mino` 文件。失败的 standards sync 会保留旧 cache，失败的 plugin build 不发布 target directory，Blocked 计划则通过记录的状态恢复。
 
+## 增量状态兼容性
+
+当前闭环能力保持 plan schema `1`，通过带默认值的 extension 和独立项目状态增加信息；读取旧状态不等于信任旧执行结果，也不会批量重写历史：
+
+- **Workspace fingerprint 与 evidence**：没有 fingerprint 的旧 check lease/result 和 Command evidence 可以读取并审计；只有其余 invocation 字段完全相同的旧 lease 才能精确恢复。它们不能满足当前 freshness gate，必须重新运行检查后才能 criterion pass、complete、commit、finish 或 accept。
+- **Plan/task baseline**：旧计划不会被合成一个“clean” baseline。新的 plan approval 与 task start 会从当时 workspace 捕获 baseline；需要 baseline 而状态中仍缺失时，操作明确失败，不会退回整个工作树猜测。
+- **Project selection**：缺少 `.mino/plan-selection.json` 时使用只读的 selection revision 0。零个 live plan 返回空，一个 live plan 被虚拟选择；多个 live plan 全部作为 alternatives 返回，必须执行 approval-bound `plan select`。Git binding 不作为迁移 fallback。
+- **Project scan**：缺少 scan extension 的旧计划保持可读；Mino 不伪造摘要。新 create 或 plan-scoped standards apply 会保存 scan digest、计数和截断原因。只有已保存且未接受的截断摘要阻塞 validate/finalize，接受记录不跨 digest 迁移。
+- **Deviation 与 Final Outcome**：只有旧 Deviation checkpoint 时，会按历史顺序派生稳定 `D<n>` 与 legacy link；首次处置时持久化。旧 Review 可以通过 `plan outcome set` 补齐 Final Outcome，但不会自动进入 Done。
+- **Actor identity**：既有 event 的 actor 原样保留。新的 Agent context/next/capabilities 宣告 `executor_identity: codex`，规范 revisioned mutation argv 显式传入 `--actor codex`；人工 CLI 省略 actor 时仍记录 `user`。
+
+所有新受管读取限制都在解析前执行。旧 config/lock/plan/journal/evidence/projection 超过对应 1/4/8/16 MiB 上限时会返回 drift/corruption；升级不会截断、迁移或删除这些字节，应先保留现场并人工审计。
+
 ## 旧工作流分析
 
 当仓库存在旧版 `AGENTS.md`、`PLAN_TEMPLATE.md` 或 `PLAN_EXECUTION.md` 时，先运行只读分析：
@@ -138,9 +151,14 @@ mino project import legacy \
 | Ready 条件 | `plan validate` 与 `plan finalize` |
 | 计划审阅与批准 | `plan review` 与 `plan approve` |
 | 检查结果 | check-run journal 与 immutable evidence store |
+| 被检查代码身份 | task/global `WorkspaceFingerprint` 与 freshness gate |
+| 计划开始和任务局部变化 | plan/task baseline 与 task-local delta |
 | checkpoint、block、resume | 对应的 `exec` semantic commands |
+| 偏差接受、拒绝或由修订取代 | 带 `D<n>` 的 Deviation lifecycle |
 | Git readiness 和 commit declaration | plan fields、File Map 与 Git policy |
+| 人工 commit 或 commit exception | `git commit record-manual` 与 approval-bound `git gate skip` |
 | Common/语言规则 | embedded standards 与 resolved checks |
+| 多方案比较和活动选择 | project selection revision、`plan alternatives` 与 `plan select` |
 | 固定外部模板 | embedded protocol bundle 与 protocol lock |
 | 仓库专用工具路由 | 用户所有的 AGENTS 内容 |
 | 发布、部署、通知 | 当前计划之外的手工或外部系统 |
@@ -153,8 +171,10 @@ mino project import legacy \
 4. 接受 proposal 后，再显式应用 AGENTS 和 `.gitignore` 区块。
 5. 运行 `project doctor` 与 `protocol status`，直到没有 blocking finding。
 6. 创建新计划，或导入一份受支持旧计划。
-7. 人工复核导入 Draft 后，再 validate、finalize 和 approve。
-8. 只有在独立审阅后才删除或简化旧文件；Mino 不执行这一步。
+7. 如果 context 返回多个 alternatives，先审阅 diff，再用 `plan select` 明确选择；不要用 `git bind` 代替。
+8. 人工复核导入 Draft、扫描摘要和 standards 后，再 validate、finalize 和 approve。
+9. 重新运行所有需要 freshness 的检查；不要把旧 Passed evidence 当作升级证明。
+10. 只有在独立审阅后才删除或简化旧文件；Mino 不执行这一步。
 
 ## 冲突与恢复
 
@@ -164,3 +184,5 @@ mino project import legacy \
 - protocol migration、legacy analysis 和 import parse/digest 错误不会写计划状态。
 - 导入若在 revision 1 创建后中断，可使用完全相同的导入请求补完 authored batch。
 - 常规计划加载和 `project doctor` 会恢复 prepared transaction。不要手工删除 `.mino/**` 中的 transaction、snapshot 或 history 文件。
+
+当前远程 Team Catalog package 只支持 sync/cache，不会被 recommend/apply 选入计划。普通完整 CI 仍只配置 Windows；多目标 artifact smoke 不能替代 Linux/macOS 全套验证。这两项是明确的后续边界，不应在迁移时解释为已经具备。

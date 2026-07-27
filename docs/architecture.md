@@ -65,7 +65,9 @@ Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超
 │   ├── protocol.lock                    协议、schema 与渲染器锁
 │   ├── standards.local.toml             可选的本地标准来源声明
 │   ├── standards.lock                   已选择标准与目录 generation
-│   ├── active.json                      按工作树保存的活动计划绑定
+│   ├── plan-selection.json              项目级 selected plan 与 alternatives
+│   ├── plan-selection.lock              方案选择写入锁
+│   ├── active.json                      按工作树保存的 Git 身份绑定
 │   ├── active.lock                      绑定写入锁
 │   ├── integration-transactions.lock    集成替换全局锁
 │   ├── integration-transactions/<hash>/ prepared/backed_up/published/cleaned 记录
@@ -105,7 +107,8 @@ Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超
 | `.mino/protocol.lock` | 协议锁；禁止手工改写以伪造兼容状态。 |
 | `.mino/standards.local.toml` | 用户审阅的可选输入；Mino 读取但不生成。 |
 | `.mino/standards.lock` | 标准选择锁；显式同步可以原子替换。 |
-| `.mino/active.json` | 工作树绑定；只通过 `mino git bind` 修改。 |
+| `.mino/plan-selection.json` | 项目级方案选择；由 create/fork/archive 维护候选，只通过 `mino plan select` 改变显式选择。 |
+| `.mino/active.json` | Git 工作树身份绑定；只通过 `mino git bind` 修改，不负责选择活动方案。 |
 | `.mino/integration-transactions/` | Skill 与 marker-owned 文件替换的规范恢复记录；只由 `project init` 恢复。 |
 | `.mino/git/branches/` | 分支意图与完成日志；禁止手工编辑。 |
 | `.mino/git/commits/` | 任务提交日志；禁止手工编辑。 |
@@ -119,6 +122,20 @@ Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超
 
 集成文件替换在目标父目录保存摘要绑定的 temporary/backup，并在 `.mino/integration-transactions/<target-hash>/` 追加不可变的 `prepared -> backed_up -> published -> cleaned` phase record。每个 phase 都绑定 target、backup、temporary、原摘要和替换摘要。`project init` 在任何集成分类前持锁恢复：prepared 可以回滚到原文件，backed_up 可以恢复原文件或继续发布，published 只清理摘要匹配的残留，cleaned 只移除事务记录。任何未知路径、非连续 phase、非规范 JSON 或摘要外字节都会保留并报错。`project doctor` 只读报告 pending/corrupt，不执行恢复。
 
+### 受管读取预算
+
+受管状态不再提供无界整文件读取入口。固定大小文件在解析前按类型拒绝超限字节；追加日志逐条流式读取，不先分配整个日志：
+
+| 状态类型 | 上限 |
+|---|---:|
+| config、protocol/standards lock、plan selection、active binding、branch journal、integration phase、standards source/cache document | 1 MiB |
+| 当前计划、snapshot、计划事务 | 8 MiB |
+| 单条 plan event（含 LF） | 1 MiB |
+| run lease/result、commit journal、monitor summary、单条 evidence record/index entry | 4 MiB |
+| Markdown projection、evidence blob、integration target/backup/temporary | 16 MiB |
+
+计划 `events.jsonl` 和 evidence `index.jsonl` 的生命周期总长度不设人为整文件上限，但每条记录分别限制为 1 MiB 和 4 MiB。恰好达到上限的文件或记录可读，多一个字节即在 JSON/TOML 解析前产生类型化 drift/corruption。Workspace fingerprint 另以单文件 16 MiB、一次 capture 总计 256 MiB 为内容预算。
+
 ## 计划生命周期
 
 ```mermaid
@@ -130,6 +147,7 @@ stateDiagram-v2
     InProgress --> Blocked: exec block
     Blocked --> Ready: exec resume
     Blocked --> InProgress: exec resume
+    InProgress --> InProgress: exec rework（全局检查失败）
     InProgress --> Review: exec finish
     Review --> InProgress: review rework
     Review --> Blocked: 重大审阅意见
@@ -146,9 +164,11 @@ stateDiagram-v2
 - 每项验收条件绑定兼容且仍有效的证据；
 - 必需检查点已记录；
 - 没有未解决偏差；
-- 实际变更符合 File Map。
+- 相对于 task-start baseline 的当前任务增量符合 File Map。
 
-`exec finish` 还要求所有任务提交门槛和全局检查完成，然后把计划送入 Review。归档不属于生命周期状态；它是保留全部历史的停用 overlay。
+计划批准时捕获 `PlanBaseline`，每次 `exec start` 捕获对应 `TaskBaseline`。两者在 Git 与非 Git 项目中都保存 path、存在性、对象类型、长度、可执行位和内容摘要；Git 模式另保存 HEAD、index tree 与 status。任务完成计算 `current workspace - task-start baseline`，因此批准前的未变脏文件和前一未提交任务的变化不会被错误归给当前任务，而当前任务对同一路径的进一步修改仍会被识别。
+
+required commit gate 的合法终态是 `Committed`、`Not Required` 或带审批证据的 `Skipped`。全局必需检查失败后，`exec rework` 可以重新打开一个 Done 任务并重置该任务的验收、检查、commit gate、task baseline 和全部全局检查；除此之外不能任意回退任务。`exec finish` 还要求所有任务提交门槛、全局检查和 Final Outcome 完成，然后把计划送入 Review。归档不属于生命周期状态；它是保留全部历史的停用 overlay。
 
 ## 审阅、修订与方案分支
 
@@ -159,13 +179,17 @@ stateDiagram-v2
 - **Material Change**：把计划置为由审阅流程拥有的 Blocked，普通 `exec resume` 无法绕过。
 - **Follow-Up**：记录为 Deferred，不进入当前任务顺序。
 
-受保护修订使用递增 `C<n>` 和类型化操作。`Minor` 仅允许任务局部、不会改变用户可见行为的调整；`Material` 会清除计划批准和 Git Flow consent、重置任务与检查门槛、使相关证据失效，并要求重新校验与批准。
+受保护修订使用递增 `C<n>` 和类型化操作。`Minor` 仅允许任务局部、不会改变用户可见行为的调整；`Material` 会清除计划批准和 Git Flow consent、重置任务与检查门槛、使相关证据失效，并要求重新校验与批准。尚未 apply 的修订可进入 `Rejected`、`Withdrawn` 或 `Cancelled` 终态；这些出口只保存决定，不应用 patch。
+
+偏差是带稳定 `D<n>` 的独立实体。只有 `Open` 阻塞完成；`Resolved` 绑定当前任务的有效 evidence，`Rejected` 绑定人工 decision reference，`Superseded` 绑定已 Applied amendment。旧版 Deviation checkpoint 在读取时确定性映射为带 legacy link 的偏差。
+
+Material review 先进入 review-owned Blocked，再由 `accept-change`、`decline` 或 `defer-to-follow-up` 明确处置。接受变更仍须走 Material amendment；拒绝会解决该项；延后会把带 Review ID 来源的任务同步到 Final Outcome。任何返工或 Material apply 都使旧 Final Outcome 失效。
 
 `plan fork` 从经过完整审计的历史快照创建独立 revision 1 Draft。它复制需求、范围、决策、标准、任务、检查和提交意图，但清除生命周期、审批、证据、审阅结果、执行扩展、Git 就绪状态及归档状态。lineage 保存来源计划、revision、原因、快照哈希和时间。
 
 `plan diff` 只比较规范化后的 authored values，不修改或合并输入。`plan archive` 追加停用记录但不删除计划。计划 fork 与 Git branch 是两套独立概念，Mino 不提供 plan merge。
 
-普通计划创建和 legacy import 都遵守“每个项目至多一个活动计划”。Git worktree 优先使用当前 binding；没有 binding 或项目明确不是 Git repository 时，按计划 ID 排序扫描所有非 Done、未归档计划。零个候选返回空，一个候选被选中，多个候选报告策略歧义。`plan fork` 是允许临时共存的显式比较入口，但在归档未选方案之前，Agent context 不会替用户选择其中一个。
+普通计划创建和 legacy import 都遵守“每个项目至多一个活动计划候选集”的项目级约束；只有显式 `plan fork` 可以增加并存 alternative。`.mino/plan-selection.json` 以独立 selection revision 保存 selected plan、稳定排序的 alternatives 和最后一次选择审计。没有该文件的旧项目以虚拟 revision 0 解析：一个 live plan 被虚拟选中，多个 live plan 保持未选择并要求审批绑定的 `plan select`。Git binding 只保存 worktree identity，不选择、切换或隐藏项目方案；即使 binding 变为 stale，selected plan 仍保持不变，Git 风险通过独立的 binding status 报告。
 
 ## Revision、事务与投影一致性
 
@@ -184,11 +208,13 @@ Markdown 投影包含 plan ID、revision、状态哈希和 renderer version。�
 
 `exec check run` 是三阶段操作：
 
-1. 在计划中提交 `Running` lease。
+1. 按 task File Map 或完整 global change scope 捕获 `WorkspaceFingerprint`，并在计划中提交 `Running` lease。
 2. 以精确 argv、有限环境、超时和输出上限启动进程，保存运行结果并创建不可变证据。
 3. 把证据 ID 和终态检查状态附加到新的计划 revision。
 
 每个派生 run request ID 使用跨进程 `owner.lock`。owner 从发布 lease 前一直持有锁到 terminal result 完成文件与父目录同步；实时精确重试看到锁被占用时立即返回可重试的 AlreadyRunning，不写 result、evidence 或 plan 终态。只有调用方成功取得空闲 owner lock，并在锁内再次确认 lease 存在而 result 缺失，才能证明旧 owner 已退出并恢复不可变的 interrupted 结果。失败证据会保留用于审计，但不能证明验收通过；被 supersede 或被修订标记为 stale 的证据也不能满足当前门槛。
+
+fingerprint 绑定 repository mode、HEAD、index tree、规范化 status entries、task/global scope、每个路径的类型/长度/可执行位/SHA-256，以及完整 canonical digest。lease、terminal result 和 Command evidence 保存同一份身份。`exec criterion pass`、`exec complete`、自动或人工 commit、`exec finish`、review resolve 与 review accept 都会重新捕获原 scope；任一文件字节、对象类型、模式或适用 Git 身份发生变化，相关 Passed check 会先持久化为 `Stale`，旧 evidence 不再满足门槛，必须重新运行。自动 commit 后允许 HEAD/index 发生预期转换，但 task fingerprint 中的文件 snapshots 必须与 commit 内容保持一致；global fingerprint 始终绑定最终完整状态。
 
 `exec check monitor` 复用同一检查流程，在前台执行有限重试。最大次数、间隔和总 deadline 一起决定每次进程预算；取消文件、deadline、通过或尝试耗尽都会产生 request-hash-bound 的 `mino.monitor/v1` 终态摘要。精确重试先读取摘要，不再睡眠或启动进程。
 
@@ -198,12 +224,14 @@ Markdown 投影包含 plan ID、revision、状态哈希和 renderer version。�
 
 `mino git inspect` 通过唯一的生产 Git command adapter 执行窄范围命令，解析 NUL 分隔的 porcelain v2，并显式报告普通、unborn、detached、bare、linked worktree 和非仓库状态。项目发现、计划 readiness、File Map 检查、分支、提交与 hooks 共用该入口；其他生产模块不直接构造 Git 子进程。adapter 清空环境后恢复跨平台基础 allowlist，并按普通操作或短 probe profile 施加 stdin、timeout、合并输出与进程树边界。
 
-`mino git bind` 以 canonical common directory 和 worktree root 为键保存活动计划。分支绑定允许该分支向前移动；detached binding 要求完全相同的 HEAD。切换分支或 HEAD 后会变为 `stale_branch` 或 `stale_head`，其他工作树的绑定为 `foreign_worktree`。存在 binding 时，Git 中的 foreign 或 stale 状态不会跨工作树回退；项目明确不再是 Git repository 时则恢复项目级候选扫描。
+`mino git bind` 以 canonical common directory 和 worktree root 为键保存 Git 授权身份。分支绑定允许该分支向前移动；detached binding 要求完全相同的 HEAD。切换分支或 HEAD 后会变为 `stale_branch` 或 `stale_head`，其他工作树的绑定为 `foreign_worktree`。这些状态会阻止需要当前 Git 身份的操作，但不会改变 `.mino/plan-selection.json` 中的 selected plan。
 
 分支和提交都使用不可变 intent → 外部操作 → completion 三段日志：
 
 - `git branch create` 在单独批准后，只能从捕获的 base 创建并切换到确定名称 `mino/<plan-id>`；切换时禁用仓库 hooks。
 - `git commit` 只处理第一个符合条件且要求提交的 Done 任务，要求当前审批、Approved Git Flow、相同工作树绑定、精确父 HEAD、有效证据，以及 File Map 与 Commit Scope 的交集路径。
+- `git commit record-manual` 不修改 Git，只验证当前 HEAD 的 object、parent、branch、消息、范围和 fingerprint snapshots，再记录 Commit evidence。
+- `git gate skip` 在独立审批引用下记录 AcceptedException evidence，并把 required gate 置为 `Skipped`。
 - 提交前索引必须为空；Mino 只暂存解析后的精确路径，并保留正常 commit hooks。失败后不会 reset、unstage 或掩盖现场。
 
 建议型 hooks 采用独立的 propose/status/install/run 流程。安装必须匹配当前 proposal hash，只能写默认的 marker-owned pre/post commit 路径；用户 hooks、符号链接和自定义 `core.hooksPath` 均保留。运行时仅输出 Git 与绑定观察，不写计划、证据、索引或 hook 文件。
@@ -222,6 +250,14 @@ Markdown 投影包含 plan ID、revision、状态哈希和 renderer version。�
 
 检测会保留全部候选，不拼接也不静默选择。`standards conflict refresh` 把当前候选指纹记录进计划，`resolve` 则保存选择、理由、外部决策引用、actor 与时间。任一来源字节变化都会使旧决定失效，直到再次 refresh 并显式选择。
 
+`plan create` 持久化扫描摘要；plan-scoped `standards apply --recommended --seed-verification` 按完整 File Map 重新扫描，并原子协调内嵌 package、catalog-owned check、冲突和摘要。定义不变的检查保留状态，变化的检查回到无 evidence 的 Pending，自定义检查保留。截断摘要必须用绑定当前 scan digest 的 `plan scan accept` 明确接受，否则 validate/finalize 阻塞。远程 Team Catalog 当前只支持 sync 与 cache 验证，不进入 recommend/apply 的选择集合。
+
+## Agent 执行身份
+
+`agent context`、`agent next` 和 `agent capabilities` 都公开稳定的 `executor_identity: "codex"`。所有带 revision/request ID 的规范 Agent mutation argv 显式包含 `--actor codex`；只读 argv 不携带 actor。人工直接构造 mutation 命令且省略 `--actor` 时仍使用 CLI 的 `user` 默认值，因此事件审计不会把 Agent 动作误记为用户，也不会把人工动作误记为 Agent。
+
 ## 版本所有权
 
 当前 plan schema 为 `1`，renderer 为 `2`，planning protocol 为 `2026-05-11/review-rework-git-flow-v1`。协议模板和执行指南作为经过 manifest 摘要验证的惰性资源内嵌；它们说明来源和交互方式，真正的运行时约束来自编译后的领域与应用服务。
+
+当前普通完整 CI 仍只在 Windows job 运行；五目标 artifact workflow 验证 release build、plugin contract 和 package smoke，不能替代 Linux/macOS 完整测试。这项跨平台 CI 扩展及 README 对应声明留作后续工作，本轮协议闭环不修改两者。

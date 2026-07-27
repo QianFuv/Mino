@@ -25,9 +25,14 @@ Mino 中的 approval reference 是可审计的用户声明，不是签名、身�
 |---|---|---|
 | `plan approve` | 当前 Ready revision 和 Git Flow consent 选择 | Draft 完整、检查通过 |
 | `plan amend approve` | 当前待处理的 Material `C<n>` | 旧计划批准、Minor 分类 |
+| `plan amend reject` / `plan amend cancel` | 当前修订、decision reference 与 reason | 旧批准、隐式放弃 |
 | `review accept` | 已解决反馈且证据仍有效的当前 Review revision | 计划批准、任务完成 |
+| `review disposition` | 当前被阻塞的 Material review、决定、reference 与 reason | 自动接受变更、普通 resume |
 | `plan archive` | 明确选择停用的计划、reason 与 approval reference | 创建了替代方案、计划 Done |
+| `plan select` | 当前 selection revision 中的 live alternative、reason 与 approval reference | Git binding、fork 成功 |
+| `plan scan accept` | 当前精确截断 scan digest、reason 与 decision reference | 旧扫描接受、计划批准 |
 | `git branch create` | 当前确定性 branch proposal | 计划批准、Git Flow consent |
+| `git commit record-manual` / `git gate skip` | 当前 commit object 或 gate exception 及其 approval reference | Disabled Git Flow、任务完成 |
 | `git hook install` | 当前 proposal hash 与目标 hooks | 计划批准、先前 proposal |
 | `standards conflict resolve` | 当前 source fingerprint 中的具体候选、理由和 decision reference | 优先级默认值、旧冲突决定 |
 
@@ -44,7 +49,8 @@ Mino 会 canonicalize 项目根，并要求受管路径留在根目录内。需�
 - `.mino/plans/**` 保存规范计划、事务、快照、事件、运行和证据，禁止手工修改。
 - `.mino/protocol.lock` 与 `.mino/standards.lock` 只能通过对应协议流程更新。
 - `.mino/standards.local.toml` 是用户审阅的可选输入；引用来源必须是项目内普通文件并满足读取上限。
-- `.mino/active.json` 只通过 `mino git bind` 修改；错误或过期身份只诊断，不静默修复。
+- `.mino/plan-selection.json` 只通过计划创建/fork/archive 维护候选，并由 approval-bound `plan select` 改变显式选择。
+- `.mino/active.json` 只通过 `mino git bind` 修改；它保存 Git worktree identity，不选择计划，错误或过期身份只诊断。
 - `.mino/git/branches/**` 与 `.mino/git/commits/**` 是不可变恢复日志，不是扩大 Git 权限的凭据。
 - `docs/plan/*.md` 是摘要校验的投影；手工改动会产生 drift，并保留现场而不是被覆盖。
 
@@ -53,6 +59,17 @@ Mino 会 canonicalize 项目根，并要求受管路径留在根目录内。需�
 计划事务、快照、事件、run journal、evidence record 与 blob 分别使用 create-new、guarded replacement、bounded lock、canonical bytes 和 digest check。`.gitignore` 对 `/.mino/` 与 `/docs/plan/` 的忽略不构成访问控制或加密；其中可能包含需求文本、路径、命令摘要、环境摘要和附件，分享前必须按敏感仓库数据处理。
 
 Evidence 的 `records`/`blobs`、检查的 `runs`、monitor summary、active binding、Git branch/commit journal 以及 standards cache generation 均使用同一个 capability-rooted 文件系统入口。任一中间目录或最终目标被替换成 symlink/junction 或错误类型时，操作在发布外部 blob、summary、journal、cache 或 lock 之前失败；已有外部字节不会被读取为受管状态或被替换。
+
+所有受管整文件读取都有稳定上限，并在解析前最多读取“上限 + 1”字节：
+
+| 类型 | 上限 |
+|---|---:|
+| config/lock、selection、active binding、branch journal、integration phase、standards document | 1 MiB |
+| plan、snapshot、plan transaction | 8 MiB |
+| run lease/result、commit journal、monitor summary、evidence record | 4 MiB |
+| projection、evidence blob、integration artifact | 16 MiB |
+
+追加式 plan event 和 evidence index 不会整文件载入；它们分别按 1 MiB 和 4 MiB 的单条上限流式读取，并拒绝超限或不完整记录。恰好到达上限合法，多一个字节产生 drift/corruption。上限保护 Mino 自身内存，不代表文件内容可信或可公开。
 
 ### 集成与导入
 
@@ -115,6 +132,14 @@ result destination 必须是项目内的相对文件，父目录为现有普通�
 
 证据不可变：修正会创建通过 `supersedes` 关联的新记录。被 supersede 的记录不能通过当前 gate。`AcceptedException` 必须携带策略要求的 approval-compatible binding，不是通用绕过。Material amendment 会保留旧证据但标记 stale；pending amendment 阶段则拒绝新增证据，避免绑定到含糊输入。
 
+### 验证新鲜度
+
+每次计划检查在启动进程前捕获 task File Map 或 global change scope 的 `WorkspaceFingerprint`，并把同一 fingerprint 写入 lease、terminal result 和 Command evidence。它包含 Git/non-Git mode、HEAD、index tree、status entries、scope、每个路径的存在性/类型/长度/可执行位/SHA-256 以及 canonical digest。单文件读取限制 16 MiB，一次 capture 总计限制 256 MiB；符号链接和其他不安全对象不会被当作普通文件摘要。
+
+criterion pass、task complete、自动或人工 commit、finish、review resolve 和 review accept 都会重新捕获原 scope。任何适用身份不匹配会先把检查记录为 `Stale`，旧 evidence 继续可审计但不再授权完成。自动 commit 的预期 HEAD/index 变化只在 task snapshots 与 commit 内容精确一致时被接受；global verification 仍绑定最终完整状态。人工修改 check/evidence JSON、仅保持路径名相同或把旧 evidence ID 重新挂到 criterion 都不能绕过该比较。
+
+计划批准和 task start 还分别保存 plan/task baseline。任务 File Map 校验使用 task-local delta，因此批准前未变化的脏文件和前一任务的未提交字节不会扩大当前任务权限；当前任务对这些路径的进一步修改仍会进入 delta。Mino 不把缺失 baseline 猜成 clean state。
+
 ## 网络边界
 
 Mino 没有 telemetry，不会自动获取协议或标准更新。生产 CLI 唯一网络入口是用户显式运行：
@@ -137,8 +162,8 @@ Git adapter 不经过 shell，禁用 terminal prompt，限制输出，并严格�
 
 - `mino git inspect` 不写 Git 或 Mino 状态。
 - `mino git bind` 只在 bounded lock 下原子替换 `.mino/active.json`，不修改 HEAD、branch、ref、index 或 commit。
-- 活动计划必须匹配 canonical common directory 与 worktree。branch binding 要求相同 branch，detached binding 要求相同 HEAD；stale 或 foreign binding 不暴露活动计划。
-- 非 Git 项目按项目级扫描选择活动计划；普通 create/import 不能增加第二个候选。显式 fork 可以暂时产生多个候选，但 Agent context 会报告歧义，直到审批绑定的 archive 只留下一个候选。
+- branch binding 要求相同 branch，detached binding 要求相同 HEAD；stale 或 foreign binding 阻止需要 Git identity 的动作，但不会改变项目级 selected plan。
+- Git 与非 Git 项目都使用 `.mino/plan-selection.json`。普通 create/import 不能增加第二个候选；显式 fork 可以增加 alternative，多个旧候选在 selection revision 0 下保持未选择，直到 approval-bound `plan select` 明确选择。
 
 ### 本地分支
 
@@ -160,6 +185,8 @@ Git adapter 不经过 shell，禁用 terminal prompt，限制输出，并严格�
 通过 preflight 后，Mino 保存 bounded content snapshot 和 immutable intent，只对精确路径运行 `git add --`，记录 staged tree，再使用计划中的单行消息调用 `git commit`。正常 repository hooks 会执行，Mino 不使用 `--no-verify`。stdin 为空、terminal prompt 禁用，输出和运行时间均有限。
 
 staging、hook 或 commit 失败会保留精确 staged state 与 journal，并把计划变成 Blocked。Mino 不会 reset、clean、checkout 或 unstage。`exec resume` 后的精确重试会核对 source/tree，并优先协调已经创建的 commit，避免重复提交。
+
+Git Flow Disabled 或非 Git 流程不会隐式放宽 gate。`git commit record-manual` 仅验证并记录已经位于当前 branch HEAD 的 commit，要求正确 parent、message、File Map、Commit Scope 和 task fingerprint；它不 stage 或创建 commit。`git gate skip` 需要独立 approval reference 与 reason，保存 AcceptedException evidence。后续任务只把 `Committed`、`Not Required` 或这种已批准的 `Skipped` 当作闭环。
 
 ### 建议型 hooks
 
@@ -198,6 +225,8 @@ Mino 同样不会部署软件、发送消息、创建 ticket 或修改远程系�
 - Mino 不是 arbitrary plugin runtime，不加载远程 executable payload。
 - Mino 不执行远程或破坏性 Git 操作，也不提供 plan merge。
 - Mino 不允许通过手工修改 managed state、伪造 evidence 或任意设置 status 来声明成功。
+- 远程 Team Catalog 当前只支持显式 sync/cache 验证，不授予 recommend/apply 选择远程 package 的能力。
+- 普通完整 CI 当前仍只有 Windows job；多目标 artifact smoke 不是 Linux/macOS 全套测试，这一工程覆盖扩展仍属后续工作。
 
 ## Agent 必须停止的情况
 

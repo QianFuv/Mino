@@ -25,6 +25,8 @@
 - 修改成功后必须丢弃旧 revision，重新读取 context。
 - `git bind`、`git branch create` 和自动 `git commit` 不接受调用方自定义的计划 mutation 元数据。`git commit record-manual` 与 `git gate skip` 是显式的 revision/request mutation，并要求 approval reference。
 
+Agent schema 公开稳定的 `executor_identity: "codex"`。Mino 返回的 revisioned mutation `next_actions[].argv` 总是显式包含 `--actor codex`；只读 argv 不包含 actor。人工直接输入 mutation 命令且省略该选项时仍使用 `--actor user` 默认值。调用方必须执行数组 argv，不能删除、替换或从会话身份猜测 actor。
+
 ## 命令总览
 
 ### 项目发现与协议
@@ -131,7 +133,7 @@ fork 只读取经过审计的不可变 source snapshot。新计划保留原始�
 | `mino standards conflict refresh` | 计划 | 把当前候选集合的指纹写入计划，不选择值。 |
 | `mino standards conflict resolve` | 计划，审批边界 | 选择一个当前候选，并记录理由与可审计决策引用。 |
 
-detect、recommend 和 apply 只使用内嵌或已缓存数据；只有 sync 使用配置的网络目录。plan-scoped apply 会用嵌入目录识别所有 catalog-owned check：定义不变时保留现有状态与证据，定义变化或新加入时以无证据 Pending check 替换；不属于目录的自定义 check 不受影响。冲突优先级依次为当前用户要求、仓库规则或本地声明、项目配置、语言包、Common。最高优先级默认值只用于展示，不会被静默应用。所有当前冲突都必须有与来源指纹绑定的显式选择，计划才能通过校验。
+detect、recommend 和 apply 只使用内嵌或已缓存数据；只有 sync 使用配置的网络目录。plan-scoped apply 会用嵌入目录识别所有 catalog-owned check：定义不变时保留现有状态与证据，定义变化或新加入时以无证据 Pending check 替换；不属于目录的自定义 check 不受影响。冲突优先级依次为当前用户要求、仓库规则或本地声明、项目配置、语言包、Common。最高优先级默认值只用于展示，不会被静默应用。所有当前冲突都必须有与来源指纹绑定的显式选择，计划才能通过校验。远程 Team Catalog package 当前只能被 `sync` 验证并缓存，不能被 recommend 或 plan-scoped apply 选择。
 
 `plan create` 和 plan-scoped apply 都保存扫描 SHA-256、文件/目录/符号链接/字节计数以及稳定截断原因。截断扫描在 `agent context` 中返回 `scan_incomplete: true`，使 validate/finalize 保持阻塞且不会伪造完整扫描；`plan scan accept` 只接受该精确摘要。后续扫描摘要发生变化时，旧接受不会迁移到新的 digest。
 
@@ -141,9 +143,9 @@ detect、recommend 和 apply 只使用内嵌或已缓存数据；只有 sync 使
 
 | 命令 | 返回内容 |
 |---|---|
-| `mino agent context` | 完整项目、Git、project plan selection/alternatives、活动计划、扫描完整性、allowed/blocked actions、审批状态和规范 next argv。 |
-| `mino agent next` | 聚焦 project plan selection、当前计划、审批边界、blocked actions 和下一步。 |
-| `mino agent capabilities` | 静态能力清单，以及调用和 mutation 约束。 |
+| `mino agent context` | 完整项目、Git、project plan selection/alternatives、活动计划、扫描完整性、`executor_identity`、allowed/blocked actions、审批状态和规范 next argv。 |
+| `mino agent next` | 聚焦 executor identity、project plan selection、当前计划、审批边界、blocked actions 和下一步。 |
+| `mino agent capabilities` | 静态能力清单、稳定 executor identity，以及调用和 mutation 约束。 |
 
 Agent 命令直接返回各自 schema，不套 `mino.result/v1`。缺少 JSON 或 no-input 模式时以 exit 5 失败。
 
@@ -156,6 +158,8 @@ Agent 命令直接返回各自 schema，不套 `mino.result/v1`。缺少 JSON �
 | `mino evidence show` | 否 | 返回一条精确的不可变记录。 |
 
 artifact path 必须留在项目内。修正证据会创建带 `supersedes` 的新记录，旧 record 和 blob 不会被改写。被修订失效的证据仍保留在历史中，但不能满足当前完成门槛。存在尚待 apply 的 amendment 时禁止添加证据。
+
+Command evidence 还绑定实际被检查内容的 `WorkspaceFingerprint`：repository mode、HEAD、index tree、status entries、task/global scope、File Map snapshots 和 canonical digest。criterion pass、task complete、自动/人工 commit、finish、review resolve 与 accept 都重新捕获原 scope；内容、对象类型、可执行位或适用 Git 身份变化会把检查持久化为 `Stale` 并要求重跑，不能用旧 Passed evidence 证明新字节。
 
 ### 执行、检查与调度说明
 
@@ -179,6 +183,8 @@ artifact path 必须留在项目内。修正证据会创建带 `supersedes` 的�
 | `mino exec finish` | 计划 | 在所有任务、必需 commit gate、全局检查和完整 Final Outcome 完成后转入 Review。 |
 
 只有 Open 偏差阻塞 task complete 和 exec finish；Resolved、Rejected 与 Superseded 保留全部审计字段但不再阻塞。旧状态中只有 Deviation checkpoint 时，读取会按 checkpoint 顺序生成确定性 `D<n>` 和 legacy checkpoint link；首次处置会把该记录持久化。Resolution evidence 必须属于同一计划和任务、未失效且未被替代；Superseded 必须引用已应用的 Amendment。
+
+`plan approve` 捕获 project baseline，`exec start` 捕获 task baseline。task complete 比较的是当前 workspace 与 task-start baseline 的局部增量，而不是整个脏工作树；批准前未变化的 dirt、前一任务留下的未提交变化和非 Git 文件都按摘要区分。单个 fingerprint 文件最多 16 MiB，一次 capture 总计最多 256 MiB，超限会明确失败而不是退化为未跟踪变化。
 
 相同 request ID 的 `exec check run` 可以安全精确重试。已有 terminal result 时返回 replay；原调用仍持有 run owner lock 时返回 exit 3 `revision_conflict`，消息标识 AlreadyRunning，并且不新增 evidence 或 plan revision；只有 owner lock 已释放且 lease 没有 result 时才恢复一次 `Interrupted` 终态。
 
@@ -212,7 +218,7 @@ schedule spec 把当前 `--plan`、`--expect-revision` 和 `--check` 绑定到�
 | `mino git hook install` | 仅 hook 文件，审批边界 | 要求当前 proposal hash 和 approval reference；只安装或修复 absent/Mino-owned 默认 hooks。 |
 | `mino git hook run` | 无 | 读取 pre-commit 或 post-commit 的 staged/HEAD 与绑定事实，输出诊断和 next actions。 |
 
-绑定状态只能是 `missing`、`current`、`foreign_worktree`、`stale_branch`、`stale_head` 或 `not_repository`。一旦存在 active binding 文件，foreign 或 stale 状态不会回退到其他工作树或分支的计划；`not_repository` 改用项目级候选扫描。bind 只替换当前工作树 entry，不修改 HEAD、branch、ref、index 或 commit。
+绑定状态只能是 `missing`、`current`、`foreign_worktree`、`stale_branch`、`stale_head` 或 `not_repository`。bind 只替换当前工作树 entry，不修改 HEAD、branch、ref、index、commit 或 `.mino/plan-selection.json`。foreign/stale 状态阻止需要当前 Git 身份的操作，但不会隐藏或切换 selected plan；项目方案始终由 project selection 独立决定。
 
 branch create 是独立审批边界，计划批准和 Git Flow consent 不能替代它。Mino 先写 `.mino/git/branches/<plan-id>/intent.json`，再以禁用 hooks 的精确 `git switch -c` 操作 base HEAD，确认 post-state 后才写 binding 和 `completion.json`。精确重试能够区分未变化的失败、已创建待协调的分支和已完成操作。
 
@@ -316,12 +322,15 @@ Clap 参数错误也返回 2，但因为尚未进入 Mino dispatch，可能只�
 
 - Plan：`Draft`、`Ready`、`In Progress`、`Blocked`、`Review`、`Done`。
 - Task：`Draft`、`Ready`、`In Progress`、`Blocked`、`Done`。
-- Check：`Pending`、`Running`、`Passed`、`Failed`、`Blocked`。
+- Check：`Pending`、`Running`、`Passed`、`Failed`、`Blocked`、`Stale`；其中 `Stale` 表示先前 Passed evidence 的 workspace fingerprint 已不匹配。
 - Criterion：`Pending`、`Passed`、`Failed`、`Accepted Exception`。
 - Git Flow consent：`Pending`、`Approved`、`Disabled`。
+- Commit gate：`Pending`、`Committed`、`Skipped`、`Not Required`、`Blocked`。
 - Amendment classification：`Minor`、`Material`。
-- Amendment state：`Proposed`、`Approval Required`、`Approved`、`Applied`。
+- Amendment state：`Proposed`、`Approval Required`、`Approved`、`Applied`、`Rejected`、`Withdrawn`、`Cancelled`。
+- Deviation state：`Open`、`Resolved`、`Rejected`、`Superseded`。
 - Material review disposition：`Accept Change`、`Decline`、`Defer to Follow-Up`。
+- Project selection 使用独立的数值 `selection_revision`，不是 Plan lifecycle status。
 - Active binding：`missing`、`current`、`foreign_worktree`、`stale_branch`、`stale_head`、`not_repository`。
 
 只有命令清单中暴露的语义转换属于实现承诺；任何命令都不能接受调用方任意指定的 status value。
