@@ -28,6 +28,7 @@ Mino 中的 approval reference 是可审计的用户声明，不是签名、身�
 | `plan amend reject` / `plan amend cancel` | 当前修订、decision reference 与 reason | 旧批准、隐式放弃 |
 | `review accept` | 已解决反馈且证据仍有效的当前 Review revision | 计划批准、任务完成 |
 | `review disposition` | 当前被阻塞的 Material review、决定、reference 与 reason | 自动接受变更、普通 resume |
+| `review disposition revise` | Accept Change 关联的未应用终态 amendment、Decline/Defer 新决定、reference 与 reason | 原 Accept Change、amendment reject/cancel、普通 resume |
 | `plan archive` | 明确选择停用的计划、reason 与 approval reference | 创建了替代方案、计划 Done |
 | `plan select` | 当前 selection revision 中的 live alternative、reason 与 approval reference | Git binding、fork 成功 |
 | `plan scan accept` | 当前精确截断 scan digest、reason 与 decision reference | 旧扫描接受、计划批准 |
@@ -37,6 +38,8 @@ Mino 中的 approval reference 是可审计的用户声明，不是签名、身�
 | `standards conflict resolve` | 当前 source fingerprint 中的具体候选、理由和 decision reference | 优先级默认值、旧冲突决定 |
 
 项目批准不授权任意文件、网络、Git、部署、消息或远程系统操作。最终验收也不能从无失败检查、已解决反馈或会话语气中推断。
+
+Material Review 的 Accept Change 与 source amendment 双向关联，处置历史追加而不覆盖。只有关联 amendment 已 `Rejected`、`Withdrawn` 或 `Cancelled` 且从未应用时，新的 approval-bound `review disposition revise` 才能改为 Decline 或 Defer；pending/applied/replacement amendment、重复 revision 或再次 Accept Change 都不能借此绕过 Material approval。
 
 ## 文件系统边界
 
@@ -86,6 +89,10 @@ Evidence 的 `records`/`blobs`、检查的 `runs`、monitor summary、active bin
 
 项目扫描把仓库 ignore 文件和全局 Git exclude 当作过滤输入，不进入已忽略目录，也不跟随符号链接。遍历顺序固定，深度、文件数、总读取字节和单文件读取字节均有正数预算；源码行数与 CI 证据只通过固定 64 KiB 缓冲读取。触发预算不会静默伪装成完整结果，而会返回稳定的截断原因。扫描器不是文件系统沙箱：未忽略且位于预算内的路径仍会被读取，调用方应把扫描根本身视为授权边界。
 
+Project scan 的 ignore 语义不适用于已批准 File Map 的验证范围。Workspace fingerprint 对显式目录/glob 关闭标准 ignore filter，使 `dist/**` 等被 `.gitignore` 隐藏的授权路径仍进入 delta 和 stale-evidence 检查；该覆盖不允许读取 `.git/**`、`.mino/**`、受管 projection、symlink escape 或超出文件数/字节预算的对象。
+
+<!-- doc-contract: explicit-file-map-overrides-ignore -->
+
 ## 进程执行边界
 
 ### 单次检查
@@ -134,11 +141,17 @@ result destination 必须是项目内的相对文件，父目录为现有普通�
 
 ### 验证新鲜度
 
-每次计划检查在启动进程前捕获 task File Map 或 global change scope 的 `WorkspaceFingerprint`，并把同一 fingerprint 写入 lease、terminal result 和 Command evidence。它包含 Git/non-Git mode、HEAD、index tree、status entries、scope、每个路径的存在性/类型/长度/可执行位/SHA-256 以及 canonical digest。单文件读取限制 16 MiB，一次 capture 总计限制 256 MiB；符号链接和其他不安全对象不会被当作普通文件摘要。
+每次计划检查在启动进程前捕获 task File Map 或 global change scope 的 `WorkspaceFingerprint`，并把同一 fingerprint 写入 lease、terminal result 和 Command evidence。它包含 Git/non-Git mode、HEAD、index tree、status entries、scope、每个路径的存在性/类型/长度/可执行位/SHA-256 以及 canonical digest。Git regular file 还保存通过只读 `git hash-object` 按当前 attributes/index 语义计算的 expected blob OID 与 `100644`/`100755` mode。单文件读取限制 16 MiB，一次 capture 总计限制 256 MiB；符号链接和其他不安全对象不会被当作普通文件摘要。
 
-criterion pass、task complete、自动或人工 commit、finish、review resolve 和 review accept 都会重新捕获原 scope。任何适用身份不匹配会先把检查记录为 `Stale`，旧 evidence 继续可审计但不再授权完成。自动 commit 的预期 HEAD/index 变化只在 task snapshots 与 commit 内容精确一致时被接受；global verification 仍绑定最终完整状态。人工修改 check/evidence JSON、仅保持路径名相同或把旧 evidence ID 重新挂到 criterion 都不能绕过该比较。
+<!-- doc-contract: expected-git-entry -->
+
+criterion pass、task complete、自动或人工 commit、finish、review resolve 和 review accept 都会重新捕获原 scope。任何适用身份不匹配会先把检查记录为 `Stale`，旧 evidence 继续可审计但不再授权完成。自动 commit 的预期 HEAD/index 变化只在 staged/commit tree 的逐路径 blob OID/mode 与 task snapshots 精确一致时被接受；人工 commit 也必须通过相同 tree identity。global verification 仍绑定最终完整状态。人工修改 check/evidence JSON、仅保持路径名相同或把旧 evidence ID 重新挂到 criterion 都不能绕过该比较。
 
 计划批准和 task start 还分别保存 plan/task baseline。任务 File Map 校验使用 task-local delta，因此批准前未变化的脏文件和前一任务的未提交字节不会扩大当前任务权限；当前任务对这些路径的进一步修改仍会进入 delta。Mino 不把缺失 baseline 猜成 clean state。
+
+`exec finish`、`review resolve` 和 `review accept` 另有项目级 Final Plan Delta gate，不把“全局检查在当前状态通过”当作范围授权。该 gate 合并 approved baseline 到当前文件系统的 delta 与 Git base HEAD 到 current HEAD 的 tree delta，按 File Map change kind、精确 `Resolved Minor` deviation paths 和 Mino-owned exclusions 决定授权；已提交、未提交及非 Git 的越界路径都会在状态 mutation 前以 exit 5 阻止。
+
+<!-- doc-contract: final-plan-delta-gate -->
 
 ## 网络边界
 
@@ -180,13 +193,13 @@ Git adapter 不经过 shell，禁用 terminal prompt，限制输出，并严格�
 - 当前 same-worktree binding、branch 与 parent HEAD 精确匹配；
 - task evidence 已满足；
 - changed paths 同时落在 File Map 和 Commit Scope 内；
-- 调用前 index 为空，不存在 mixed content 或 unsafe file kind。
+- 调用前 index 为空，不存在 mixed content、unsafe file kind 或 active clean filter。
 
-通过 preflight 后，Mino 保存 bounded content snapshot 和 immutable intent，只对精确路径运行 `git add --`，记录 staged tree，再使用计划中的单行消息调用 `git commit`。正常 repository hooks 会执行，Mino 不使用 `--no-verify`。stdin 为空、terminal prompt 禁用，输出和运行时间均有限。
+通过 preflight 后，Mino 保存 raw digest、expected Git blob/mode 和 immutable intent，只对精确路径运行 `git add --`，逐路径验证 staged tree，再使用计划中的单行消息调用 `git commit`。正常 repository hooks 会执行，Mino 不使用 `--no-verify`。commit 后再次用 `ls-tree` 等价 plumbing 验证每个 blob OID/mode，删除必须确实不存在；因此 `text`、`eol`、`working-tree-encoding` 的内建转换不会把未经对应 Git identity 验证的内容写入终态。stdin 为空、terminal prompt 禁用，输出和运行时间均有限。
 
 staging、hook 或 commit 失败会保留精确 staged state 与 journal，并把计划变成 Blocked。Mino 不会 reset、clean、checkout 或 unstage。`exec resume` 后的精确重试会核对 source/tree，并优先协调已经创建的 commit，避免重复提交。
 
-Git Flow Disabled 或非 Git 流程不会隐式放宽 gate。`git commit record-manual` 仅验证并记录已经位于当前 branch HEAD 的 commit，要求正确 parent、message、File Map、Commit Scope 和 task fingerprint；它不 stage 或创建 commit。`git gate skip` 需要独立 approval reference 与 reason，保存 AcceptedException evidence。后续任务只把 `Committed`、`Not Required` 或这种已批准的 `Skipped` 当作闭环。
+Git Flow Disabled 或非 Git 流程不会隐式放宽 gate。`git commit record-manual` 仅验证并记录已经位于当前 branch HEAD 的 commit，要求正确 parent、message、File Map、Commit Scope、fresh raw workspace snapshot、expected commit-tree entries，并与自动路径一样拒绝 clean filter；它不 stage 或创建 commit。`git gate skip` 需要独立 approval reference 与 reason，保存 AcceptedException evidence。后续任务只把 `Committed`、`Not Required` 或这种已批准的 `Skipped` 当作闭环。
 
 ### 建议型 hooks
 

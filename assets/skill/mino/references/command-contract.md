@@ -20,15 +20,20 @@ returned `next_actions` and rerun doctor.
 The context fields that control behavior are `active_plan`,
 `approval_required`, `blocked_actions`, and `next_actions`. An action contains
 an `id` and an `argv` array. Execute argv as an argument vector without shell
-parsing. Re-read context after each successful mutation.
+parsing. Every `next_actions[].id` must also appear in `allowed_actions`; never
+insert a state-changing command that context did not return. Re-read context
+after each successful mutation.
 
 ## Git identity and active binding
 
 Agent context includes canonical Git worktree identity, branch or detached
 HEAD, cleanliness, staged/unstaged paths, and active-binding status when the
-project is in a Git worktree. `current` is the only binding status that may
-select an active plan. Treat `foreign_worktree`, `stale_branch`, `stale_head`,
-and `not_repository` as no active plan; do not fall back to another plan.
+project is in a Git worktree. Project plan selection is independent of Git
+binding; a stale or foreign binding does not silently select another plan.
+`current` is the only binding status that permits a Git-identity-gated action.
+When Approved Git Flow is ready to start or commit and binding is not current,
+execute the returned `git.bind` argv, refresh context, and wait for Mino to
+return `exec.start` or `git.commit`.
 
 Use `mino git inspect --plan <id> --format json --no-input` for a complete
 read-only relationship report. Use
@@ -98,6 +103,14 @@ decision reference, then execute only the returned resolve shape with those
 values. Re-read context afterward. If source bytes change, the decision is
 stale and must be refreshed and explicitly made again.
 
+For non-conflict `POLICY-STANDARD-*` findings or `POLICY-TOOL-UNAVAILABLE`,
+execute the returned plan-scoped `standards apply --recommended
+--seed-verification --plan ...` argv. Do not substitute read-only `standards
+recommend` or Draft-only `plan apply`. Untracked/stale conflicts route to
+`standards conflict refresh`; unresolved conflicts route to `list` and then an
+explicit approved resolution. Ready reconciliation invalidates old plan
+approval, so refresh context and stop at the new approval boundary.
+
 ## Initial creation
 
 Only when the user explicitly requests formal or durable planning and context
@@ -124,6 +137,12 @@ After creation, use only `next_actions`; do not hand-author the plan JSON or
 managed Markdown. Use a fresh UUID for each distinct mutation and the current
 `--expect-revision`. Reuse a UUID only for a byte-equivalent retry.
 
+The display name remains complete UTF-8. If it contains no ASCII letter or
+digit, Mino derives the ASCII ID suffix `plan-<8hex>` from the first eight
+lowercase hexadecimal characters of the exact UTF-8 name SHA-256; the full ID
+is `YYYY-MM-DD-plan-<8hex>`. Do not transliterate or replace the user-visible
+name to manufacture an ID.
+
 ## Evidence and execution
 
 Prefer a returned `exec check run` action for planned commands because it
@@ -134,6 +153,20 @@ When a completed task has a required commit gate, execute its returned
 Use `evidence add` only for supplemental files or observations that are not a
 planned check. Never mark a criterion or task complete without the evidence
 references required by the current plan.
+
+Explicit File Map directories/globs override repository ignore filters for
+fingerprint capture, so ignored authorized files still stale evidence when
+changed. `.git/**`, `.mino/**`, managed projections, symlink escapes, unsafe
+objects, and capture budgets remain protected. Git fingerprints preserve both
+raw SHA-256 and the expected filtered blob OID/mode. Automatic and manual
+commit recording reject clean filters and require the actual commit tree to
+match every expected entry.
+
+`exec finish`, `review resolve`, and `review accept` also compare the approved
+plan baseline to the complete current project and, in Git mode, base HEAD to
+current HEAD. Only File Map-compatible changes, exact paths from Resolved Minor
+deviations, and Mino-owned exclusions are allowed. A passing global check does
+not authorize another committed, uncommitted, ignored, or non-Git path.
 
 For finite repeated observation of one existing check, invoke:
 
@@ -215,18 +248,30 @@ protected amendment and must not be passed to `exec resume`. `review accept` is
 a separate approval boundary: stop, obtain explicit acceptance of the current
 resolved Review, and pass its auditable `--approval-ref`.
 
+Accept Change creates reciprocal links between the Material Review item and its
+source amendment and appends an immutable decision record. If that amendment
+terminates Rejected, Withdrawn, or Cancelled without applying, context may
+allow `review disposition revise`. Stop for a new explicit decision reference
+and reason, then revise only to Decline or Defer. Never revise a pending/applied
+or replaced amendment, repeat Accept Change, or overwrite prior decision
+history.
+
 ## Protected amendments
 
 For Ready or In Progress changes, create a strict YAML patch and run
 `mino plan amend propose --plan <id> --reason <reason> --patch-file <path>
 --expect-revision <revision> --request-id <uuid> --actor <actor> --format json
 --no-input`. Use only typed operations advertised by the CLI. Minor proposals
-can be applied by their returned action. A Material proposal makes context an
-approval stop; never invoke `plan amend approve` until the user approves that
-exact `C<n>` change and supplies an approval reference. Then apply only the
-returned action. Re-read context after each mutation. Pending proposals block
-execution, evidence addition, and Git commits; applied stale evidence cannot
-satisfy current gates.
+can be applied by their returned action, except that adding a Rust, Python, or
+TypeScript/JavaScript path without the selected language package raises the
+minimum to Material. Material operations may add/update/remove tasks, criteria,
+task/global checks, commit gates, dependencies, definitions, and task order;
+inspect the complete affected task/check/evidence set. A Material proposal
+makes context an approval stop; never invoke `plan amend approve` until the
+user approves that exact `C<n>` change and supplies an approval reference. Then
+apply only the returned action. Re-read context after each mutation. Pending
+proposals block execution, evidence addition, and Git commits; applied stale
+evidence cannot satisfy current gates.
 
 ## Result handling
 

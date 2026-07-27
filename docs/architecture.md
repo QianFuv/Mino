@@ -168,6 +168,10 @@ stateDiagram-v2
 
 计划批准时捕获 `PlanBaseline`，每次 `exec start` 捕获对应 `TaskBaseline`。两者在 Git 与非 Git 项目中都保存 path、存在性、对象类型、长度、可执行位和内容摘要；Git 模式另保存 HEAD、index tree 与 status。任务完成计算 `current workspace - task-start baseline`，因此批准前的未变脏文件和前一未提交任务的变化不会被错误归给当前任务，而当前任务对同一路径的进一步修改仍会被识别。
 
+<!-- doc-contract: final-plan-delta-gate -->
+
+最终范围不是由最后一次全局检查的 fingerprint 隐式推断。`exec finish`、`review resolve` 和 `review accept` 都在任何状态写入前执行同一个 Final Plan Delta gate：文件系统侧比较当前项目与 approved `PlanBaseline`，Git 侧另比较 baseline HEAD 到 current HEAD 的完整 tree delta，从而同时覆盖未提交、已提交和非 Git 变化。授权集合是所有任务 File Map 按 `Create`/`Modify`/`Delete`/`Test` 语义形成的并集，加上 `Resolved Minor` 偏差中逐条精确记录的路径；`.git/**`、`.mino/**` 和当前受管 projection 明确排除。任一其他路径以稳定排序的 `out_of_scope_paths` 阻止 finish、resolve 或 accept。
+
 required commit gate 的合法终态是 `Committed`、`Not Required` 或带审批证据的 `Skipped`。全局必需检查失败后，`exec rework` 可以重新打开一个 Done 任务并重置该任务的验收、检查、commit gate、task baseline 和全部全局检查；除此之外不能任意回退任务。`exec finish` 还要求所有任务提交门槛、全局检查和 Final Outcome 完成，然后把计划送入 Review。归档不属于生命周期状态；它是保留全部历史的停用 overlay。
 
 ## 审阅、修订与方案分支
@@ -179,17 +183,19 @@ required commit gate 的合法终态是 `Committed`、`Not Required` 或带审�
 - **Material Change**：把计划置为由审阅流程拥有的 Blocked，普通 `exec resume` 无法绕过。
 - **Follow-Up**：记录为 Deferred，不进入当前任务顺序。
 
-受保护修订使用递增 `C<n>` 和类型化操作。`Minor` 仅允许任务局部、不会改变用户可见行为的调整；`Material` 会清除计划批准和 Git Flow consent、重置任务与检查门槛、使相关证据失效，并要求重新校验与批准。尚未 apply 的修订可进入 `Rejected`、`Withdrawn` 或 `Cancelled` 终态；这些出口只保存决定，不应用 patch。
+受保护修订使用递增 `C<n>` 和类型化操作。`Minor` 仅允许任务局部、不会改变用户可见行为的调整；如果新增 File Map 路径需要当前未选择的 Rust、Python 或 TypeScript/JavaScript 标准包，最低分类自动提升为 `Material`。Material 操作可以新增、更新或删除任务、验收条件、任务/全局检查和 commit gate，也可以替换任务依赖、定义及顺序；候选图会在 clone 上完整校验后原子应用。`Material` 会清除计划批准和 Git Flow consent、重置任务与检查门槛、使相关证据失效，并要求重新校验与批准。尚未 apply 的修订可进入 `Rejected`、`Withdrawn` 或 `Cancelled` 终态；这些出口只保存决定，不应用 patch。
 
 偏差是带稳定 `D<n>` 的独立实体。只有 `Open` 阻塞完成；`Resolved` 绑定当前任务的有效 evidence，`Rejected` 绑定人工 decision reference，`Superseded` 绑定已 Applied amendment。旧版 Deviation checkpoint 在读取时确定性映射为带 legacy link 的偏差。
 
-Material review 先进入 review-owned Blocked，再由 `accept-change`、`decline` 或 `defer-to-follow-up` 明确处置。接受变更仍须走 Material amendment；拒绝会解决该项；延后会把带 Review ID 来源的任务同步到 Final Outcome。任何返工或 Material apply 都使旧 Final Outcome 失效。
+Material review 先进入 review-owned Blocked，再由 `accept-change`、`decline` 或 `defer-to-follow-up` 明确处置。接受变更仍须走与该 Review item 双向关联的 Material amendment；拒绝会解决该项；延后会把带 Review ID 来源的任务同步到 Final Outcome。每次处置写入追加式 decision history。若 Accept Change 关联的 amendment 最终为 `Rejected`、`Withdrawn` 或 `Cancelled` 且从未应用，`review disposition revise` 可在新的显式审批引用下改为 Decline 或 Defer；旧决定和终止 amendment 均保留，不能覆盖历史或再次写 Accept Change。任何返工或 Material apply 都使旧 Final Outcome 失效。
 
 `plan fork` 从经过完整审计的历史快照创建独立 revision 1 Draft。它复制需求、范围、决策、标准、任务、检查和提交意图，但清除生命周期、审批、证据、审阅结果、执行扩展、Git 就绪状态及归档状态。lineage 保存来源计划、revision、原因、快照哈希和时间。
 
 `plan diff` 只比较规范化后的 authored values，不修改或合并输入。`plan archive` 追加停用记录但不删除计划。计划 fork 与 Git branch 是两套独立概念，Mino 不提供 plan merge。
 
 普通计划创建和 legacy import 都遵守“每个项目至多一个活动计划候选集”的项目级约束；只有显式 `plan fork` 可以增加并存 alternative。`.mino/plan-selection.json` 以独立 selection revision 保存 selected plan、稳定排序的 alternatives 和最后一次选择审计。没有该文件的旧项目以虚拟 revision 0 解析：一个 live plan 被虚拟选中，多个 live plan 保持未选择并要求审批绑定的 `plan select`。Git binding 只保存 worktree identity，不选择、切换或隐藏项目方案；即使 binding 变为 stale，selected plan 仍保持不变，Git 风险通过独立的 binding status 报告。
+
+计划显示名称完整保留 UTF-8。ID 仍为 ASCII：名称含 ASCII 字母或数字时沿用原有最长 96 字符 slug；纯非 ASCII/标点名称使用原始 UTF-8 名称 SHA-256 的前 8 个小写十六进制字符，形成 `YYYY-MM-DD-plan-<8hex>`。相同名称和日期确定性生成同一 ID，不同名称仍受正常 ID collision 检查。
 
 ## Revision、事务与投影一致性
 
@@ -214,7 +220,12 @@ Markdown 投影包含 plan ID、revision、状态哈希和 renderer version。�
 
 每个派生 run request ID 使用跨进程 `owner.lock`。owner 从发布 lease 前一直持有锁到 terminal result 完成文件与父目录同步；实时精确重试看到锁被占用时立即返回可重试的 AlreadyRunning，不写 result、evidence 或 plan 终态。只有调用方成功取得空闲 owner lock，并在锁内再次确认 lease 存在而 result 缺失，才能证明旧 owner 已退出并恢复不可变的 interrupted 结果。失败证据会保留用于审计，但不能证明验收通过；被 supersede 或被修订标记为 stale 的证据也不能满足当前门槛。
 
-fingerprint 绑定 repository mode、HEAD、index tree、规范化 status entries、task/global scope、每个路径的类型/长度/可执行位/SHA-256，以及完整 canonical digest。lease、terminal result 和 Command evidence 保存同一份身份。`exec criterion pass`、`exec complete`、自动或人工 commit、`exec finish`、review resolve 与 review accept 都会重新捕获原 scope；任一文件字节、对象类型、模式或适用 Git 身份发生变化，相关 Passed check 会先持久化为 `Stale`，旧 evidence 不再满足门槛，必须重新运行。自动 commit 后允许 HEAD/index 发生预期转换，但 task fingerprint 中的文件 snapshots 必须与 commit 内容保持一致；global fingerprint 始终绑定最终完整状态。
+fingerprint 绑定 repository mode、HEAD、index tree、规范化 status entries、task/global scope、每个路径的类型/长度/可执行位/SHA-256，以及完整 canonical digest。显式 File Map 目录或 glob 会额外以关闭标准 ignore filter 的 walker 展开，因此 `.gitignore` 不能隐藏被计划明确授权的 ignored 文件；`.git/**`、`.mino/**`、受管 projection、symlink escape、不安全对象和资源超限仍被拒绝。
+
+<!-- doc-contract: explicit-file-map-overrides-ignore -->
+<!-- doc-contract: expected-git-entry -->
+
+Git 模式下，每个 regular-file snapshot 还保存按当前 attributes/index 语义经只读 `git hash-object` 计算的 `expected_git_entry { blob_oid, mode }`，raw SHA-256 仍独立保留。lease、terminal result 和 Command evidence 保存同一份身份。`exec criterion pass`、`exec complete`、自动或人工 commit、`exec finish`、review resolve 与 review accept 都会重新捕获原 scope；任一文件字节、对象类型、模式或适用 Git 身份发生变化，相关 Passed check 会先持久化为 `Stale`，旧 evidence 不再满足门槛，必须重新运行。提交前后的 staged tree/commit tree 以及人工提交的 current HEAD 都必须逐路径匹配 expected blob OID 与 `100644`/`100755` mode；删除路径必须在 tree 中缺失。自动与人工提交都拒绝 active clean filter。global fingerprint 始终绑定最终完整状态。
 
 `exec check monitor` 复用同一检查流程，在前台执行有限重试。最大次数、间隔和总 deadline 一起决定每次进程预算；取消文件、deadline、通过或尝试耗尽都会产生 request-hash-bound 的 `mino.monitor/v1` 终态摘要。精确重试先读取摘要，不再睡眠或启动进程。
 
@@ -225,6 +236,8 @@ fingerprint 绑定 repository mode、HEAD、index tree、规范化 status entrie
 `mino git inspect` 通过唯一的生产 Git command adapter 执行窄范围命令，解析 NUL 分隔的 porcelain v2，并显式报告普通、unborn、detached、bare、linked worktree 和非仓库状态。项目发现、计划 readiness、File Map 检查、分支、提交与 hooks 共用该入口；其他生产模块不直接构造 Git 子进程。adapter 清空环境后恢复跨平台基础 allowlist，并按普通操作或短 probe profile 施加 stdin、timeout、合并输出与进程树边界。
 
 `mino git bind` 以 canonical common directory 和 worktree root 为键保存 Git 授权身份。分支绑定允许该分支向前移动；detached binding 要求完全相同的 HEAD。切换分支或 HEAD 后会变为 `stale_branch` 或 `stale_head`，其他工作树的绑定为 `foreign_worktree`。这些状态会阻止需要当前 Git 身份的操作，但不会改变 `.mino/plan-selection.json` 中的 selected plan。
+
+Agent 编排把该门禁显式化：Approved Git Flow 的 Ready 计划若 binding 不是 current，`next_actions` 先返回精确 `git bind --plan <id> --current`，刷新 context 后才返回 `exec start`；Done task 的自动提交也在同样检查后才返回 `git commit`。每个 `next_actions[].id` 都必须同时存在于 `allowed_actions`，调用方无需也不得插入未返回的状态修改命令。
 
 分支和提交都使用不可变 intent → 外部操作 → completion 三段日志：
 
@@ -251,6 +264,8 @@ fingerprint 绑定 repository mode、HEAD、index tree、规范化 status entrie
 检测会保留全部候选，不拼接也不静默选择。`standards conflict refresh` 把当前候选指纹记录进计划，`resolve` 则保存选择、理由、外部决策引用、actor 与时间。任一来源字节变化都会使旧决定失效，直到再次 refresh 并显式选择。
 
 `plan create` 持久化扫描摘要；plan-scoped `standards apply --recommended --seed-verification` 按完整 File Map 重新扫描，并原子协调内嵌 package、catalog-owned check、冲突和摘要。定义不变的检查保留状态，变化的检查回到无 evidence 的 Pending，自定义检查保留。截断摘要必须用绑定当前 scan digest 的 `plan scan accept` 明确接受，否则 validate/finalize 阻塞。远程 Team Catalog 当前只支持 sync 与 cache 验证，不进入 recommend/apply 的选择集合。
+
+Validation 的修复路由按 finding 类型确定：`POLICY-STANDARD-REQUIRED`、`POLICY-STANDARD-CHECK-MISSING`、`POLICY-STANDARD-CHECK-MISMATCH`、其他非 conflict 的 `POLICY-STANDARD-*` 以及 `POLICY-TOOL-UNAVAILABLE` 返回 plan-scoped `standards apply`；未跟踪或 stale conflict 返回 `standards conflict refresh`；未解决 conflict 返回 `standards conflict list`。只有 Draft 的 authored finding 才附加 `plan apply`，Ready reconciliation 会使旧计划批准失效。
 
 ## Agent 执行身份
 

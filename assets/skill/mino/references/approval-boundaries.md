@@ -10,8 +10,9 @@ Stop and request user action when any of these is true:
 - A command exits with the approval-required category or exit code 4.
 - The next operation would approve a plan, accept an exception, mutate Git
   outside a current plan-scoped commit gate or explicitly approved branch
-  proposal, archive a plan, resolve a standards conflict, replace an unowned Skill, or repair
-  malformed managed markers.
+  proposal, archive a plan, decide or revise a Material review disposition,
+  resolve a standards conflict, replace an unowned Skill, or repair malformed
+  managed markers.
 - The requested change materially exceeds the approved plan File Map, task
   outcome, acceptance criteria, or commit scope.
 
@@ -62,12 +63,26 @@ amendment and cannot use `exec resume`.
 prior plan approval. Stop, obtain explicit acceptance for the fully resolved
 current Review, and pass the user's auditable reference.
 
+`review.disposition` is an independent approval boundary for the exact blocked
+Material Review item. Accept Change links that item to its source Material
+amendment and remains blocked until the amendment is applied. If the linked
+amendment later reaches Rejected, Withdrawn, or Cancelled without applying,
+`review.disposition.revise` is another approval boundary: show the retained
+Accept Change decision and terminal amendment, obtain a new reference and
+reason, and revise only to Decline or Defer. Never erase the earlier decision,
+repeat Accept Change, revise a pending/applied change, or infer revision from an
+amendment rejection.
+
 ## Protected amendments
 
 Use only `plan amend propose` with a strict typed patch after Draft. Never edit
 the canonical JSON or managed Markdown. Treat Minor as the protocol allowlist,
 not a caller preference; a supplied classification may raise but never lower
-the computed minimum. While any proposal is pending, do not execute, add
+the computed minimum. Adding a Rust, Python, or TypeScript/JavaScript path whose
+standards package is not selected raises the minimum to Material. Material
+patches may add, update, or remove tasks, criteria, task/global checks, commit
+gates, dependencies, definitions, and task order; present the complete computed
+impact and graph validation. While any proposal is pending, do not execute, add
 evidence, commit, or use generic resume.
 
 `plan.amend.approve` is an approval boundary for the exact pending Material
@@ -94,6 +109,10 @@ Map/Commit Scope paths, so `git.commit` is not a second approval boundary. Do
 not invoke it for another task, branch, parent, message, or path set. Mino stages
 only explicit paths and leaves hook failures visible and recoverable; never run
 manual `git add`, `git commit`, `--no-verify`, reset, or unstage to bypass it.
+When Approved Git Flow lacks a current binding, execute only the returned
+read-only `git.bind` argv and refresh context; `exec.start` or `git.commit` must
+not be reconstructed or run until Mino returns it. Every returned next action
+must also be allowed by the same context.
 Push, merge, rebase, amend, force-push, tag, branch deletion, and worktree
 mutation remain outside the Skill unless a later capability explicitly exposes
 them and the user authorizes them.

@@ -188,6 +188,7 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
             "help",
         ],
     ),
+    (&["review", "disposition", "--help"], &["revise", "help"]),
     (&["protocol", "--help"], &["status", "migrate", "help"]),
 ];
 
@@ -285,6 +286,7 @@ const LEAF_COMMANDS: &[&str] = &[
     "protocol status",
     "review accept",
     "review disposition",
+    "review disposition revise",
     "review record",
     "review resolve",
     "review rework",
@@ -405,6 +407,14 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
     assert!(
         actions
             .iter()
+            .find(|action| action["id"] == "review.disposition.revise")
+            .is_some_and(|action| {
+                action["mutates"] == true && action["approval_boundary"] == true
+            })
+    );
+    assert!(
+        actions
+            .iter()
             .find(|action| action["id"] == "review.accept")
             .is_some_and(|action| {
                 action["mutates"] == true && action["approval_boundary"] == true
@@ -439,6 +449,7 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             "plan.select",
             "review.accept",
             "review.disposition",
+            "review.disposition.revise",
             "standards.conflict.resolve"
         ]
     );
@@ -510,6 +521,47 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
     assert!(security.contains("doc-contract: schedule-no-external-mutation"));
     assert!(security.contains("doc-contract: no-protocol-template-fallback"));
     assert!(security.contains("doc-contract: managed-state-no-manual-edit"));
+    for marker in [
+        "doc-contract: explicit-file-map-overrides-ignore",
+        "doc-contract: expected-git-entry",
+        "doc-contract: final-plan-delta-gate",
+    ] {
+        assert!(
+            architecture.contains(marker),
+            "architecture is missing {marker}"
+        );
+        assert!(
+            security.contains(marker),
+            "security guide is missing {marker}"
+        );
+    }
+    for marker in [
+        "doc-contract: material-amendment-operations",
+        "doc-contract: next-actions-subset",
+        "doc-contract: non-ascii-plan-id",
+        "doc-contract: review-decision-revision",
+        "doc-contract: standards-reconciliation-action",
+    ] {
+        assert!(
+            commands.contains(marker),
+            "command contract is missing {marker}"
+        );
+    }
+}
+
+#[test]
+fn shipped_skill_references_match_plugin_source_byte_for_byte() {
+    for name in ["approval-boundaries.md", "command-contract.md"] {
+        let canonical = fs::read(repository_path(&format!(
+            "assets/skill/mino/references/{name}"
+        )))
+        .expect("canonical Skill reference should be readable");
+        let plugin = fs::read(repository_path(&format!(
+            "plugins/mino/skills/mino/references/{name}"
+        )))
+        .expect("plugin Skill reference should be readable");
+        assert_eq!(canonical, plugin, "Skill reference differs for {name}");
+    }
 }
 
 #[test]
