@@ -149,7 +149,9 @@ pub(super) fn extract_archive(
     let cursor = Cursor::new(archive_bytes);
     let mut archive = ZipArchive::new(cursor)
         .map_err(|error| archive_error(format!("Failed to reopen plugin ZIP: {error}")))?;
-    for (index, _expected_file) in expected.iter().enumerate() {
+    for (index, expected_file) in expected.iter().enumerate() {
+        #[cfg(not(unix))]
+        let _ = expected_file;
         let mut entry = archive.by_index(index).map_err(|error| {
             archive_error(format!("Failed to read plugin ZIP entry {index}: {error}"))
         })?;
@@ -186,7 +188,7 @@ pub(super) fn extract_archive(
             ))
         })?;
         #[cfg(unix)]
-        fs::set_permissions(&path, fs::Permissions::from_mode(_expected_file.mode)).map_err(
+        fs::set_permissions(&path, fs::Permissions::from_mode(expected_file.mode)).map_err(
             |error| {
                 archive_error(format!(
                     "Failed to set extracted mode for {}: {error}",
