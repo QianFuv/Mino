@@ -102,6 +102,38 @@ pub struct GitChangeSet {
     files: Vec<ChangedFile>,
 }
 
+/// Net path classification between an approved Git tree and the current HEAD tree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitTreeChangeKind {
+    /// The path is absent from the base tree and present in the current tree.
+    Created,
+    /// The path exists in both trees with different content, type, or mode.
+    Modified,
+    /// The path is present in the base tree and absent from the current tree.
+    Deleted,
+}
+
+/// One normalized path changed between two Git trees.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitTreeChange {
+    path: String,
+    kind: GitTreeChangeKind,
+}
+
+impl GitTreeChange {
+    /// Returns the normalized project-relative path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns the net tree-change classification.
+    #[must_use]
+    pub const fn kind(&self) -> GitTreeChangeKind {
+        self.kind
+    }
+}
+
 impl GitChangeSet {
     /// Returns whether the inspected root belongs to a Git work tree.
     #[must_use]
@@ -180,6 +212,119 @@ pub fn inspect_changes(root: &Path) -> Result<GitChangeSet, GitChangeError> {
     })
 }
 
+/// Compares an approved base tree with the current HEAD tree without rename inference.
+///
+/// A missing base denotes an unborn baseline and compares the current root commit
+/// with Git's empty tree. Both object IDs must be full SHA-1 or SHA-256 IDs.
+///
+/// # Errors
+///
+/// Returns an unavailable or invalid-output error when Git rejects the tree
+/// comparison or emits an unsafe/unsupported name-status record.
+pub fn inspect_tree_changes(
+    root: &Path,
+    base: Option<&str>,
+    head: &str,
+) -> Result<Vec<GitTreeChange>, GitChangeError> {
+    if base.is_some_and(|base| !is_object_id(base)) || !is_object_id(head) {
+        return Err(GitChangeError::new(
+            GitChangeErrorKind::InvalidOutput,
+            "Git tree comparison requires full SHA-1 or SHA-256 object IDs",
+        ));
+    }
+    if base == Some(head) {
+        return Ok(Vec::new());
+    }
+    let output = if let Some(base) = base {
+        run_read_only(
+            root,
+            [
+                "diff",
+                "--no-ext-diff",
+                "--no-renames",
+                "--name-status",
+                "-z",
+                base,
+                head,
+                "--",
+            ],
+        )
+    } else {
+        run_read_only(
+            root,
+            [
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "--no-renames",
+                "--name-status",
+                "-r",
+                "-z",
+                head,
+                "--",
+            ],
+        )
+    }
+    .map_err(|error| map_git_error(&error))?;
+    if !output.success {
+        return Err(command_failed(root, &output, "Git tree comparison"));
+    }
+    parse_tree_changes(&output.stdout)
+}
+
+fn parse_tree_changes(output: &[u8]) -> Result<Vec<GitTreeChange>, GitChangeError> {
+    let records = output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .collect::<Vec<_>>();
+    if records.len() % 2 != 0 {
+        return Err(GitChangeError::new(
+            GitChangeErrorKind::InvalidOutput,
+            "Git tree comparison returned an incomplete name-status record",
+        ));
+    }
+    let mut changes = records
+        .chunks_exact(2)
+        .map(|record| {
+            let kind = match record[0] {
+                b"A" => GitTreeChangeKind::Created,
+                b"M" | b"T" => GitTreeChangeKind::Modified,
+                b"D" => GitTreeChangeKind::Deleted,
+                status => {
+                    return Err(GitChangeError::new(
+                        GitChangeErrorKind::InvalidOutput,
+                        format!(
+                            "Git tree comparison returned unsupported status {}",
+                            String::from_utf8_lossy(status)
+                        ),
+                    ));
+                }
+            };
+            let path = std::str::from_utf8(record[1]).map_err(|_| {
+                GitChangeError::new(
+                    GitChangeErrorKind::InvalidOutput,
+                    "Git tree comparison paths must be valid UTF-8",
+                )
+            })?;
+            let path = normalized_protocol_path(path).ok_or_else(|| {
+                GitChangeError::new(
+                    GitChangeErrorKind::InvalidOutput,
+                    format!("Git tree comparison returned unsafe path {path}"),
+                )
+            })?;
+            Ok(GitTreeChange { path, kind })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    changes.sort_by(|left, right| left.path.cmp(&right.path));
+    if changes.windows(2).any(|pair| pair[0].path == pair[1].path) {
+        return Err(GitChangeError::new(
+            GitChangeErrorKind::InvalidOutput,
+            "Git tree comparison returned duplicate paths",
+        ));
+    }
+    Ok(changes)
+}
+
 /// Matches a normalized project path against an exact or narrow `*`/`**` pattern.
 #[must_use]
 pub fn matches_file_map_path(pattern: &str, path: &str) -> bool {
@@ -234,6 +379,10 @@ fn normalized_protocol_path(value: &str) -> Option<String> {
     } else {
         Some(value.to_owned())
     }
+}
+
+fn is_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn matches_segments(pattern: &[&str], path: &[&str]) -> bool {

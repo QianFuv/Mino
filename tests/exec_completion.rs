@@ -9,11 +9,13 @@ use mino::ErrorCategory;
 use mino::application::completion::CompletionService;
 use mino::application::execution::ExecutionService;
 use mino::application::plan::PlanMutationRequest;
+use mino::application::review::ReviewService;
 use mino::domain::{
     AcceptanceCriterion, Approval, CheckId, CheckStatus, CheckpointKind, CriterionId,
     CriterionStatus, DeviationStatus, Evidence, EvidenceId, EvidenceType, FileChange, FileMapEntry,
-    GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId, Task, TaskId,
-    TaskStatus, Timestamp, VerificationCheck, WorkspaceRepositoryMode,
+    GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId,
+    ReviewClassification, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
+    WorkspaceRepositoryMode,
 };
 use mino::evidence::{AddEvidenceRequest, EvidenceRequestContext, EvidenceSource, EvidenceStore};
 use mino::git::matches_file_map_path;
@@ -456,11 +458,15 @@ fn mutation(expected_revision: u64, sequence: u64, command: Vec<String>) -> Plan
 }
 
 fn start_active_task(project: &TestProject, sequence: u64) -> u64 {
+    start_active_task_at_revision(project, project.base_revision, sequence)
+}
+
+fn start_active_task_at_revision(project: &TestProject, revision: u64, sequence: u64) -> u64 {
     ExecutionService::discover(project.path())
         .expect("execution service should discover")
         .start_task(
             mutation(
-                project.base_revision,
+                revision,
                 sequence,
                 vec!["mino".to_owned(), "exec".to_owned(), "start".to_owned()],
             ),
@@ -507,6 +513,333 @@ fn final_outcome_is_required_after_current_global_verification() {
         &mutation_arguments("finish", result_revision(&outcome), 21, &[]),
     ));
     assert_eq!(finished["status"], "Review");
+}
+
+#[test]
+fn out_of_scope_uncommitted_change_blocks_finish_without_mutation() {
+    let project = TestProject::new("final-uncommitted", "pass");
+    let started = start_active_task(&project, 80);
+    fs::write(
+        project.path().join("src/feature.rs"),
+        "pub fn feature() -> u8 { 13 }\n",
+    )
+    .expect("planned final-scope file should be written");
+    let completed = complete_started_task(&project, started, 81);
+    fs::write(
+        project.path().join("outside-final.txt"),
+        "outside plan scope\n",
+    )
+    .expect("out-of-scope file should be written");
+    let global = parse_success(&run_mino(
+        &project,
+        &check_arguments(completed, 84, "GLOBAL-CHECK"),
+    ));
+    let outcome = parse_success(&run_mino(
+        &project,
+        &outcome_arguments(result_revision(&global), 85),
+    ));
+
+    assert_final_scope_failure(&project, result_revision(&outcome), 86, "outside-final.txt");
+}
+
+#[test]
+fn non_git_out_of_scope_change_blocks_finish_without_mutation() {
+    let project = TestProject::new_without_git("final-non-git", "pass");
+    let revision = prepare_finish_ready_plan(&project, 90);
+    fs::write(
+        project.path().join("outside-non-git.txt"),
+        "outside plan scope\n",
+    )
+    .expect("out-of-scope non-Git file should be written");
+
+    assert_final_scope_failure(&project, revision, 96, "outside-non-git.txt");
+}
+
+#[test]
+fn out_of_scope_change_blocks_review_accept_without_mutation() {
+    let project = TestProject::new_without_git("review-final-scope", "pass");
+    let revision = prepare_finish_ready_plan(&project, 100);
+    let finished = parse_success(&run_mino(
+        &project,
+        &mutation_arguments("finish", revision, 106, &[]),
+    ));
+    let review_revision = result_revision(&finished);
+    fs::write(
+        project.path().join("outside-review.txt"),
+        "outside review scope\n",
+    )
+    .expect("out-of-scope review file should be written");
+    let mut accept = vec!["review".to_owned(), "accept".to_owned()];
+    accept.extend(common_mutation_arguments(review_revision, 107));
+    accept.extend([
+        "--approval-ref".to_owned(),
+        "chat:final-scope-review".to_owned(),
+    ]);
+
+    let rejected = run_mino(&project, &accept);
+    assert_eq!(rejected.status.code(), Some(5));
+    let rejected: Value =
+        serde_json::from_slice(&rejected.stdout).expect("scope failure should be JSON");
+    assert_eq!(
+        rejected["missing"],
+        serde_json::json!(["outside-review.txt"])
+    );
+    let plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("review plan should load");
+    assert_eq!(plan.revision(), review_revision);
+    assert_eq!(plan.status(), PlanStatus::Review);
+}
+
+#[test]
+fn out_of_scope_change_blocks_review_resolve_without_mutation() {
+    let project = TestProject::new_without_git("review-resolve-final-scope", "pass");
+    let revision = prepare_finish_ready_plan(&project, 120);
+    let finished = parse_success(&run_mino(
+        &project,
+        &mutation_arguments("finish", revision, 126, &[]),
+    ));
+    let store = PlanStore::new(project.path());
+    let prior = store
+        .load_plan(&plan_id())
+        .expect("initial Review plan should load");
+    let prior_rendered = render_plan(&prior).expect("initial Review plan should render");
+    commit(
+        &store,
+        result_revision(&finished),
+        127,
+        vec!["review_items"],
+        |plan| {
+            plan.record_review(
+                "reviewer".to_owned(),
+                "Repeat the acceptance proof".to_owned(),
+                ReviewClassification::AcceptanceDefect,
+                Some(task_id()),
+                timestamp(55),
+            )
+            .map(|_| ())
+        },
+    );
+    commit(
+        &store,
+        result_revision(&finished) + 1,
+        128,
+        vec!["review_items", "status", "tasks.status"],
+        |plan| plan.begin_review_rework("REV-1", None, timestamp(56)),
+    );
+    let rework = store
+        .load_plan(&plan_id())
+        .expect("acceptance rework plan should load");
+    write_projection(
+        &project.path().join(projection_relative()),
+        &render_plan(&rework).expect("acceptance rework plan should render"),
+        Some(&prior_rendered),
+    )
+    .expect("acceptance rework projection should update");
+
+    let started = start_active_task_at_revision(&project, rework.revision(), 129);
+    let completed = complete_started_task(&project, started, 130);
+    let global = parse_success(&run_mino(
+        &project,
+        &check_arguments(completed, 133, "GLOBAL-CHECK"),
+    ));
+    let outcome = parse_success(&run_mino(
+        &project,
+        &outcome_arguments(result_revision(&global), 134),
+    ));
+    let finished = parse_success(&run_mino(
+        &project,
+        &mutation_arguments("finish", result_revision(&outcome), 135, &[]),
+    ));
+    let review_revision = result_revision(&finished);
+    fs::write(
+        project.path().join("outside-review-resolve.txt"),
+        "outside review resolve scope\n",
+    )
+    .expect("out-of-scope review resolve file should be written");
+    let error = ReviewService::discover(project.path())
+        .expect("review service should discover")
+        .resolve(
+            mutation(
+                review_revision,
+                136,
+                vec!["mino".to_owned(), "review".to_owned(), "resolve".to_owned()],
+            ),
+            "REV-1".to_owned(),
+        )
+        .expect_err("out-of-scope path should block review resolution");
+
+    assert_eq!(error.category(), ErrorCategory::PolicyViolation);
+    assert_eq!(error.missing(), ["outside-review-resolve.txt"]);
+    let plan = store
+        .load_plan(&plan_id())
+        .expect("scope-blocked Review plan should load");
+    assert_eq!(plan.revision(), review_revision);
+    assert_eq!(plan.status(), PlanStatus::Review);
+}
+
+#[test]
+fn resolved_minor_deviation_authorizes_only_its_exact_final_path() {
+    let project = TestProject::new_without_git("resolved-final-deviation", "pass");
+    let started = start_active_task(&project, 110);
+    fs::write(
+        project.path().join("src/feature.rs"),
+        "pub fn feature() -> u8 { 11 }\n",
+    )
+    .expect("planned file should be written");
+    let execution = ExecutionService::discover(project.path()).expect("service should discover");
+    let check = execution
+        .run_check(
+            &mutation(
+                started,
+                111,
+                vec!["mino".to_owned(), "exec".to_owned(), "check".to_owned()],
+            ),
+            &check_id("TASK-CHECK"),
+        )
+        .expect("task check should pass");
+    let recorded = execution
+        .record_deviation(
+            mutation(
+                check.plan().revision,
+                112,
+                vec![
+                    "mino".to_owned(),
+                    "exec".to_owned(),
+                    "deviation".to_owned(),
+                    "record".to_owned(),
+                ],
+            ),
+            task_id(),
+            mino::domain::DeviationClassification::Minor,
+            "One exact support file is required".to_owned(),
+            vec!["support/authorized.txt".to_owned()],
+        )
+        .expect("Minor deviation should record");
+    let resolved = execution
+        .resolve_deviation(
+            mutation(
+                recorded.revision,
+                113,
+                vec![
+                    "mino".to_owned(),
+                    "exec".to_owned(),
+                    "deviation".to_owned(),
+                    "resolve".to_owned(),
+                ],
+            ),
+            "D1".to_owned(),
+            "Current task evidence supports the exact support file".to_owned(),
+            vec![check.evidence().id().clone()],
+        )
+        .expect("Minor deviation should resolve");
+    let completion =
+        CompletionService::discover(project.path()).expect("completion service should discover");
+    let criterion = completion
+        .pass_criterion(
+            mutation(
+                resolved.revision,
+                114,
+                vec!["mino".to_owned(), "exec".to_owned(), "criterion".to_owned()],
+            ),
+            criterion_id(),
+            check.evidence().id().clone(),
+        )
+        .expect("criterion should pass");
+    let completed = completion
+        .complete_task(
+            mutation(
+                criterion.revision,
+                115,
+                vec!["mino".to_owned(), "exec".to_owned(), "complete".to_owned()],
+            ),
+            task_id(),
+        )
+        .expect("task should complete before the final support path is created");
+    fs::create_dir(project.path().join("support")).expect("support directory should be created");
+    fs::write(
+        project.path().join("support/authorized.txt"),
+        "authorized by resolved Minor deviation\n",
+    )
+    .expect("authorized support path should be written");
+    let global = execution
+        .run_check(
+            &mutation(
+                completed.revision,
+                116,
+                vec!["mino".to_owned(), "exec".to_owned(), "check".to_owned()],
+            ),
+            &check_id("GLOBAL-CHECK"),
+        )
+        .expect("global check should pass");
+    let outcome = parse_success(&run_mino(
+        &project,
+        &outcome_arguments(global.plan().revision, 117),
+    ));
+    fs::write(
+        project.path().join("support/unauthorized.txt"),
+        "not named by the resolved deviation\n",
+    )
+    .expect("unauthorized sibling should be written");
+    let rejected = run_mino(
+        &project,
+        &mutation_arguments("finish", result_revision(&outcome), 118, &[]),
+    );
+    assert_eq!(rejected.status.code(), Some(5));
+    let rejected: Value =
+        serde_json::from_slice(&rejected.stdout).expect("scope failure should be JSON");
+    assert_eq!(
+        rejected["missing"],
+        serde_json::json!(["support/unauthorized.txt"])
+    );
+    fs::remove_file(project.path().join("support/unauthorized.txt"))
+        .expect("unauthorized sibling should be removed");
+    let finished = parse_success(&run_mino(
+        &project,
+        &mutation_arguments("finish", result_revision(&outcome), 119, &[]),
+    ));
+    assert_eq!(finished["status"], "Review");
+}
+
+fn prepare_finish_ready_plan(project: &TestProject, sequence: u64) -> u64 {
+    let started = start_active_task(project, sequence);
+    fs::write(
+        project.path().join("src/feature.rs"),
+        "pub fn feature() -> u8 { 12 }\n",
+    )
+    .expect("planned final-scope file should be written");
+    let completed = complete_started_task(project, started, sequence + 1);
+    let global = parse_success(&run_mino(
+        project,
+        &check_arguments(completed, sequence + 4, "GLOBAL-CHECK"),
+    ));
+    let outcome = parse_success(&run_mino(
+        project,
+        &outcome_arguments(result_revision(&global), sequence + 5),
+    ));
+    result_revision(&outcome)
+}
+
+fn assert_final_scope_failure(
+    project: &TestProject,
+    revision: u64,
+    sequence: u64,
+    outside_path: &str,
+) {
+    let rejected = run_mino(
+        project,
+        &mutation_arguments("finish", revision, sequence, &[]),
+    );
+    assert_eq!(rejected.status.code(), Some(5));
+    let rejected: Value =
+        serde_json::from_slice(&rejected.stdout).expect("scope failure should be JSON");
+    assert_eq!(rejected["error"]["code"], "policy_violation");
+    assert_eq!(rejected["missing"], serde_json::json!([outside_path]));
+    let plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("scope-blocked plan should load");
+    assert_eq!(plan.revision(), revision);
+    assert_eq!(plan.status(), PlanStatus::InProgress);
 }
 
 #[test]

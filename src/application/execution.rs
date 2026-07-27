@@ -221,7 +221,15 @@ impl ExecutionService {
         task_id: TaskId,
         classification: DeviationClassification,
         summary: String,
+        mut affected_paths: Vec<String>,
     ) -> Result<PlanOperationReport, MinoError> {
+        affected_paths.sort();
+        if affected_paths.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(MinoError::new(
+                ErrorCategory::IncompleteOrValidation,
+                "Deviation affected paths must be unique",
+            ));
+        }
         let actor = request.actor.clone();
         self.plans.commit_semantic(
             request,
@@ -233,8 +241,15 @@ impl ExecutionService {
                     .map_err(|error| map_domain_error(&error))
             },
             move |plan, at| {
-                plan.record_deviation(&task_id, classification, summary.clone(), actor.clone(), at)
-                    .map(|_| ())
+                plan.record_deviation(
+                    &task_id,
+                    classification,
+                    summary.clone(),
+                    affected_paths.clone(),
+                    actor.clone(),
+                    at,
+                )
+                .map(|_| ())
             },
         )
     }

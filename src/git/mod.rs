@@ -17,8 +17,8 @@ pub use branch::{
     proposed_branch_name, validate_branch_name,
 };
 pub use changes::{
-    ChangedFile, GitChangeError, GitChangeErrorKind, GitChangeSet, inspect_changes,
-    matches_file_map_path,
+    ChangedFile, GitChangeError, GitChangeErrorKind, GitChangeSet, GitTreeChange,
+    GitTreeChangeKind, inspect_changes, inspect_tree_changes, matches_file_map_path,
 };
 pub use command::{GitError, GitErrorKind};
 pub use commit::{

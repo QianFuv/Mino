@@ -7,12 +7,16 @@ use crate::application::plan::{
     PlanMutationRequest, PlanOperationReport, PlanService, derived_request_id,
 };
 use crate::domain::{
-    AcceptanceCriterion, CheckStatus, CommitStatus, CriterionId, CriterionStatus, Evidence,
-    EvidenceId, EvidenceType, FileChange, Plan, RequestId, ReviewClassification, ReviewStatus,
-    Task, TaskId, Timestamp, VerificationCheck, WorkspaceFingerprint,
+    AcceptanceCriterion, CheckStatus, CommitStatus, CriterionId, CriterionStatus,
+    DeviationClassification, DeviationStatus, Evidence, EvidenceId, EvidenceType, FileChange, Plan,
+    RequestId, ReviewClassification, ReviewStatus, Task, TaskId, Timestamp, VerificationCheck,
+    WorkspaceFileKind, WorkspaceFingerprint, WorkspaceRepositoryMode,
 };
 use crate::evidence::{EvidenceError, EvidenceErrorKind, EvidenceStore};
-use crate::git::matches_file_map_path;
+use crate::git::{
+    GitAdapter, GitChangeError, GitChangeErrorKind, GitTreeChangeKind, inspect_tree_changes,
+    matches_file_map_path,
+};
 use crate::workspace::{
     WorkspaceDeltaEntry, WorkspaceDeltaKind, recapture_workspace_fingerprint, workspace_delta,
     workspace_fingerprint_is_current,
@@ -195,6 +199,7 @@ impl CompletionService {
         }
         validate_global_evidence(&self.root, &current, &evidence)?;
         validate_all_deviations(&current)?;
+        validate_final_plan_scope(&self.root, &current)?;
         self.plans.commit_semantic(
             request,
             changed_fields,
@@ -794,6 +799,159 @@ fn validate_all_deviations(plan: &Plan) -> Result<(), MinoError> {
     } else {
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FinalDeltaKind {
+    Created,
+    Modified,
+    Deleted,
+}
+
+pub(crate) fn validate_final_plan_scope(root: &Path, plan: &Plan) -> Result<(), MinoError> {
+    let workspace = plan
+        .workspace_state()
+        .map_err(|error| map_domain_error(&error))?;
+    let baseline = workspace.plan_baseline().ok_or_else(|| {
+        MinoError::new(
+            ErrorCategory::DriftDetected,
+            format!("Plan {} has no approved workspace baseline", plan.id()),
+        )
+    })?;
+    let workspace_changes = workspace_delta(root, plan, baseline)?;
+    let mut outside = BTreeSet::new();
+    for change in workspace_changes.entries() {
+        let was_directory = baseline.file_snapshots().iter().any(|snapshot| {
+            snapshot.path() == change.path() && snapshot.kind() == WorkspaceFileKind::Directory
+        });
+        if was_directory || root.join(change.path()).is_dir() {
+            continue;
+        }
+        let kind = match change.kind() {
+            WorkspaceDeltaKind::Created => FinalDeltaKind::Created,
+            WorkspaceDeltaKind::Modified => FinalDeltaKind::Modified,
+            WorkspaceDeltaKind::Deleted => FinalDeltaKind::Deleted,
+        };
+        collect_unauthorized_path(plan, change.path(), kind, &mut outside)?;
+    }
+
+    let facts = GitAdapter::new(root).inspect().map_err(|error| {
+        MinoError::new(ErrorCategory::EnvironmentUnavailable, error.to_string())
+    })?;
+    match baseline.repository_mode() {
+        WorkspaceRepositoryMode::Git => {
+            if !facts.repository || !facts.is_worktree {
+                return Err(MinoError::new(
+                    ErrorCategory::DriftDetected,
+                    "Approved Git workspace baseline is no longer a Git worktree",
+                ));
+            }
+            match (baseline.head(), facts.head.as_deref()) {
+                (Some(_), None) => {
+                    return Err(MinoError::new(
+                        ErrorCategory::DriftDetected,
+                        "Approved Git workspace baseline has a commit but current HEAD is unborn",
+                    ));
+                }
+                (base, Some(head)) => {
+                    for change in inspect_tree_changes(root, base, head)
+                        .map_err(|error| map_tree_change_error(&error))?
+                    {
+                        let kind = match change.kind() {
+                            GitTreeChangeKind::Created => FinalDeltaKind::Created,
+                            GitTreeChangeKind::Modified => FinalDeltaKind::Modified,
+                            GitTreeChangeKind::Deleted => FinalDeltaKind::Deleted,
+                        };
+                        collect_unauthorized_path(plan, change.path(), kind, &mut outside)?;
+                    }
+                }
+                (None, None) => {}
+            }
+        }
+        WorkspaceRepositoryMode::NonGit => {
+            if facts.repository {
+                return Err(MinoError::new(
+                    ErrorCategory::DriftDetected,
+                    "Approved non-Git workspace baseline changed repository mode",
+                ));
+            }
+        }
+    }
+    if outside.is_empty() {
+        Ok(())
+    } else {
+        let outside = outside.into_iter().collect::<Vec<_>>();
+        Err(MinoError::new(
+            ErrorCategory::PolicyViolation,
+            format!(
+                "Final project delta contains paths outside the approved plan scope: {}",
+                outside.join(", ")
+            ),
+        )
+        .with_remediation(outside.clone(), Vec::new())
+        .with_details(serde_json::json!({ "out_of_scope_paths": outside })))
+    }
+}
+
+fn collect_unauthorized_path(
+    plan: &Plan,
+    path: &str,
+    kind: FinalDeltaKind,
+    outside: &mut BTreeSet<String>,
+) -> Result<(), MinoError> {
+    if is_final_scope_excluded(plan, path)
+        || file_map_authorizes(plan, path, kind)
+        || resolved_minor_deviation_authorizes(plan, path)?
+    {
+        return Ok(());
+    }
+    outside.insert(path.to_owned());
+    Ok(())
+}
+
+fn file_map_authorizes(plan: &Plan, path: &str, kind: FinalDeltaKind) -> bool {
+    plan.tasks().iter().flat_map(Task::file_map).any(|entry| {
+        matches_file_map_path(entry.path(), path)
+            && match entry.change() {
+                FileChange::Create => kind == FinalDeltaKind::Created,
+                FileChange::Modify => kind == FinalDeltaKind::Modified,
+                FileChange::Delete => kind == FinalDeltaKind::Deleted,
+                FileChange::Test => true,
+                FileChange::NotApplicable => false,
+            }
+    })
+}
+
+fn resolved_minor_deviation_authorizes(plan: &Plan, path: &str) -> Result<bool, MinoError> {
+    Ok(plan
+        .execution_state()
+        .map_err(|error| map_domain_error(&error))?
+        .deviations()
+        .iter()
+        .any(|deviation| {
+            deviation.classification() == DeviationClassification::Minor
+                && deviation.status() == DeviationStatus::Resolved
+                && deviation
+                    .affected_paths()
+                    .binary_search_by(|candidate| candidate.as_str().cmp(path))
+                    .is_ok()
+        }))
+}
+
+fn is_final_scope_excluded(plan: &Plan, path: &str) -> bool {
+    path == ".git"
+        || path.starts_with(".git/")
+        || path == ".mino"
+        || path.starts_with(".mino/")
+        || plan.metadata().markdown_path() == Some(path)
+}
+
+fn map_tree_change_error(error: &GitChangeError) -> MinoError {
+    let category = match error.kind() {
+        GitChangeErrorKind::InvalidOutput => ErrorCategory::DriftDetected,
+        GitChangeErrorKind::Unavailable => ErrorCategory::EnvironmentUnavailable,
+    };
+    MinoError::new(category, error.message())
 }
 
 fn validate_global_evidence(

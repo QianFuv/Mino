@@ -19,7 +19,7 @@ use mino::application::completion::CompletionService;
 use mino::application::execution::ExecutionService;
 use mino::application::git_binding::GitBindingService;
 use mino::application::git_commit::GitCommitService;
-use mino::application::plan::PlanMutationRequest;
+use mino::application::plan::{PlanMutationRequest, PlanService};
 use mino::domain::{
     AcceptanceCriterion, Approval, CheckId, CommitGate, CommitStatus, CriterionId, EvidenceType,
     FileChange, FileMapEntry, GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId,
@@ -203,6 +203,58 @@ fn valid_commit_is_exact_evidenced_clean_and_idempotent() {
     );
     assert_eq!(load_plan(&repository).revision(), revision);
     assert_eq!(journal_bytes(&repository), journal_before);
+}
+
+#[test]
+fn out_of_scope_committed_change_blocks_finish_without_mutation() {
+    let repository = TestRepository::new("final-committed-scope", FixtureState::Done, true);
+    json_success(&run_commit(&repository));
+    fs::write(
+        repository.root().join("outside-committed.txt"),
+        "outside plan scope\n",
+    )
+    .expect("out-of-scope committed file should be written");
+    git(repository.root(), &["add", "--", "outside-committed.txt"]);
+    git(
+        repository.root(),
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "test: add out-of-scope committed fixture",
+        ],
+    );
+    assert!(git_status(repository.root()).is_empty());
+
+    let plan = load_plan(&repository);
+    let execution =
+        ExecutionService::discover(repository.root()).expect("execution service should discover");
+    let global = execution
+        .run_check(
+            &mutation(plan.revision(), 200, "global-check"),
+            &check_id("GLOBAL-V1"),
+        )
+        .expect("global check should pass after the out-of-scope commit");
+    let outcome = PlanService::discover(repository.root())
+        .expect("plan service should discover")
+        .set_outcome(
+            mutation(global.plan().revision, 201, "outcome"),
+            "Commit scope verification completed".to_owned(),
+            "N/A".to_owned(),
+            Vec::new(),
+        )
+        .expect("Final Outcome should record");
+    let before_revision = outcome.revision;
+    let error = CompletionService::discover(repository.root())
+        .expect("completion service should discover")
+        .finish(mutation(before_revision, 202, "finish"))
+        .expect_err("committed out-of-scope path should block finish");
+
+    assert_eq!(error.category(), ErrorCategory::PolicyViolation);
+    assert_eq!(error.missing(), ["outside-committed.txt"]);
+    let plan = load_plan(&repository);
+    assert_eq!(plan.revision(), before_revision);
+    assert_eq!(plan.status(), PlanStatus::InProgress);
 }
 
 #[test]

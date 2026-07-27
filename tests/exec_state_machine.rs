@@ -999,6 +999,8 @@ fn deviation_cli_records_lists_replays_and_rejects_identified_departures() {
         "minor",
         "--summary",
         "A task-local implementation departure",
+        "--path",
+        "support/generated.txt",
         "--expect-revision",
         &started_revision,
         "--request-id",
@@ -1021,6 +1023,10 @@ fn deviation_cli_records_lists_replays_and_rejects_identified_departures() {
     let listed: Value = serde_json::from_slice(&listed.stdout).expect("list should be JSON");
     assert_eq!(listed["kind"], "mino.deviation-list/v1");
     assert_eq!(listed["deviations"][0]["status"], "Open");
+    assert_eq!(
+        listed["deviations"][0]["affected_paths"],
+        serde_json::json!(["support/generated.txt"])
+    );
     let recorded_revision = recorded["revision"].as_u64().unwrap().to_string();
     let rejected = run_mino(
         &project,
@@ -1066,6 +1072,7 @@ fn deviation_cli_records_lists_replays_and_rejects_identified_departures() {
     let projection = fs::read_to_string(project.path().join(projection_relative()))
         .expect("projection should be readable");
     assert!(projection.contains("## Execution Deviations"));
+    assert!(projection.contains("support/generated.txt"));
     assert!(projection.contains("chat:deviation-rejected"));
 }
 

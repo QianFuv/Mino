@@ -3112,6 +3112,7 @@ impl Plan {
         task_id: &TaskId,
         classification: DeviationClassification,
         summary: String,
+        affected_paths: Vec<String>,
         actor: String,
         updated_at: Timestamp,
     ) -> Result<String, DomainError> {
@@ -3123,6 +3124,7 @@ impl Plan {
             task_id.clone(),
             classification,
             summary,
+            affected_paths,
             actor,
             updated_at.clone(),
         )?;

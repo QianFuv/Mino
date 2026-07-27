@@ -157,6 +157,9 @@ struct DeviationRecordArguments {
     /// Human-meaningful description of the departure.
     #[arg(long)]
     summary: String,
+    /// Exact project-relative path affected by the departure.
+    #[arg(long = "path")]
+    paths: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -579,24 +582,25 @@ fn record_deviation(
         .classification
         .to_possible_value()
         .map_or_else(|| "unknown".to_owned(), |value| value.get_name().to_owned());
-    let command = mutation_command(
-        &["deviation", "record"],
-        &arguments.mutation,
-        vec![
-            "--task".to_owned(),
-            arguments.task.clone(),
-            "--classification".to_owned(),
-            classification,
-            "--summary".to_owned(),
-            arguments.summary.clone(),
-        ],
-    );
+    let mut extra = vec![
+        "--task".to_owned(),
+        arguments.task.clone(),
+        "--classification".to_owned(),
+        classification,
+        "--summary".to_owned(),
+        arguments.summary.clone(),
+    ];
+    for path in &arguments.paths {
+        extra.extend(["--path".to_owned(), path.clone()]);
+    }
+    let command = mutation_command(&["deviation", "record"], &arguments.mutation, extra);
     let request = mutation_request(arguments.mutation, command)?;
     let report = service.record_deviation(
         request,
         parse_task_id(&arguments.task)?,
         arguments.classification.into(),
         arguments.summary,
+        arguments.paths,
     )?;
     response_with_guidance(start, "Execution deviation recorded.", report)
 }

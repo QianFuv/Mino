@@ -723,6 +723,7 @@ fn legacy_deviation_checkpoint_materializes_and_can_be_rejected() {
         execution.deviations()[0].legacy_checkpoint_sequence(),
         Some(1)
     );
+    assert!(execution.deviations()[0].affected_paths().is_empty());
 
     legacy
         .reject_deviation(
@@ -748,11 +749,23 @@ fn applied_amendment_can_supersede_an_open_deviation() {
     let (mut plan, first_id, _) = approved_two_task_plan();
     plan.start_task(&first_id, timestamp(8))
         .expect("first task should start");
+    assert!(
+        plan.record_deviation(
+            &first_id,
+            DeviationClassification::Minor,
+            "An unsafe support path was proposed".to_owned(),
+            vec!["../support/generated.txt".to_owned()],
+            "codex".to_owned(),
+            timestamp(9),
+        )
+        .is_err()
+    );
     let deviation_id = plan
         .record_deviation(
             &first_id,
             DeviationClassification::Minor,
             "An implementation note was missing".to_owned(),
+            vec!["support/generated.txt".to_owned()],
             "codex".to_owned(),
             timestamp(9),
         )
@@ -814,6 +827,7 @@ fn applied_amendment_can_supersede_an_open_deviation() {
     let execution = plan.execution_state().expect("execution should decode");
     let deviation = execution.deviation("D1").expect("deviation should exist");
     assert_eq!(deviation.status(), DeviationStatus::Superseded);
+    assert_eq!(deviation.affected_paths(), ["support/generated.txt"]);
     assert_eq!(deviation.amendment_id(), Some("C1"));
 }
 

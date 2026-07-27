@@ -1,6 +1,7 @@
 //! Typed execution checkpoints stored in the plan extension namespace.
 
 use std::collections::BTreeSet;
+use std::path::{Component, Path};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -110,6 +111,8 @@ pub struct Deviation {
     classification: DeviationClassification,
     status: DeviationStatus,
     summary: String,
+    #[serde(default)]
+    affected_paths: Vec<String>,
     actor: String,
     recorded_at: Timestamp,
     #[serde(default)]
@@ -134,6 +137,7 @@ impl Deviation {
         task_id: TaskId,
         classification: DeviationClassification,
         summary: String,
+        affected_paths: Vec<String>,
         actor: String,
         recorded_at: Timestamp,
         legacy_checkpoint_sequence: Option<u64>,
@@ -144,6 +148,7 @@ impl Deviation {
             classification,
             status: DeviationStatus::Open,
             summary,
+            affected_paths,
             actor,
             recorded_at,
             legacy_checkpoint_sequence,
@@ -186,6 +191,12 @@ impl Deviation {
     #[must_use]
     pub fn summary(&self) -> &str {
         &self.summary
+    }
+
+    /// Returns exact normalized project paths affected by the departure.
+    #[must_use]
+    pub fn affected_paths(&self) -> &[String] {
+        &self.affected_paths
     }
 
     /// Returns the actor who recorded the departure.
@@ -329,6 +340,11 @@ impl Deviation {
             || self.summary.trim().is_empty()
             || self.actor.trim().is_empty()
             || self.legacy_checkpoint_sequence == Some(0)
+            || self
+                .affected_paths
+                .iter()
+                .any(|path| !is_safe_exact_path(path))
+            || !strictly_sorted(&self.affected_paths)
             || !strictly_sorted(&self.evidence_refs)
         {
             return Err(invariant("Deviation identity or source is malformed"));
@@ -475,6 +491,7 @@ impl ExecutionState {
                 task_id,
                 DeviationClassification::Unclassified,
                 summary,
+                Vec::new(),
                 actor,
                 recorded_at,
                 Some(sequence),
@@ -488,11 +505,20 @@ impl ExecutionState {
         task_id: TaskId,
         classification: DeviationClassification,
         summary: String,
+        affected_paths: Vec<String>,
         actor: String,
         recorded_at: Timestamp,
     ) -> Result<String, DomainError> {
         self.materialize_legacy_deviations()?;
-        self.push_deviation(task_id, classification, summary, actor, recorded_at, None)
+        self.push_deviation(
+            task_id,
+            classification,
+            summary,
+            affected_paths,
+            actor,
+            recorded_at,
+            None,
+        )
     }
 
     pub(crate) fn resolve_deviation(
@@ -554,6 +580,7 @@ impl ExecutionState {
                 checkpoint.task_id,
                 DeviationClassification::Unclassified,
                 checkpoint.summary,
+                Vec::new(),
                 checkpoint.actor,
                 checkpoint.recorded_at,
                 Some(checkpoint.sequence),
@@ -610,6 +637,7 @@ impl ExecutionState {
         task_id: TaskId,
         classification: DeviationClassification,
         summary: String,
+        affected_paths: Vec<String>,
         actor: String,
         recorded_at: Timestamp,
         legacy_checkpoint_sequence: Option<u64>,
@@ -620,6 +648,7 @@ impl ExecutionState {
             task_id,
             classification,
             summary,
+            affected_paths,
             actor,
             recorded_at,
             legacy_checkpoint_sequence,
@@ -652,6 +681,16 @@ fn prefixed_number(id: &str, prefix: char) -> Option<u64> {
 
 fn strictly_sorted<T: Ord>(values: &[T]) -> bool {
     values.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn is_safe_exact_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && !value.contains(['\\', '*', '?', '[', ']'])
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn invariant(message: impl Into<String>) -> DomainError {

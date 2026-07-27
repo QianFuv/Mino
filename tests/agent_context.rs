@@ -573,6 +573,7 @@ fn ready_plan_with_open_deviation_exposes_applied_amendment_supersession() {
         &task_id(),
         DeviationClassification::Material,
         "The approved summary must change".to_owned(),
+        Vec::new(),
         "codex".to_owned(),
         timestamp(6),
     )

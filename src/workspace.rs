@@ -58,10 +58,18 @@ pub(crate) fn capture_workspace_baseline(
     root: &Path,
     plan: &Plan,
 ) -> Result<WorkspaceFingerprint, MinoError> {
+    let mut patterns = vec!["**".to_owned()];
+    patterns.extend(
+        plan.tasks()
+            .iter()
+            .flat_map(crate::domain::Task::file_map)
+            .filter(|entry| entry.change() != FileChange::NotApplicable)
+            .map(|entry| entry.path().to_owned()),
+    );
     capture_scope(
         root,
         plan,
-        WorkspaceFingerprintScope::new(WorkspaceScopeKind::Global, None, vec!["**".to_owned()]),
+        WorkspaceFingerprintScope::new(WorkspaceScopeKind::Global, None, patterns),
     )
 }
 

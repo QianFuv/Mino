@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::application::completion::{
-    FreshnessScope, reconcile_stale_checks, validate_review_evidence,
+    FreshnessScope, reconcile_stale_checks, validate_final_plan_scope, validate_review_evidence,
 };
 use crate::application::plan::{PlanMutationRequest, PlanOperationReport, PlanService};
 use crate::domain::{
@@ -186,6 +186,7 @@ impl ReviewService {
             return Err(stale_review_error(&report, &stale));
         }
         validate_review_evidence(&self.root, &current, &evidence)?;
+        validate_final_plan_scope(&self.root, &current)?;
         self.plans.commit_semantic(
             request,
             changed_fields,
@@ -274,6 +275,7 @@ impl ReviewService {
             return Err(stale_review_error(&report, &stale));
         }
         validate_review_evidence(&self.root, &current, &evidence)?;
+        validate_final_plan_scope(&self.root, &current)?;
         let actor = request.actor.clone();
         self.plans.commit_semantic(
             request,
