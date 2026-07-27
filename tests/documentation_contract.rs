@@ -582,7 +582,7 @@ fn primary_ci_runs_the_complete_pipeline_on_three_platforms() {
         "cargo install --path .",
         "MINO_E2E_BINARY:",
         "cargo test --offline --test e2e_v0_1 -- --test-threads=1",
-        "cargo test --offline --all-targets --all-features",
+        "cargo test --release --offline --all-targets --all-features",
         "cargo doc --offline --all-features --no-deps",
     ] {
         assert!(workflow.contains(marker), "CI workflow is missing {marker}");

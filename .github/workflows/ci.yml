@@ -59,7 +59,7 @@ jobs:
       - name: Run all tests
         env:
           MINO_E2E_BINARY: ${{ runner.temp }}/mino-install/bin/${{ matrix.binary }}
-        run: cargo test --offline --all-targets --all-features
+        run: cargo test --release --offline --all-targets --all-features
       - name: Build warning-free documentation
         env:
           RUSTDOCFLAGS: -D warnings
