@@ -565,6 +565,41 @@ fn shipped_skill_references_match_plugin_source_byte_for_byte() {
 }
 
 #[test]
+fn primary_ci_runs_the_complete_pipeline_on_three_platforms() {
+    let workflow = read(".github/workflows/ci.yml");
+    for marker in [
+        "name: Stable (${{ matrix.name }})",
+        "fail-fast: false",
+        "runner: windows-latest",
+        "runner: ubuntu-24.04",
+        "runner: macos-15",
+        "binary: mino.exe",
+        "binary: mino",
+        "cargo fmt --all -- --check",
+        "cargo clippy --all-targets --all-features -- -D warnings",
+        "cargo sort --check",
+        "cargo +nightly miri test --lib",
+        "cargo install --path .",
+        "MINO_E2E_BINARY:",
+        "cargo test --offline --test e2e_v0_1 -- --test-threads=1",
+        "cargo test --offline --all-targets --all-features",
+        "cargo doc --offline --all-features --no-deps",
+    ] {
+        assert!(workflow.contains(marker), "CI workflow is missing {marker}");
+    }
+    assert_eq!(workflow.matches("runner: ").count(), 3);
+    assert_eq!(workflow.matches("binary: ").count(), 3);
+
+    let readme = read("README.md");
+    let documentation_index = read("docs/README.md");
+    let architecture = read("docs/architecture.md");
+    assert!(readme.contains("Windows、Linux 和 macOS"));
+    assert!(documentation_index.contains("Windows、Linux、macOS"));
+    assert!(architecture.contains("doc-contract: three-platform-full-ci"));
+    assert!(!architecture.contains("当前普通完整 CI 仍只在 Windows job 运行"));
+}
+
+#[test]
 fn protocol_manifest_and_document_links_are_current() {
     let manifest: Value = serde_json::from_str(&read("assets/protocol/2026-05-11/manifest.json"))
         .expect("protocol manifest should parse");

@@ -275,4 +275,6 @@ Validation 的修复路由按 finding 类型确定：`POLICY-STANDARD-REQUIRED`�
 
 当前 plan schema 为 `1`，renderer 为 `2`，planning protocol 为 `2026-05-11/review-rework-git-flow-v1`。协议模板和执行指南作为经过 manifest 摘要验证的惰性资源内嵌；它们说明来源和交互方式，真正的运行时约束来自编译后的领域与应用服务。
 
-当前普通完整 CI 仍只在 Windows job 运行；五目标 artifact workflow 验证 release build、plugin contract 和 package smoke，不能替代 Linux/macOS 完整测试。这项跨平台 CI 扩展及 README 对应声明留作后续工作，本轮协议闭环不修改两者。
+<!-- doc-contract: three-platform-full-ci -->
+
+普通完整 CI 使用 `windows-latest`、`ubuntu-24.04`、`macos-15` 三平台 matrix，并在每个平台执行格式、Clippy、依赖排序、Miri 适用库目标、离线安装、安装后二进制 E2E、完整测试和 warning-free Rustdoc。matrix 使用 `fail-fast: false`，因此一个平台失败不会隐藏另外两个平台的兼容结果。五目标 artifact workflow 仍独立验证 release build、plugin contract 和 package smoke，不能替代这套三平台完整测试。

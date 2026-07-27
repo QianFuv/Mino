@@ -9,9 +9,22 @@ permissions:
 
 jobs:
   stable:
-    name: Stable (Windows)
-    runs-on: windows-latest
-    timeout-minutes: 45
+    name: Stable (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            runner: windows-latest
+            binary: mino.exe
+          - name: Linux
+            runner: ubuntu-24.04
+            binary: mino
+          - name: macOS
+            runner: macos-15
+            binary: mino
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust 1.96.1
@@ -38,14 +51,14 @@ jobs:
         run: cargo install --path . --root "${{ runner.temp }}/mino-install" --locked --offline --debug
       - name: Verify installed binary
         shell: pwsh
-        run: '& "${{ runner.temp }}/mino-install/bin/mino.exe" --version'
+        run: '& "${{ runner.temp }}/mino-install/bin/${{ matrix.binary }}" --version'
       - name: Run installed-binary lifecycle
         env:
-          MINO_E2E_BINARY: ${{ runner.temp }}/mino-install/bin/mino.exe
+          MINO_E2E_BINARY: ${{ runner.temp }}/mino-install/bin/${{ matrix.binary }}
         run: cargo test --offline --test e2e_v0_1 -- --test-threads=1
       - name: Run all tests
         env:
-          MINO_E2E_BINARY: ${{ runner.temp }}/mino-install/bin/mino.exe
+          MINO_E2E_BINARY: ${{ runner.temp }}/mino-install/bin/${{ matrix.binary }}
         run: cargo test --offline --all-targets --all-features
       - name: Build warning-free documentation
         env:
