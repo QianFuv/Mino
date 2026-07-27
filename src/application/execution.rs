@@ -8,7 +8,8 @@ use serde::Serialize;
 use crate::application::plan::{PlanMutationRequest, PlanOperationReport, PlanService};
 use crate::domain::{
     CheckId, CheckRunContext, CheckRunLease, CheckRunLimits, CheckRunResult, CheckpointKind,
-    Evidence, Plan, RequestId, TaskId, Timestamp, VerificationCheck,
+    Deviation, DeviationClassification, Evidence, EvidenceId, Plan, PlanId, RequestId, TaskId,
+    Timestamp, VerificationCheck,
 };
 use crate::evidence::{CommandEvidenceRequest, EvidenceError, EvidenceErrorKind, EvidenceStore};
 use crate::runner::{
@@ -22,6 +23,9 @@ use crate::{ErrorCategory, MinoError};
 
 const DEFAULT_CHECK_TIMEOUT: Duration = Duration::from_mins(5);
 const DEFAULT_OUTPUT_LIMIT_BYTES: u64 = 1024 * 1024;
+
+/// Stable schema identifier for deviation list responses.
+pub const DEVIATION_LIST_KIND: &str = "mino.deviation-list/v1";
 
 /// Whether a check process executed or reused recoverable journal state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -84,6 +88,15 @@ impl CheckExecutionReport {
     pub const fn is_success(&self) -> bool {
         self.run.is_success()
     }
+}
+
+/// Current identified deviations returned without mutating the plan.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct DeviationListReport {
+    kind: &'static str,
+    plan_id: PlanId,
+    revision: u64,
+    deviations: Vec<Deviation>,
 }
 
 /// Application boundary for revision-checked ordered execution.
@@ -192,6 +205,167 @@ impl ExecutionService {
             |_| Ok(None),
             move |plan, at| {
                 plan.record_checkpoint(&task_id, kind, summary.clone(), actor.clone(), at)
+            },
+        )
+    }
+
+    /// Records one identified deviation on the active task.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for stale revisions, invalid task state, or
+    /// incomplete deviation content.
+    pub fn record_deviation(
+        &self,
+        request: PlanMutationRequest,
+        task_id: TaskId,
+        classification: DeviationClassification,
+        summary: String,
+    ) -> Result<PlanOperationReport, MinoError> {
+        let actor = request.actor.clone();
+        self.plans.commit_semantic(
+            request,
+            vec!["extensions.execution.deviations".to_owned()],
+            |plan| {
+                plan.execution_state()
+                    .and_then(|state| state.next_deviation_id())
+                    .map(Some)
+                    .map_err(|error| map_domain_error(&error))
+            },
+            move |plan, at| {
+                plan.record_deviation(&task_id, classification, summary.clone(), actor.clone(), at)
+                    .map(|_| ())
+            },
+        )
+    }
+
+    /// Lists identified deviations, optionally filtered to one task.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a missing plan or malformed execution state.
+    pub fn list_deviations(
+        &self,
+        plan_id: &PlanId,
+        task_id: Option<&TaskId>,
+    ) -> Result<DeviationListReport, MinoError> {
+        let plan = self.plans.load_verified(plan_id)?;
+        let deviations = plan
+            .execution_state()
+            .map_err(|error| map_domain_error(&error))?
+            .deviations()
+            .iter()
+            .filter(|deviation| task_id.is_none_or(|task_id| deviation.task_id() == task_id))
+            .cloned()
+            .collect();
+        Ok(DeviationListReport {
+            kind: DEVIATION_LIST_KIND,
+            plan_id: plan.id().clone(),
+            revision: plan.revision(),
+            deviations,
+        })
+    }
+
+    /// Resolves one open deviation with current immutable task evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for stale revisions, missing/stale/foreign evidence,
+    /// invalid task state, or an incompatible deviation lifecycle state.
+    pub fn resolve_deviation(
+        &self,
+        request: PlanMutationRequest,
+        deviation_id: String,
+        resolution: String,
+        mut evidence_refs: Vec<EvidenceId>,
+    ) -> Result<PlanOperationReport, MinoError> {
+        let changed_fields = vec!["extensions.execution.deviations".to_owned()];
+        let stored = self.plans.load_stored(&request.plan_id)?;
+        if is_replay_position(&stored, request.expected_revision)? {
+            return self.plans.replay_semantic(request, changed_fields);
+        }
+        let current = self.plans.load_verified(&request.plan_id)?;
+        evidence_refs.sort();
+        if evidence_refs.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(MinoError::new(
+                ErrorCategory::IncompleteOrValidation,
+                "Deviation resolution evidence identifiers must be unique",
+            ));
+        }
+        validate_deviation_evidence(&self.evidence, &current, &deviation_id, &evidence_refs)?;
+        let actor = request.actor.clone();
+        self.plans.commit_semantic(
+            request,
+            changed_fields,
+            |_| Ok(None),
+            move |plan, at| {
+                plan.resolve_deviation(
+                    &deviation_id,
+                    actor.clone(),
+                    resolution.clone(),
+                    evidence_refs.clone(),
+                    at,
+                )
+            },
+        )
+    }
+
+    /// Rejects one open deviation with a protected decision reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for stale revisions, incomplete decision fields,
+    /// invalid task state, or an incompatible deviation lifecycle state.
+    pub fn reject_deviation(
+        &self,
+        request: PlanMutationRequest,
+        deviation_id: String,
+        decision_reference: String,
+        reason: String,
+    ) -> Result<PlanOperationReport, MinoError> {
+        let actor = request.actor.clone();
+        self.plans.commit_semantic(
+            request,
+            vec!["extensions.execution.deviations".to_owned()],
+            |_| Ok(None),
+            move |plan, at| {
+                plan.reject_deviation(
+                    &deviation_id,
+                    actor.clone(),
+                    decision_reference.clone(),
+                    reason.clone(),
+                    at,
+                )
+            },
+        )
+    }
+
+    /// Supersedes one open deviation with an applied amendment.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for stale revisions, missing/unapplied amendments,
+    /// incomplete fields, or an incompatible deviation lifecycle state.
+    pub fn supersede_deviation(
+        &self,
+        request: PlanMutationRequest,
+        deviation_id: String,
+        amendment_id: String,
+        reason: String,
+    ) -> Result<PlanOperationReport, MinoError> {
+        let actor = request.actor.clone();
+        self.plans.commit_semantic(
+            request,
+            vec!["extensions.execution.deviations".to_owned()],
+            |_| Ok(None),
+            move |plan, at| {
+                plan.supersede_deviation(
+                    &deviation_id,
+                    actor.clone(),
+                    amendment_id.clone(),
+                    reason.clone(),
+                    at,
+                )
             },
         )
     }
@@ -552,6 +726,87 @@ fn validate_invocation(root: &Path, check: &VerificationCheck) -> Result<(), Min
         ));
     }
     Ok(())
+}
+
+fn validate_deviation_evidence(
+    store: &EvidenceStore,
+    plan: &Plan,
+    deviation_id: &str,
+    evidence_refs: &[EvidenceId],
+) -> Result<(), MinoError> {
+    if evidence_refs.is_empty() {
+        return Err(MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            "Deviation resolution requires at least one evidence reference",
+        ));
+    }
+    let execution = plan
+        .execution_state()
+        .map_err(|error| map_domain_error(&error))?;
+    let deviation = execution.deviation(deviation_id).ok_or_else(|| {
+        MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            format!("Deviation {deviation_id} does not exist"),
+        )
+    })?;
+    let records = store
+        .list(plan.id())
+        .map_err(|error| map_evidence_error(&error))?;
+    for evidence_id in evidence_refs {
+        let evidence = records
+            .iter()
+            .find(|evidence| evidence.id() == evidence_id)
+            .ok_or_else(|| {
+                MinoError::new(
+                    ErrorCategory::IncompleteOrValidation,
+                    format!(
+                        "Evidence {evidence_id} does not exist in plan {}",
+                        plan.id()
+                    ),
+                )
+            })?;
+        let is_superseded = records
+            .iter()
+            .any(|record| record.supersedes() == Some(evidence_id));
+        if evidence.task_id() != Some(deviation.task_id())
+            || evidence
+                .captured_revision()
+                .is_none_or(|revision| revision > plan.revision())
+            || plan.is_evidence_stale(evidence_id)
+            || is_superseded
+        {
+            return Err(MinoError::new(
+                ErrorCategory::IncompleteOrValidation,
+                format!(
+                    "Evidence {evidence_id} is not current task evidence for deviation {deviation_id}"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_replay_position(plan: &Plan, expected_revision: u64) -> Result<bool, MinoError> {
+    let target_revision = expected_revision.checked_add(1).ok_or_else(|| {
+        MinoError::new(
+            ErrorCategory::RevisionConflict,
+            "Expected revision overflowed",
+        )
+    })?;
+    if plan.revision() == expected_revision {
+        Ok(false)
+    } else if plan.revision() >= target_revision {
+        Ok(true)
+    } else {
+        Err(MinoError::new(
+            ErrorCategory::RevisionConflict,
+            format!(
+                "Plan {} is revision {}, not expected revision {expected_revision}",
+                plan.id(),
+                plan.revision()
+            ),
+        ))
+    }
 }
 
 fn map_domain_error(error: &crate::domain::DomainError) -> MinoError {

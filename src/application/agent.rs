@@ -14,7 +14,7 @@ use crate::domain::{
 };
 use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitHeadState};
 use crate::validation::validate_plan;
-use crate::{MinoError, NextAction};
+use crate::{ErrorCategory, MinoError, NextAction};
 
 /// Versioned Agent context schema identifier.
 pub const AGENT_CONTEXT_KIND: &str = "mino.agent-context/v1";
@@ -36,6 +36,11 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("exec.checkpoint", true, false),
     ("exec.complete", true, false),
     ("exec.criterion.pass", true, false),
+    ("exec.deviation.list", false, false),
+    ("exec.deviation.record", true, false),
+    ("exec.deviation.reject", true, true),
+    ("exec.deviation.resolve", true, false),
+    ("exec.deviation.supersede", true, false),
     ("exec.finish", true, false),
     ("exec.resume", true, false),
     ("exec.rework", true, false),
@@ -697,21 +702,34 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
 }
 
 fn ready_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
+    let has_open_deviation = plan
+        .execution_state()
+        .map_err(|error| {
+            MinoError::new(
+                ErrorCategory::DriftDetected,
+                format!("Execution state is malformed: {error}"),
+            )
+        })?
+        .deviations()
+        .iter()
+        .any(crate::domain::Deviation::is_open);
     let validation = validate_plan(root, plan)?;
     if !validation.valid {
         let requires_conflict_decision = validation
             .findings
             .iter()
             .any(|finding| finding.id == "POLICY-STANDARD-CONFLICT-UNRESOLVED");
+        let mut allowed_actions = action_ids(&[
+            "plan.show",
+            "plan.validate",
+            "plan.amend.propose",
+            "standards.conflict.list",
+            "standards.conflict.refresh",
+            "standards.conflict.resolve",
+        ]);
+        append_ready_deviation_actions(&mut allowed_actions, has_open_deviation);
         return Ok(Guidance {
-            allowed_actions: action_ids(&[
-                "plan.show",
-                "plan.validate",
-                "plan.amend.propose",
-                "standards.conflict.list",
-                "standards.conflict.refresh",
-                "standards.conflict.resolve",
-            ]),
+            allowed_actions,
             blocked_actions: vec![
                 blocked(
                     "plan.approve",
@@ -727,16 +745,18 @@ fn ready_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
         });
     }
     if !plan.has_plan_approval() {
+        let mut allowed_actions = action_ids(&[
+            "plan.show",
+            "plan.validate",
+            "plan.review",
+            "plan.amend.propose",
+            "standards.conflict.list",
+            "standards.conflict.refresh",
+            "standards.conflict.resolve",
+        ]);
+        append_ready_deviation_actions(&mut allowed_actions, has_open_deviation);
         return Ok(Guidance {
-            allowed_actions: action_ids(&[
-                "plan.show",
-                "plan.validate",
-                "plan.review",
-                "plan.amend.propose",
-                "standards.conflict.list",
-                "standards.conflict.refresh",
-                "standards.conflict.resolve",
-            ]),
+            allowed_actions,
             blocked_actions: vec![
                 blocked(
                     "plan.approve",
@@ -754,17 +774,19 @@ fn ready_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
     let next_actions = first_incomplete_task(plan)
         .map(|task_id| vec![start_action(plan, task_id)])
         .unwrap_or_default();
+    let mut allowed_actions = action_ids(&[
+        "plan.show",
+        "plan.validate",
+        "plan.review",
+        "plan.amend.propose",
+        "exec.start",
+        "standards.conflict.list",
+        "standards.conflict.refresh",
+        "standards.conflict.resolve",
+    ]);
+    append_ready_deviation_actions(&mut allowed_actions, has_open_deviation);
     Ok(Guidance {
-        allowed_actions: action_ids(&[
-            "plan.show",
-            "plan.validate",
-            "plan.review",
-            "plan.amend.propose",
-            "exec.start",
-            "standards.conflict.list",
-            "standards.conflict.refresh",
-            "standards.conflict.resolve",
-        ]),
+        allowed_actions,
         blocked_actions: vec![blocked(
             "git.commit",
             "No task has completed its verification and commit gate",
@@ -772,6 +794,15 @@ fn ready_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
         approval_required: false,
         next_actions,
     })
+}
+
+fn append_ready_deviation_actions(actions: &mut Vec<String>, has_open_deviation: bool) {
+    if has_open_deviation {
+        actions.extend(action_ids(&[
+            "exec.deviation.list",
+            "exec.deviation.supersede",
+        ]));
+    }
 }
 
 fn in_progress_guidance(plan: &Plan) -> Guidance {
@@ -799,16 +830,7 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
             },
             |check_id| vec![check_action(plan, check_id)],
         );
-        (
-            action_ids(&[
-                "exec.check.run",
-                "exec.checkpoint",
-                "exec.criterion.pass",
-                "exec.complete",
-                "exec.block",
-            ]),
-            next_actions,
-        )
+        (in_progress_task_actions(), next_actions)
     } else if let Some(task_id) = pending_commit_task(plan) {
         if has_automatic_commit_consent {
             (
@@ -871,6 +893,21 @@ fn in_progress_guidance(plan: &Plan) -> Guidance {
         approval_required: can_commit && !has_automatic_commit_consent,
         next_actions,
     }
+}
+
+fn in_progress_task_actions() -> Vec<String> {
+    action_ids(&[
+        "exec.check.run",
+        "exec.checkpoint",
+        "exec.criterion.pass",
+        "exec.complete",
+        "exec.block",
+        "exec.deviation.list",
+        "exec.deviation.record",
+        "exec.deviation.reject",
+        "exec.deviation.resolve",
+        "exec.deviation.supersede",
+    ])
 }
 
 fn active_task(plan: &Plan) -> Option<TaskId> {

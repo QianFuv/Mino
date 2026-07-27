@@ -12,7 +12,8 @@ use crate::application::monitor::{MonitorBounds, MonitorRequest, MonitorService}
 use crate::application::plan::PlanMutationRequest;
 use crate::commands::CommandResponse;
 use crate::domain::{
-    CheckId, CheckpointKind, CriterionId, EvidenceId, PlanId, RequestId, TaskId, Timestamp,
+    CheckId, CheckpointKind, CriterionId, DeviationClassification, EvidenceId, PlanId, RequestId,
+    TaskId, Timestamp,
 };
 use crate::schedule::{ScheduleSpecRequest, ScheduleSpecService};
 use crate::{ErrorCategory, MinoError};
@@ -23,6 +24,8 @@ pub(crate) enum ExecAction {
     Start(StartArguments),
     /// Record one typed execution checkpoint.
     Checkpoint(CheckpointArguments),
+    /// Record, list, and disposition identified execution deviations.
+    Deviation(DeviationArguments),
     /// Run one planned verification check.
     Check(CheckArguments),
     /// Emit an inert scheduler-neutral task handoff.
@@ -102,6 +105,113 @@ impl From<CheckpointKindArgument> for CheckpointKind {
             CheckpointKindArgument::Deviation => Self::Deviation,
         }
     }
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DeviationArguments {
+    #[command(subcommand)]
+    action: DeviationAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum DeviationAction {
+    /// Record one identified deviation on the active task.
+    Record(DeviationRecordArguments),
+    /// List current and terminal deviations without mutation.
+    List(DeviationListArguments),
+    /// Resolve one open deviation with current immutable evidence.
+    Resolve(DeviationResolveArguments),
+    /// Reject one open deviation through a protected decision.
+    Reject(DeviationRejectArguments),
+    /// Supersede one open deviation with an applied amendment.
+    Supersede(DeviationSupersedeArguments),
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DeviationClassificationArgument {
+    Unclassified,
+    Minor,
+    Material,
+}
+
+impl From<DeviationClassificationArgument> for DeviationClassification {
+    fn from(value: DeviationClassificationArgument) -> Self {
+        match value {
+            DeviationClassificationArgument::Unclassified => Self::Unclassified,
+            DeviationClassificationArgument::Minor => Self::Minor,
+            DeviationClassificationArgument::Material => Self::Material,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct DeviationRecordArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    /// Active task identifier.
+    #[arg(long)]
+    task: String,
+    /// Protection class of the departure.
+    #[arg(long, value_enum)]
+    classification: DeviationClassificationArgument,
+    /// Human-meaningful description of the departure.
+    #[arg(long)]
+    summary: String,
+}
+
+#[derive(Debug, Args)]
+struct DeviationListArguments {
+    /// Target plan identifier.
+    #[arg(long)]
+    plan: String,
+    /// Optional task filter.
+    #[arg(long)]
+    task: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct DeviationResolveArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    /// Stable deviation identifier such as D1.
+    #[arg(long)]
+    deviation: String,
+    /// Explanation of the in-scope resolution.
+    #[arg(long)]
+    resolution: String,
+    /// Current immutable task evidence supporting the resolution.
+    #[arg(long = "evidence", required = true)]
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct DeviationRejectArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    /// Stable deviation identifier such as D1.
+    #[arg(long)]
+    deviation: String,
+    /// Auditable reference for the protected rejection decision.
+    #[arg(long)]
+    decision_ref: String,
+    /// Explanation of why the departure was rejected.
+    #[arg(long)]
+    reason: String,
+}
+
+#[derive(Debug, Args)]
+struct DeviationSupersedeArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    /// Stable deviation identifier such as D1.
+    #[arg(long)]
+    deviation: String,
+    /// Applied protected amendment identifier such as C1.
+    #[arg(long)]
+    amendment: String,
+    /// Explanation of how the amendment supersedes the departure.
+    #[arg(long)]
+    reason: String,
 }
 
 #[derive(Debug, Args)]
@@ -320,6 +430,7 @@ pub(crate) fn execute(start: &Path, action: ExecAction) -> Result<CommandRespons
             )?;
             response_with_guidance(start, "Execution checkpoint recorded.", report)
         }
+        ExecAction::Deviation(arguments) => execute_deviation(start, &service, arguments.action),
         ExecAction::Check(arguments) => match arguments.action {
             CheckAction::Run(arguments) => run_check(start, &service, arguments),
             CheckAction::Monitor(arguments) => monitor_check(start, arguments),
@@ -372,6 +483,122 @@ pub(crate) fn execute(start: &Path, action: ExecAction) -> Result<CommandRespons
         }
         ExecAction::Finish(arguments) => finish(start, arguments),
     }
+}
+
+fn execute_deviation(
+    start: &Path,
+    service: &ExecutionService,
+    action: DeviationAction,
+) -> Result<CommandResponse, MinoError> {
+    match action {
+        DeviationAction::Record(arguments) => record_deviation(start, service, arguments),
+        DeviationAction::List(arguments) => {
+            let plan_id = parse_plan_id(&arguments.plan)?;
+            let task_id = arguments.task.as_deref().map(parse_task_id).transpose()?;
+            let report = service.list_deviations(&plan_id, task_id.as_ref())?;
+            response("Execution deviations listed.", report, Vec::new())
+        }
+        DeviationAction::Resolve(arguments) => {
+            let evidence = arguments
+                .evidence
+                .iter()
+                .map(|value| parse_evidence_id(value))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut extra = vec![
+                "--deviation".to_owned(),
+                arguments.deviation.clone(),
+                "--resolution".to_owned(),
+                arguments.resolution.clone(),
+            ];
+            for evidence_id in &evidence {
+                extra.extend(["--evidence".to_owned(), evidence_id.to_string()]);
+            }
+            let command = mutation_command(&["deviation", "resolve"], &arguments.mutation, extra);
+            let request = mutation_request(arguments.mutation, command)?;
+            let report = service.resolve_deviation(
+                request,
+                arguments.deviation,
+                arguments.resolution,
+                evidence,
+            )?;
+            response_with_guidance(start, "Execution deviation resolved.", report)
+        }
+        DeviationAction::Reject(arguments) => {
+            let command = mutation_command(
+                &["deviation", "reject"],
+                &arguments.mutation,
+                vec![
+                    "--deviation".to_owned(),
+                    arguments.deviation.clone(),
+                    "--decision-ref".to_owned(),
+                    arguments.decision_ref.clone(),
+                    "--reason".to_owned(),
+                    arguments.reason.clone(),
+                ],
+            );
+            let request = mutation_request(arguments.mutation, command)?;
+            let report = service.reject_deviation(
+                request,
+                arguments.deviation,
+                arguments.decision_ref,
+                arguments.reason,
+            )?;
+            response_with_guidance(start, "Execution deviation rejected.", report)
+        }
+        DeviationAction::Supersede(arguments) => {
+            let command = mutation_command(
+                &["deviation", "supersede"],
+                &arguments.mutation,
+                vec![
+                    "--deviation".to_owned(),
+                    arguments.deviation.clone(),
+                    "--amendment".to_owned(),
+                    arguments.amendment.clone(),
+                    "--reason".to_owned(),
+                    arguments.reason.clone(),
+                ],
+            );
+            let request = mutation_request(arguments.mutation, command)?;
+            let report = service.supersede_deviation(
+                request,
+                arguments.deviation,
+                arguments.amendment,
+                arguments.reason,
+            )?;
+            response_with_guidance(start, "Execution deviation superseded.", report)
+        }
+    }
+}
+
+fn record_deviation(
+    start: &Path,
+    service: &ExecutionService,
+    arguments: DeviationRecordArguments,
+) -> Result<CommandResponse, MinoError> {
+    let classification = arguments
+        .classification
+        .to_possible_value()
+        .map_or_else(|| "unknown".to_owned(), |value| value.get_name().to_owned());
+    let command = mutation_command(
+        &["deviation", "record"],
+        &arguments.mutation,
+        vec![
+            "--task".to_owned(),
+            arguments.task.clone(),
+            "--classification".to_owned(),
+            classification,
+            "--summary".to_owned(),
+            arguments.summary.clone(),
+        ],
+    );
+    let request = mutation_request(arguments.mutation, command)?;
+    let report = service.record_deviation(
+        request,
+        parse_task_id(&arguments.task)?,
+        arguments.classification.into(),
+        arguments.summary,
+    )?;
+    response_with_guidance(start, "Execution deviation recorded.", report)
 }
 
 fn pass_criterion(

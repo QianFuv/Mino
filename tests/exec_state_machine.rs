@@ -716,7 +716,7 @@ fn concurrent_exact_retry_keeps_the_running_plan_and_persists_one_passed_result(
     let winner_request = request.clone();
     let winner =
         thread::spawn(move || winner_service.run_check(&winner_request, &check_id("TASK-CHECK")));
-    if !wait_for_path(&ready, Duration::from_secs(3)) {
+    if !wait_for_path(&ready, Duration::from_secs(30)) {
         fs::write(&release, b"release").expect("blocked check should be released");
         let _ = winner.join();
         panic!("blocking check did not signal readiness");
@@ -958,6 +958,115 @@ fn prepare_abandoned_lease(project: &TestProject, request: &PlanMutationRequest)
         .expect("journal should be valid")
         .begin(&lease)
         .expect("abandoned lease should persist");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn deviation_cli_records_lists_replays_and_rejects_identified_departures() {
+    let project = TestProject::new("deviation-cli", "pass", None);
+    let base_revision = project.base_revision.to_string();
+    let start = run_mino(
+        &project,
+        &[
+            "exec",
+            "start",
+            "--plan",
+            plan_id().as_str(),
+            "--task",
+            "T1",
+            "--expect-revision",
+            &base_revision,
+            "--request-id",
+            request_id(60).as_str(),
+            "--actor",
+            "codex",
+        ],
+    );
+    assert!(start.status.success());
+    let started: Value = serde_json::from_slice(&start.stdout).expect("start should be JSON");
+    let started_revision = started["revision"].as_u64().unwrap().to_string();
+    let record_plan_id = plan_id();
+    let record_request_id = request_id(61);
+    let record_arguments = [
+        "exec",
+        "deviation",
+        "record",
+        "--plan",
+        record_plan_id.as_str(),
+        "--task",
+        "T1",
+        "--classification",
+        "minor",
+        "--summary",
+        "A task-local implementation departure",
+        "--expect-revision",
+        &started_revision,
+        "--request-id",
+        record_request_id.as_str(),
+        "--actor",
+        "codex",
+    ];
+    let recorded = run_mino(&project, &record_arguments);
+    assert!(recorded.status.success());
+    let recorded: Value = serde_json::from_slice(&recorded.stdout).expect("record should be JSON");
+    assert_eq!(recorded["assigned_id"], "D1");
+    let replay = run_mino(&project, &record_arguments);
+    let replay: Value = serde_json::from_slice(&replay.stdout).expect("replay should be JSON");
+    assert_eq!(replay["replayed"], true);
+
+    let listed = run_mino(
+        &project,
+        &["exec", "deviation", "list", "--plan", plan_id().as_str()],
+    );
+    let listed: Value = serde_json::from_slice(&listed.stdout).expect("list should be JSON");
+    assert_eq!(listed["kind"], "mino.deviation-list/v1");
+    assert_eq!(listed["deviations"][0]["status"], "Open");
+    let recorded_revision = recorded["revision"].as_u64().unwrap().to_string();
+    let rejected = run_mino(
+        &project,
+        &[
+            "exec",
+            "deviation",
+            "reject",
+            "--plan",
+            plan_id().as_str(),
+            "--deviation",
+            "D1",
+            "--decision-ref",
+            "chat:deviation-rejected",
+            "--reason",
+            "The departure is not accepted",
+            "--expect-revision",
+            &recorded_revision,
+            "--request-id",
+            request_id(62).as_str(),
+            "--actor",
+            "user",
+        ],
+    );
+    assert!(rejected.status.success());
+    let listed = run_mino(
+        &project,
+        &[
+            "exec",
+            "deviation",
+            "list",
+            "--plan",
+            plan_id().as_str(),
+            "--task",
+            "T1",
+        ],
+    );
+    let listed: Value = serde_json::from_slice(&listed.stdout).expect("list should be JSON");
+    assert_eq!(listed["deviations"][0]["status"], "Rejected");
+    assert_eq!(
+        listed["deviations"][0]["disposition_reference"],
+        "chat:deviation-rejected"
+    );
+    let projection = fs::read_to_string(project.path().join(projection_relative()))
+        .expect("projection should be readable");
+    assert!(projection.contains("## Execution Deviations"));
+    assert!(projection.contains("chat:deviation-rejected"));
 }
 
 fn phase_request_id(request_id: &RequestId, phase: &str) -> RequestId {

@@ -725,19 +725,17 @@ fn compatible_change(change: FileChange, file: &WorkspaceDeltaEntry) -> bool {
 }
 
 pub(crate) fn validate_task_deviations(plan: &Plan, task: &Task) -> Result<(), MinoError> {
-    if plan
+    if let Some(deviation) = plan
         .execution_state()
         .map_err(|error| map_domain_error(&error))?
-        .checkpoints()
+        .deviations()
         .iter()
-        .any(|checkpoint| {
-            checkpoint.task_id() == task.id()
-                && checkpoint.kind() == crate::domain::CheckpointKind::Deviation
-        })
+        .find(|deviation| deviation.task_id() == task.id() && deviation.is_open())
     {
         Err(incomplete(format!(
-            "Task {} has an unresolved deviation",
-            task.id()
+            "Task {} has unresolved deviation {}",
+            task.id(),
+            deviation.id()
         )))
     } else {
         Ok(())
@@ -745,14 +743,17 @@ pub(crate) fn validate_task_deviations(plan: &Plan, task: &Task) -> Result<(), M
 }
 
 fn validate_all_deviations(plan: &Plan) -> Result<(), MinoError> {
-    if plan
+    if let Some(deviation) = plan
         .execution_state()
         .map_err(|error| map_domain_error(&error))?
-        .checkpoints()
+        .deviations()
         .iter()
-        .any(|checkpoint| checkpoint.kind() == crate::domain::CheckpointKind::Deviation)
+        .find(|deviation| deviation.is_open())
     {
-        Err(incomplete("Plan has unresolved execution deviations"))
+        Err(incomplete(format!(
+            "Plan has unresolved execution deviation {}",
+            deviation.id()
+        )))
     } else {
         Ok(())
     }

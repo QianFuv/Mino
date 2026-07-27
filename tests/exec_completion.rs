@@ -11,9 +11,9 @@ use mino::application::execution::ExecutionService;
 use mino::application::plan::PlanMutationRequest;
 use mino::domain::{
     AcceptanceCriterion, Approval, CheckId, CheckStatus, CheckpointKind, CriterionId,
-    CriterionStatus, EvidenceId, EvidenceType, FileChange, FileMapEntry, GitFlowConsent,
-    GitReadiness, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId, Task, TaskId, TaskStatus,
-    Timestamp, VerificationCheck,
+    CriterionStatus, DeviationStatus, EvidenceId, EvidenceType, FileChange, FileMapEntry,
+    GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId, Task, TaskId,
+    TaskStatus, Timestamp, VerificationCheck,
 };
 use mino::evidence::{AddEvidenceRequest, EvidenceRequestContext, EvidenceSource, EvidenceStore};
 use mino::git::matches_file_map_path;
@@ -860,7 +860,8 @@ fn failed_check_evidence_cannot_satisfy_a_criterion() {
 }
 
 #[test]
-fn incomplete_evidence_and_unresolved_deviation_never_complete_a_task() {
+#[allow(clippy::too_many_lines)]
+fn incomplete_evidence_and_open_deviation_block_until_evidence_resolution() {
     let project = TestProject::new("gates", "pass");
     let started = start_active_task(&project, 40);
     let completion = CompletionService::discover(project.path()).expect("service should discover");
@@ -943,12 +944,78 @@ fn incomplete_evidence_and_unresolved_deviation_never_complete_a_task() {
         )
         .expect_err("unresolved deviation should block completion");
     assert_eq!(deviation.category(), ErrorCategory::IncompleteOrValidation);
+    let open_plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("plan should load");
+    let open_execution = open_plan
+        .execution_state()
+        .expect("execution state should decode");
+    assert_eq!(open_execution.deviations()[0].id(), "D1");
+    assert_eq!(
+        open_execution.deviations()[0].status(),
+        DeviationStatus::Open
+    );
+    assert_eq!(
+        open_execution.deviations()[0].legacy_checkpoint_sequence(),
+        Some(1)
+    );
+    let missing_evidence = execution
+        .resolve_deviation(
+            mutation(
+                checkpoint.revision,
+                47,
+                vec!["mino".to_owned(), "exec".to_owned(), "deviation".to_owned()],
+            ),
+            "D1".to_owned(),
+            "Resolved in the declared scope".to_owned(),
+            vec![EvidenceId::parse("E9999").expect("evidence ID should parse")],
+        )
+        .expect_err("missing evidence should reject resolution");
+    assert_eq!(
+        missing_evidence.category(),
+        ErrorCategory::IncompleteOrValidation
+    );
+    let resolved = execution
+        .resolve_deviation(
+            mutation(
+                checkpoint.revision,
+                48,
+                vec!["mino".to_owned(), "exec".to_owned(), "deviation".to_owned()],
+            ),
+            "D1".to_owned(),
+            "Resolved in the declared scope".to_owned(),
+            vec![check.evidence().id().clone()],
+        )
+        .expect("current task evidence should resolve deviation");
+    let resolved_plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("plan should load");
+    assert_eq!(
+        resolved_plan
+            .execution_state()
+            .expect("execution should decode")
+            .deviations()[0]
+            .status(),
+        DeviationStatus::Resolved
+    );
+    completion
+        .complete_task(
+            mutation(
+                resolved.revision,
+                49,
+                vec!["mino".to_owned(), "exec".to_owned(), "complete".to_owned()],
+            ),
+            task_id(),
+        )
+        .expect("resolved deviation should no longer block completion");
     assert_eq!(
         PlanStore::new(project.path())
             .load_plan(&plan_id())
             .expect("plan should load")
-            .revision(),
-        checkpoint.revision
+            .task(&task_id())
+            .expect("task should exist")
+            .status(),
+        TaskStatus::Done
     );
 }
 

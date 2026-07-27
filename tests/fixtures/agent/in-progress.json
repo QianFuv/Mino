@@ -16,6 +16,11 @@
     "exec.criterion.pass",
     "exec.complete",
     "exec.block",
+    "exec.deviation.list",
+    "exec.deviation.record",
+    "exec.deviation.reject",
+    "exec.deviation.resolve",
+    "exec.deviation.supersede",
     "plan.amend.propose"
   ],
   "blocked_actions": [

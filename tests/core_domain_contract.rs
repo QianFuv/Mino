@@ -1,9 +1,10 @@
 //! Contract tests for the versioned Mino domain aggregate.
 
 use mino::domain::{
-    AcceptanceCriterion, CheckId, CommitGate, CriterionId, DomainError, DomainErrorKind, Event,
-    Evidence, EvidenceId, GitFlowConsent, Plan, PlanId, PlanStatus, RequestId,
-    ReviewClassification, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
+    AcceptanceCriterion, AmendmentPatch, CheckId, CheckpointKind, CommitGate, CriterionId,
+    DeviationClassification, DeviationStatus, DomainError, DomainErrorKind, Event, Evidence,
+    EvidenceId, GitFlowConsent, Plan, PlanId, PlanStatus, RequestId, ReviewClassification, Task,
+    TaskId, TaskStatus, Timestamp, VerificationCheck,
 };
 use schemars::schema_for;
 use serde_json::{Value, json};
@@ -674,6 +675,130 @@ fn completion_gates_and_deserialization_reject_forged_state() {
     forged_task["acceptance_criteria"][0]["status"] = Value::from("Passed");
     forged_task["verification_checks"][0]["status"] = Value::from("Passed");
     assert!(serde_json::from_value::<Task>(forged_task).is_err());
+}
+
+#[test]
+fn legacy_deviation_checkpoint_materializes_and_can_be_rejected() {
+    let (mut plan, first_id, _) = approved_two_task_plan();
+    plan.start_task(&first_id, timestamp(8))
+        .expect("first task should start");
+    plan.record_checkpoint(
+        &first_id,
+        CheckpointKind::Deviation,
+        "Legacy execution departed from the plan",
+        "codex",
+        timestamp(9),
+    )
+    .expect("legacy-compatible deviation checkpoint should record");
+    let mut serialized = serde_json::to_value(plan).expect("plan should serialize");
+    serialized["extensions"]["execution"]
+        .as_object_mut()
+        .expect("execution extension should be an object")
+        .remove("deviations");
+    let mut legacy: Plan = serde_json::from_value(serialized).expect("legacy plan should load");
+    let execution = legacy.execution_state().expect("execution should decode");
+    assert_eq!(execution.deviations().len(), 1);
+    assert_eq!(execution.deviations()[0].id(), "D1");
+    assert_eq!(
+        execution.deviations()[0].classification(),
+        DeviationClassification::Unclassified
+    );
+    assert_eq!(
+        execution.deviations()[0].legacy_checkpoint_sequence(),
+        Some(1)
+    );
+
+    legacy
+        .reject_deviation(
+            "D1",
+            "user".to_owned(),
+            "chat:legacy-deviation-rejected".to_owned(),
+            "The departure is not accepted".to_owned(),
+            timestamp(10),
+        )
+        .expect("legacy deviation should be dispositionable");
+    assert_eq!(
+        legacy
+            .execution_state()
+            .expect("execution should decode")
+            .deviations()[0]
+            .status(),
+        DeviationStatus::Rejected
+    );
+}
+
+#[test]
+fn applied_amendment_can_supersede_an_open_deviation() {
+    let (mut plan, first_id, _) = approved_two_task_plan();
+    plan.start_task(&first_id, timestamp(8))
+        .expect("first task should start");
+    let deviation_id = plan
+        .record_deviation(
+            &first_id,
+            DeviationClassification::Minor,
+            "An implementation note was missing".to_owned(),
+            "codex".to_owned(),
+            timestamp(9),
+        )
+        .expect("deviation should record");
+    assert_eq!(deviation_id, "D1");
+    assert!(
+        plan.supersede_deviation(
+            "D1",
+            "codex".to_owned(),
+            "C1".to_owned(),
+            "No applied amendment exists".to_owned(),
+            timestamp(10),
+        )
+        .is_err()
+    );
+    let patch: AmendmentPatch = serde_json::from_value(json!({
+        "operations": [{
+            "operation": "replace-summary",
+            "summary": "The approved plan now includes the deviation."
+        }]
+    }))
+    .expect("amendment patch should parse");
+    plan.propose_amendment(
+        "Include the deviation in the approved plan".to_owned(),
+        patch,
+        None,
+        format!("sha256:{}", "a".repeat(64)),
+        "codex".to_owned(),
+        timestamp(11),
+    )
+    .expect("Material amendment should propose");
+    assert!(
+        plan.supersede_deviation(
+            "D1",
+            "codex".to_owned(),
+            "C1".to_owned(),
+            "The amendment is not applied".to_owned(),
+            timestamp(12),
+        )
+        .is_err()
+    );
+    plan.approve_amendment(
+        "C1",
+        "user".to_owned(),
+        "chat:deviation-amendment-approved".to_owned(),
+        timestamp(13),
+    )
+    .expect("Material amendment should approve");
+    plan.apply_amendment("C1", timestamp(14))
+        .expect("Material amendment should apply");
+    plan.supersede_deviation(
+        "D1",
+        "codex".to_owned(),
+        "C1".to_owned(),
+        "The applied amendment updates the approved task record".to_owned(),
+        timestamp(15),
+    )
+    .expect("applied amendment should supersede deviation");
+    let execution = plan.execution_state().expect("execution should decode");
+    let deviation = execution.deviation("D1").expect("deviation should exist");
+    assert_eq!(deviation.status(), DeviationStatus::Superseded);
+    assert_eq!(deviation.amendment_id(), Some("C1"));
 }
 
 #[test]

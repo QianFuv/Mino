@@ -156,7 +156,12 @@ artifact path 必须留在项目内。修正证据会创建带 `supersedes` 的�
 | 命令 | 写入/副作用 | 核心契约 |
 |---|---|---|
 | `mino exec start` | 计划 | 在批准后启动第一个 eligible Ready 任务，并要求此前所有必需任务提交已记录。 |
-| `mino exec checkpoint` | 计划 | 为活动任务记录类型化 checkpoint。 |
+| `mino exec checkpoint` | 计划 | 为活动任务记录类型化 checkpoint；`--kind deviation` 是兼容入口，同时创建 Unclassified 的稳定 `D<n>`。 |
+| `mino exec deviation record` | 计划 | 为活动任务创建带稳定 `D<n>`、classification 和 Open 状态的偏差。 |
+| `mino exec deviation list` | 否 | 返回 `mino.deviation-list/v1`，可按 task 筛选 Open 与全部历史终态。 |
+| `mino exec deviation resolve` | 计划 | 用当前计划中未 stale、未 supersede 的任务 evidence 把 Open 偏差置为 Resolved。 |
+| `mino exec deviation reject` | 计划，审批边界 | 用 decision reference 和 reason 把 Open 偏差置为 Rejected。 |
+| `mino exec deviation supersede` | 计划 | 用已 Applied 的 Amendment 和 reason 把 Open 偏差置为 Superseded。 |
 | `mino exec check run` | 计划、进程、证据 | 运行一项任务级或全局计划检查，保存 lease、结果和 evidence。 |
 | `mino exec check monitor` | 计划、有限进程、证据 | 在次数、间隔和总 deadline 内重试一项已有检查，可使用安全取消文件。 |
 | `mino exec schedule spec` | 无 | 输出摘要绑定、调度器中立的检查 handoff；不创建外部任务、不联网、不写 Mino 状态。 |
@@ -166,6 +171,8 @@ artifact path 必须留在项目内。修正证据会创建带 `supersedes` 的�
 | `mino exec block` | 计划 | 用非空且可恢复的原因阻塞 Ready 或 In Progress 计划。 |
 | `mino exec resume` | 计划 | 恢复到记录的 Ready 或 In Progress 状态。 |
 | `mino exec finish` | 计划 | 在所有任务、必需 commit gate 和全局检查完成后转入 Review。 |
+
+只有 Open 偏差阻塞 task complete 和 exec finish；Resolved、Rejected 与 Superseded 保留全部审计字段但不再阻塞。旧状态中只有 Deviation checkpoint 时，读取会按 checkpoint 顺序生成确定性 `D<n>` 和 legacy checkpoint link；首次处置会把该记录持久化。Resolution evidence 必须属于同一计划和任务、未失效且未被替代；Superseded 必须引用已应用的 Amendment。
 
 相同 request ID 的 `exec check run` 可以安全精确重试。已有 terminal result 时返回 replay；原调用仍持有 run owner lock 时返回 exit 3 `revision_conflict`，消息标识 AlreadyRunning，并且不新增 evidence 或 plan revision；只有 owner lock 已释放且 lease 没有 result 时才恢复一次 `Interrupted` 终态。
 
@@ -272,6 +279,7 @@ review item 使用连续 `REV-n`。In-Scope Rework 在 record 时预留单调递
 | `mino.validation/v1` | 计划校验详情 |
 | `mino.plan-review/v1` | revision-bound `plan review` payload |
 | `mino.check-run/v1` | 持久化 check lease/result 的 `schema_version` |
+| `mino.deviation-list/v1` | `exec deviation list` 的偏差生命周期列表 |
 | `mino.monitor/v1` | monitor 终态摘要的 `monitor_kind` |
 | `mino.scheduled-task-spec/v1` | 调度 handoff 的 `spec_kind` |
 | `mino.plan-diff/v1` | 只读语义 diff 的 `diff_kind` |

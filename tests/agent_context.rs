@@ -7,10 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use mino::application::agent::build_agent_context;
 use mino::domain::{
-    Approval, CheckId, CriterionId, DraftCriterionInput, DraftFileInput, DraftMetadataInput,
-    DraftPlanInput, DraftScopeInput, DraftTaskInput, DraftVerificationInput, EvidenceId,
-    FileChange, GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId, StandardSelection,
-    TaskId, Timestamp, VerificationCheck,
+    AmendmentPatch, Approval, CheckId, CriterionId, DeviationClassification, DraftCriterionInput,
+    DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput, DraftTaskInput,
+    DraftVerificationInput, EvidenceId, FileChange, GitFlowConsent, GitReadiness, Plan,
+    PlanDraftSeed, PlanId, StandardSelection, TaskId, Timestamp, VerificationCheck,
 };
 use mino::git::{ActiveBindingStore, GitAdapter};
 use mino::project::initialize;
@@ -285,6 +285,71 @@ fn every_lifecycle_state_matches_its_agent_context_golden() {
         .expect("golden should be JSON");
         assert_eq!(actual, expected, "Agent context golden {name} changed");
     }
+}
+
+#[test]
+fn ready_plan_with_open_deviation_exposes_applied_amendment_supersession() {
+    let project = TestProject::new("ready-deviation");
+    let mut plan = configured_draft();
+    plan.finalize(timestamp(3)).expect("plan should finalize");
+    plan.record_approval(Approval::plan(
+        "user",
+        "chat:approval",
+        timestamp(4),
+        GitFlowConsent::Approved,
+    ))
+    .expect("plan should approve");
+    plan.start_task(&task_id(), timestamp(5))
+        .expect("task should start");
+    plan.record_deviation(
+        &task_id(),
+        DeviationClassification::Material,
+        "The approved summary must change".to_owned(),
+        "codex".to_owned(),
+        timestamp(6),
+    )
+    .expect("deviation should record");
+    let patch: AmendmentPatch = serde_json::from_value(serde_json::json!({
+        "operations": [{
+            "operation": "replace-summary",
+            "summary": "Exercise Agent guidance after material deviation amendment."
+        }]
+    }))
+    .expect("patch should parse");
+    plan.propose_amendment(
+        "Update the approved summary".to_owned(),
+        patch,
+        None,
+        format!("sha256:{}", "a".repeat(64)),
+        "codex".to_owned(),
+        timestamp(7),
+    )
+    .expect("amendment should propose");
+    plan.approve_amendment(
+        "C1",
+        "user".to_owned(),
+        "chat:amendment-approved".to_owned(),
+        timestamp(8),
+    )
+    .expect("amendment should approve");
+    plan.apply_amendment("C1", timestamp(9))
+        .expect("amendment should apply");
+    let context = build_agent_context(project.path(), Some(&plan)).expect("context should build");
+    assert!(
+        context
+            .allowed_actions
+            .contains(&"exec.deviation.list".to_owned())
+    );
+    assert!(
+        context
+            .allowed_actions
+            .contains(&"exec.deviation.supersede".to_owned())
+    );
+    assert!(
+        !context
+            .allowed_actions
+            .contains(&"exec.deviation.resolve".to_owned())
+    );
 }
 
 fn run_mino(arguments: &[String]) -> Output {

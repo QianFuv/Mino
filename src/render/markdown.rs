@@ -80,6 +80,7 @@ fn render_document(plan: &Value, state_hash: &str) -> String {
     render_git_readiness(&mut output, plan);
     render_task_order(&mut output, plan);
     render_tasks(&mut output, plan);
+    render_execution(&mut output, plan);
     render_global_verification(&mut output, plan);
     render_approvals(&mut output, plan);
     render_amendments(&mut output, plan);
@@ -399,6 +400,81 @@ fn render_tasks(output: &mut String, plan: &Value) {
     }
 }
 
+fn render_execution(output: &mut String, plan: &Value) {
+    let execution = &plan["extensions"]["execution"];
+    if execution.is_null() {
+        return;
+    }
+    output.push_str("\n## Execution Checkpoints\n\n");
+    let checkpoint_rows = array(&execution["checkpoints"])
+        .iter()
+        .map(|checkpoint| {
+            vec![
+                scalar(&checkpoint["sequence"]),
+                scalar(&checkpoint["task_id"]),
+                scalar(&checkpoint["kind"]),
+                scalar(&checkpoint["summary"]),
+                scalar(&checkpoint["actor"]),
+                scalar(&checkpoint["recorded_at"]),
+            ]
+        })
+        .collect::<Vec<_>>();
+    write_optional_table(
+        output,
+        &[
+            "Sequence",
+            "Task",
+            "Kind",
+            "Summary",
+            "Actor",
+            "Recorded At",
+        ],
+        checkpoint_rows,
+    );
+    output.push_str("\n## Execution Deviations\n\n");
+    let deviation_rows = array(&execution["deviations"])
+        .iter()
+        .map(|deviation| {
+            vec![
+                scalar(&deviation["id"]),
+                scalar(&deviation["task_id"]),
+                scalar(&deviation["classification"]),
+                scalar(&deviation["status"]),
+                scalar(&deviation["summary"]),
+                scalar(&deviation["actor"]),
+                scalar(&deviation["recorded_at"]),
+                scalar(&deviation["legacy_checkpoint_sequence"]),
+                scalar(&deviation["resolution"]),
+                scalar(&deviation["disposition_actor"]),
+                scalar(&deviation["disposition_reference"]),
+                scalar(&deviation["amendment_id"]),
+                joined(&deviation["evidence_refs"]),
+                scalar(&deviation["disposed_at"]),
+            ]
+        })
+        .collect::<Vec<_>>();
+    write_optional_table(
+        output,
+        &[
+            "ID",
+            "Task",
+            "Classification",
+            "Status",
+            "Summary",
+            "Actor",
+            "Recorded At",
+            "Legacy Checkpoint",
+            "Resolution",
+            "Disposition Actor",
+            "Disposition Reference",
+            "Amendment",
+            "Evidence",
+            "Disposed At",
+        ],
+        deviation_rows,
+    );
+}
+
 fn render_file_map(output: &mut String, file_map: &Value) {
     let rows = array(file_map)
         .iter()
@@ -677,6 +753,7 @@ fn render_final_outcome(output: &mut String, plan: &Value) {
 fn render_extensions(output: &mut String, plan: &Value) {
     output.push_str("\n## Extensions\n\n");
     let mut extensions = plan["extensions"].as_object().cloned().unwrap_or_default();
+    extensions.remove("execution");
     extensions.remove("standards_conflicts");
     if extensions.is_empty() {
         output.push_str("_None._\n");

@@ -139,6 +139,7 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
         &[
             "start",
             "checkpoint",
+            "deviation",
             "check",
             "schedule",
             "criterion",
@@ -151,6 +152,10 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
         ],
     ),
     (&["exec", "check", "--help"], &["run", "monitor", "help"]),
+    (
+        &["exec", "deviation", "--help"],
+        &["record", "list", "resolve", "reject", "supersede", "help"],
+    ),
     (&["exec", "schedule", "--help"], &["spec", "help"]),
     (&["exec", "criterion", "--help"], &["pass", "help"]),
     (
@@ -186,6 +191,11 @@ const LEAF_COMMANDS: &[&str] = &[
     "exec checkpoint",
     "exec complete",
     "exec criterion pass",
+    "exec deviation list",
+    "exec deviation record",
+    "exec deviation reject",
+    "exec deviation resolve",
+    "exec deviation supersede",
     "exec finish",
     "exec resume",
     "exec rework",
@@ -397,6 +407,7 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             .map(|action| action["id"].as_str().unwrap())
             .collect::<Vec<_>>(),
         [
+            "exec.deviation.reject",
             "git.branch.create",
             "git.commit.record-manual",
             "git.gate.skip",
@@ -425,6 +436,7 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
         "mino.validation/v1",
         "mino.plan-review/v1",
         "mino.check-run/v1",
+        "mino.deviation-list/v1",
         "mino.monitor/v1",
         "mino.scheduled-task-spec/v1",
         "mino.plan-diff/v1",

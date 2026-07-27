@@ -10,12 +10,12 @@ use super::execution::EXECUTION_EXTENSION_KEY;
 use super::standards::STANDARDS_CONFLICT_EXTENSION_KEY;
 use super::{
     Amendment, AmendmentClassification, AmendmentImpact, AmendmentOperation, AmendmentPatch,
-    AmendmentStatus, CheckId, CheckStatus, CheckpointKind, CommitStatus, CriterionId, DomainError,
-    DomainErrorKind, DraftContextInput, DraftCriterionInput, DraftDecisionInput,
-    DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,
-    DraftTaskInput, DraftTaskUpdateInput, DraftVerificationInput, EvidenceId, ExecutionState,
-    FileMapEntry, GitFlowConsent, Lineage, PlanArchive, PlanDraftSeed, PlanId, PlanStatus,
-    ProtocolVersion, ReviewClassification, ReviewItem, ReviewStatus, SchemaVersion,
+    AmendmentStatus, CheckId, CheckStatus, CheckpointKind, CommitStatus, CriterionId,
+    DeviationClassification, DomainError, DomainErrorKind, DraftContextInput, DraftCriterionInput,
+    DraftDecisionInput, DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput,
+    DraftScopeInput, DraftTaskInput, DraftTaskUpdateInput, DraftVerificationInput, EvidenceId,
+    ExecutionState, FileMapEntry, GitFlowConsent, Lineage, PlanArchive, PlanDraftSeed, PlanId,
+    PlanStatus, ProtocolVersion, ReviewClassification, ReviewItem, ReviewStatus, SchemaVersion,
     StandardConflict, StandardsConflictState, Task, TaskId, TaskStatus, Timestamp,
     VerificationCheck, WorkspaceFingerprint, WorkspaceProtocolState,
 };
@@ -1010,7 +1010,8 @@ impl Plan {
     ///
     /// Returns an invariant error when the execution extension is malformed.
     pub fn execution_state(&self) -> Result<ExecutionState, DomainError> {
-        self.extensions
+        let mut state = self
+            .extensions
             .get(EXECUTION_EXTENSION_KEY)
             .cloned()
             .map_or_else(
@@ -1023,7 +1024,9 @@ impl Plan {
                         )
                     })
                 },
-            )
+            )?;
+        state.materialize_legacy_deviations()?;
+        Ok(state)
     }
 
     /// Returns persisted plan and task workspace baselines.
@@ -1288,7 +1291,9 @@ impl Plan {
                     check.reset_for_rework();
                 }
                 candidate.invalidate_plan_approval();
-                candidate.extensions.remove(EXECUTION_EXTENSION_KEY);
+                let mut execution = candidate.execution_state()?;
+                execution.reset_for_material_amendment();
+                candidate.store_execution_state(&execution)?;
                 for item in &mut candidate.review_items {
                     item.supersede_for_amendment(change_id)?;
                 }
@@ -2633,16 +2638,118 @@ impl Plan {
             actor.into(),
             updated_at.clone(),
         )?;
-        let value = serde_json::to_value(execution).map_err(|error| {
-            DomainError::new(
-                DomainErrorKind::InvariantViolation,
-                format!("Failed to encode execution extension: {error}"),
-            )
-        })?;
-        self.extensions
-            .insert(EXECUTION_EXTENSION_KEY.to_owned(), value);
+        self.store_execution_state(&execution)?;
         self.record_revision(next_revision, updated_at);
         self.validate_invariants()
+    }
+
+    /// Records one identified deviation for the active task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan and task are In Progress and the
+    /// deviation classification, summary, and actor are complete.
+    pub fn record_deviation(
+        &mut self,
+        task_id: &TaskId,
+        classification: DeviationClassification,
+        summary: String,
+        actor: String,
+        updated_at: Timestamp,
+    ) -> Result<String, DomainError> {
+        self.require_active_deviation_task(task_id, "record a deviation")?;
+        let next_revision = self.next_revision()?;
+        let mut candidate = self.clone();
+        let mut execution = candidate.execution_state()?;
+        let deviation_id = execution.record_deviation(
+            task_id.clone(),
+            classification,
+            summary,
+            actor,
+            updated_at.clone(),
+        )?;
+        candidate.store_execution_state(&execution)?;
+        candidate.record_revision(next_revision, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(deviation_id)
+    }
+
+    /// Resolves one open deviation with immutable evidence references.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the deviation belongs to the active task and the
+    /// actor, resolution, and sorted unique evidence references are complete.
+    pub fn resolve_deviation(
+        &mut self,
+        deviation_id: &str,
+        actor: String,
+        resolution: String,
+        evidence_refs: Vec<EvidenceId>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.dispose_active_deviation(deviation_id, updated_at, move |execution, at| {
+            execution.resolve_deviation(deviation_id, actor, resolution, evidence_refs, at)
+        })
+    }
+
+    /// Rejects one open deviation through a protected decision reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the deviation belongs to the active task and the
+    /// actor, decision reference, and reason are complete.
+    pub fn reject_deviation(
+        &mut self,
+        deviation_id: &str,
+        actor: String,
+        decision_reference: String,
+        reason: String,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.dispose_active_deviation(deviation_id, updated_at, move |execution, at| {
+            execution.reject_deviation(deviation_id, actor, decision_reference, reason, at)
+        })
+    }
+
+    /// Supersedes one open deviation with an applied protected amendment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan is Ready or In Progress, the named
+    /// amendment is Applied, and the actor and reason are complete.
+    pub fn supersede_deviation(
+        &mut self,
+        deviation_id: &str,
+        actor: String,
+        amendment_id: String,
+        reason: String,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.ensure_no_pending_amendment("supersede a deviation")?;
+        if !matches!(self.status, PlanStatus::Ready | PlanStatus::InProgress)
+            || self
+                .amendment(&amendment_id)
+                .is_none_or(|amendment| amendment.status() != AmendmentStatus::Applied)
+        {
+            return Err(self.invalid_transition("supersede a deviation"));
+        }
+        let next_revision = self.next_revision()?;
+        let mut candidate = self.clone();
+        let mut execution = candidate.execution_state()?;
+        execution.supersede_deviation(
+            deviation_id,
+            actor,
+            amendment_id,
+            reason,
+            updated_at.clone(),
+        )?;
+        candidate.store_execution_state(&execution)?;
+        candidate.record_revision(next_revision, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
     }
 
     /// Replaces detected standards conflicts while preserving only current decisions.
@@ -3573,6 +3680,73 @@ impl Plan {
         })?;
         self.extensions
             .insert(WORKSPACE_EXTENSION_KEY.to_owned(), value);
+        Ok(())
+    }
+
+    fn store_execution_state(&mut self, state: &ExecutionState) -> Result<(), DomainError> {
+        if state.is_empty() {
+            self.extensions.remove(EXECUTION_EXTENSION_KEY);
+            return Ok(());
+        }
+        let value = serde_json::to_value(state).map_err(|error| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Failed to encode execution extension: {error}"),
+            )
+        })?;
+        self.extensions
+            .insert(EXECUTION_EXTENSION_KEY.to_owned(), value);
+        Ok(())
+    }
+
+    fn require_active_deviation_task(
+        &self,
+        task_id: &TaskId,
+        action: &'static str,
+    ) -> Result<(), DomainError> {
+        self.require_status(PlanStatus::InProgress, action)?;
+        if self
+            .task(task_id)
+            .is_some_and(|task| task.status() == TaskStatus::InProgress)
+        {
+            Ok(())
+        } else {
+            Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Task {task_id} is not the active In Progress task"),
+            ))
+        }
+    }
+
+    fn dispose_active_deviation<F>(
+        &mut self,
+        deviation_id: &str,
+        updated_at: Timestamp,
+        disposition: F,
+    ) -> Result<(), DomainError>
+    where
+        F: FnOnce(&mut ExecutionState, Timestamp) -> Result<(), DomainError>,
+    {
+        let execution = self.execution_state()?;
+        let task_id = execution
+            .deviation(deviation_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Deviation {deviation_id} does not exist"),
+                )
+            })?
+            .task_id()
+            .clone();
+        self.require_active_deviation_task(&task_id, "dispose a deviation")?;
+        let next_revision = self.next_revision()?;
+        let mut candidate = self.clone();
+        let mut execution = candidate.execution_state()?;
+        disposition(&mut execution, updated_at.clone())?;
+        candidate.store_execution_state(&execution)?;
+        candidate.record_revision(next_revision, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
         Ok(())
     }
 
