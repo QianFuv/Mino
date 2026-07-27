@@ -233,6 +233,35 @@ pub struct DraftTaskInput {
     pub commit_gate: Option<DraftCommitGateInput>,
 }
 
+/// Replacement fields for one existing Draft task.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftTaskUpdateInput {
+    /// Replacement task title when supplied.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Complete replacement dependency list when supplied.
+    #[serde(default)]
+    pub depends_on: Option<Vec<TaskId>>,
+    /// Complete replacement commit gate when supplied.
+    #[serde(default)]
+    pub commit_gate: Option<DraftCommitGateInput>,
+    /// Remove the existing optional commit gate.
+    #[serde(default)]
+    pub clear_commit_gate: bool,
+}
+
+impl DraftTaskUpdateInput {
+    /// Returns whether the update contains no replacement operation.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.depends_on.is_none()
+            && self.commit_gate.is_none()
+            && !self.clear_commit_gate
+    }
+}
+
 /// Strict batch input containing authored fields and no lifecycle state.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

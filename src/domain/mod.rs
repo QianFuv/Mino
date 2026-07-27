@@ -25,7 +25,7 @@ pub use amendment::{
 pub use authoring::{
     DraftCommitGateInput, DraftContextInput, DraftCriterionInput, DraftDecisionInput,
     DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,
-    DraftTaskInput, DraftVerificationInput, PlanDraftSeed,
+    DraftTaskInput, DraftTaskUpdateInput, DraftVerificationInput, PlanDraftSeed,
 };
 pub(crate) use check_run::CheckRunCompletion;
 pub use check_run::{

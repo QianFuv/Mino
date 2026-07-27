@@ -15,9 +15,10 @@ use crate::application::plan::{
 };
 use crate::commands::CommandResponse;
 use crate::domain::{
-    CheckId, DraftCommitGateInput, DraftContextInput, DraftCriterionInput, DraftDecisionInput,
-    DraftFileInput, DraftMetadataInput, DraftScopeInput, DraftTaskInput, DraftVerificationInput,
-    FileChange, PlanId, RequestId, TaskId, Timestamp,
+    CheckId, CriterionId, DraftCommitGateInput, DraftContextInput, DraftCriterionInput,
+    DraftDecisionInput, DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftScopeInput,
+    DraftTaskInput, DraftTaskUpdateInput, DraftVerificationInput, FileChange, PlanId, RequestId,
+    TaskId, Timestamp,
 };
 use crate::input::{read_utf8_file, read_utf8_stream, wizard, yaml};
 use crate::store::sha256_digest;
@@ -57,13 +58,15 @@ pub(crate) enum PlanAction {
     Context(ContextArguments),
     /// Set or append explicit plan scope boundaries.
     Scope(ScopeArguments),
-    /// Add decisions, assumptions, or questions while Draft.
+    /// Add, update, or remove decisions while Draft.
     Decision(DecisionArguments),
-    /// Add tasks and their authored details while Draft.
+    /// Update or remove authored edge cases while Draft.
+    EdgeCase(EdgeCaseArguments),
+    /// Add, update, remove, or order tasks and their authored details while Draft.
     Task(TaskArguments),
-    /// Add task-owned file responsibilities while Draft.
+    /// Add, update, or remove task-owned file responsibilities while Draft.
     File(FileArguments),
-    /// Add global verification commands while Draft.
+    /// Add, update, or remove global verification commands while Draft.
     Verification(VerificationArguments),
 }
 
@@ -264,6 +267,10 @@ pub(crate) struct DecisionArguments {
 enum DecisionAction {
     /// Append one decision, assumption, or question.
     Add(DecisionAddArguments),
+    /// Replace one decision, assumption, or question by one-based position.
+    Update(DecisionUpdateArguments),
+    /// Remove one decision, assumption, or question by one-based position.
+    Remove(PositionMutationArguments),
 }
 
 #[derive(Debug, Args)]
@@ -283,6 +290,60 @@ struct DecisionAddArguments {
 }
 
 #[derive(Debug, Args)]
+struct DecisionUpdateArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    position: usize,
+    #[arg(long)]
+    item: String,
+    #[arg(long = "type")]
+    kind: String,
+    #[arg(long = "decision")]
+    value: String,
+    #[arg(long)]
+    reason: String,
+    #[arg(long)]
+    status: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EdgeCaseArguments {
+    #[command(subcommand)]
+    action: EdgeCaseAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum EdgeCaseAction {
+    /// Replace one edge case by one-based position.
+    Update(EdgeCaseUpdateArguments),
+    /// Remove one edge case by one-based position.
+    Remove(PositionMutationArguments),
+}
+
+#[derive(Debug, Args)]
+struct EdgeCaseUpdateArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    position: usize,
+    #[arg(long = "case")]
+    case_: String,
+    #[arg(long)]
+    expected_behavior: String,
+    #[arg(long = "covered-by")]
+    covered_by: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct PositionMutationArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    position: usize,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct TaskArguments {
     #[command(subcommand)]
     action: TaskAction,
@@ -292,6 +353,12 @@ pub(crate) struct TaskArguments {
 enum TaskAction {
     /// Append one deterministically identified task.
     Add(TaskAddArguments),
+    /// Replace supplied fields on one existing task.
+    Update(TaskUpdateArguments),
+    /// Remove one unreferenced task.
+    Remove(TaskMutationArguments),
+    /// Move one task to a one-based implementation position.
+    Move(TaskMoveArguments),
     /// Author ordered task steps.
     Step(TaskStepArguments),
     /// Author task acceptance criteria.
@@ -317,6 +384,49 @@ struct TaskAddArguments {
 }
 
 #[derive(Debug, Args)]
+struct TaskUpdateArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    task: String,
+    #[arg(long)]
+    title: Option<String>,
+    #[arg(long = "depends-on", conflicts_with = "clear_dependencies")]
+    depends_on: Vec<String>,
+    #[arg(long, conflicts_with = "depends_on")]
+    clear_dependencies: bool,
+    #[arg(long, action = ArgAction::Set, conflicts_with = "clear_commit_gate")]
+    commit_required: Option<bool>,
+    #[arg(long, conflicts_with = "clear_commit_gate")]
+    planned_commit_message: Option<String>,
+    #[arg(long = "commit-scope", conflicts_with = "clear_commit_gate")]
+    commit_scope: Vec<String>,
+    #[arg(
+        long,
+        conflicts_with_all = ["commit_required", "planned_commit_message", "commit_scope"]
+    )]
+    clear_commit_gate: bool,
+}
+
+#[derive(Debug, Args)]
+struct TaskMutationArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    task: String,
+}
+
+#[derive(Debug, Args)]
+struct TaskMoveArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    task: String,
+    #[arg(long)]
+    position: usize,
+}
+
+#[derive(Debug, Args)]
 struct TaskStepArguments {
     #[command(subcommand)]
     action: TaskStepAction,
@@ -326,6 +436,10 @@ struct TaskStepArguments {
 enum TaskStepAction {
     /// Append one ordered implementation step.
     Add(TaskStepAddArguments),
+    /// Replace one ordered implementation step by one-based position.
+    Update(TaskStepUpdateArguments),
+    /// Remove one ordered implementation step by one-based position.
+    Remove(TaskPositionMutationArguments),
 }
 
 #[derive(Debug, Args)]
@@ -339,6 +453,28 @@ struct TaskStepAddArguments {
 }
 
 #[derive(Debug, Args)]
+struct TaskStepUpdateArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    task: String,
+    #[arg(long)]
+    position: usize,
+    #[arg(long)]
+    value: String,
+}
+
+#[derive(Debug, Args)]
+struct TaskPositionMutationArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    task: String,
+    #[arg(long)]
+    position: usize,
+}
+
+#[derive(Debug, Args)]
 struct TaskCriterionArguments {
     #[command(subcommand)]
     action: TaskCriterionAction,
@@ -348,6 +484,10 @@ struct TaskCriterionArguments {
 enum TaskCriterionAction {
     /// Append the next deterministic acceptance criterion.
     Add(TaskCriterionAddArguments),
+    /// Replace one acceptance criterion by stable identifier.
+    Update(TaskCriterionUpdateArguments),
+    /// Remove one acceptance criterion by stable identifier.
+    Remove(TaskCriterionMutationArguments),
 }
 
 #[derive(Debug, Args)]
@@ -361,6 +501,28 @@ struct TaskCriterionAddArguments {
 }
 
 #[derive(Debug, Args)]
+struct TaskCriterionUpdateArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    task: String,
+    #[arg(long)]
+    criterion: String,
+    #[arg(long)]
+    description: String,
+}
+
+#[derive(Debug, Args)]
+struct TaskCriterionMutationArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    task: String,
+    #[arg(long)]
+    criterion: String,
+}
+
+#[derive(Debug, Args)]
 struct TaskVerificationArguments {
     #[command(subcommand)]
     action: TaskVerificationAction,
@@ -370,6 +532,10 @@ struct TaskVerificationArguments {
 enum TaskVerificationAction {
     /// Append one task-scoped verification command.
     Add(TaskVerificationAddArguments),
+    /// Replace one task-scoped verification command by stable identifier.
+    Update(TaskVerificationUpdateArguments),
+    /// Remove one task-scoped verification command by stable identifier.
+    Remove(TaskVerificationMutationArguments),
 }
 
 #[derive(Debug, Args)]
@@ -383,6 +549,28 @@ struct TaskVerificationAddArguments {
 }
 
 #[derive(Debug, Args)]
+struct TaskVerificationUpdateArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    task: String,
+    #[arg(long)]
+    check: String,
+    #[command(flatten)]
+    definition: VerificationDefinitionArguments,
+}
+
+#[derive(Debug, Args)]
+struct TaskVerificationMutationArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    task: String,
+    #[arg(long)]
+    check: String,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct FileArguments {
     #[command(subcommand)]
     action: FileAction,
@@ -392,6 +580,10 @@ pub(crate) struct FileArguments {
 enum FileAction {
     /// Append one task-owned file responsibility.
     Add(FileAddArguments),
+    /// Replace one task-owned file responsibility by one-based position.
+    Update(FileUpdateArguments),
+    /// Remove one task-owned file responsibility by one-based position.
+    Remove(TaskPositionMutationArguments),
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -430,6 +622,22 @@ struct FileAddArguments {
 }
 
 #[derive(Debug, Args)]
+struct FileUpdateArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    task: String,
+    #[arg(long)]
+    position: usize,
+    #[arg(long)]
+    path: String,
+    #[arg(long, value_enum)]
+    change: FileChangeArgument,
+    #[arg(long)]
+    reason: String,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct VerificationArguments {
     #[command(subcommand)]
     action: VerificationAction,
@@ -439,6 +647,10 @@ pub(crate) struct VerificationArguments {
 enum VerificationAction {
     /// Append one global verification command.
     Add(VerificationAddArguments),
+    /// Replace one global verification command by stable identifier.
+    Update(VerificationUpdateArguments),
+    /// Remove one global verification command by stable identifier.
+    Remove(VerificationMutationArguments),
 }
 
 #[derive(Debug, Args)]
@@ -450,9 +662,33 @@ struct VerificationAddArguments {
 }
 
 #[derive(Debug, Args)]
+struct VerificationUpdateArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    check: String,
+    #[command(flatten)]
+    definition: VerificationDefinitionArguments,
+}
+
+#[derive(Debug, Args)]
+struct VerificationMutationArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    #[arg(long)]
+    check: String,
+}
+
+#[derive(Debug, Args)]
 struct VerificationInputArguments {
     #[arg(long)]
     id: String,
+    #[command(flatten)]
+    definition: VerificationDefinitionArguments,
+}
+
+#[derive(Debug, Args)]
+struct VerificationDefinitionArguments {
     #[arg(long = "command", required = true, allow_hyphen_values = true)]
     command: Vec<String>,
     #[arg(long, default_value = ".")]
@@ -497,13 +733,27 @@ pub(crate) fn execute(
         },
         PlanAction::Decision(arguments) => match arguments.action {
             DecisionAction::Add(arguments) => execute_decision(&service, arguments),
+            DecisionAction::Update(arguments) => execute_decision_update(&service, arguments),
+            DecisionAction::Remove(arguments) => execute_decision_remove(&service, arguments),
+        },
+        PlanAction::EdgeCase(arguments) => match arguments.action {
+            EdgeCaseAction::Update(arguments) => execute_edge_case_update(&service, arguments),
+            EdgeCaseAction::Remove(arguments) => execute_edge_case_remove(&service, arguments),
         },
         PlanAction::Task(arguments) => execute_task(&service, arguments.action),
         PlanAction::File(arguments) => match arguments.action {
             FileAction::Add(arguments) => execute_file(&service, arguments),
+            FileAction::Update(arguments) => execute_file_update(&service, arguments),
+            FileAction::Remove(arguments) => execute_file_remove(&service, arguments),
         },
         PlanAction::Verification(arguments) => match arguments.action {
             VerificationAction::Add(arguments) => execute_global_verification(&service, arguments),
+            VerificationAction::Update(arguments) => {
+                execute_global_verification_update(&service, arguments)
+            }
+            VerificationAction::Remove(arguments) => {
+                execute_global_verification_remove(&service, arguments)
+            }
         },
     }
 }
@@ -845,17 +1095,146 @@ fn execute_decision(
     )
 }
 
+fn execute_decision_update(
+    service: &PlanService,
+    arguments: DecisionUpdateArguments,
+) -> Result<CommandResponse, MinoError> {
+    let input = DraftDecisionInput {
+        item: arguments.item,
+        kind: arguments.kind,
+        value: arguments.value,
+        reason: arguments.reason,
+        status: arguments.status,
+    };
+    let command = mutation_command(
+        &["decision", "update"],
+        &arguments.mutation,
+        vec![
+            "--position".to_owned(),
+            arguments.position.to_string(),
+            "--item".to_owned(),
+            input.item.clone(),
+            "--type".to_owned(),
+            input.kind.clone(),
+            "--decision".to_owned(),
+            input.value.clone(),
+            "--reason".to_owned(),
+            input.reason.clone(),
+            "--status".to_owned(),
+            input.status.clone(),
+        ],
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::DecisionUpdate {
+            position: arguments.position,
+            decision: input,
+        },
+        command,
+        "Plan decision updated.",
+    )
+}
+
+fn execute_decision_remove(
+    service: &PlanService,
+    arguments: PositionMutationArguments,
+) -> Result<CommandResponse, MinoError> {
+    let command = mutation_command(
+        &["decision", "remove"],
+        &arguments.mutation,
+        vec!["--position".to_owned(), arguments.position.to_string()],
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::DecisionRemove {
+            position: arguments.position,
+        },
+        command,
+        "Plan decision removed.",
+    )
+}
+
+fn execute_edge_case_update(
+    service: &PlanService,
+    arguments: EdgeCaseUpdateArguments,
+) -> Result<CommandResponse, MinoError> {
+    let input = DraftEdgeCaseInput {
+        case_: arguments.case_,
+        expected_behavior: arguments.expected_behavior,
+        covered_by: arguments.covered_by,
+    };
+    let mut extra = vec![
+        "--position".to_owned(),
+        arguments.position.to_string(),
+        "--case".to_owned(),
+        input.case_.clone(),
+        "--expected-behavior".to_owned(),
+        input.expected_behavior.clone(),
+    ];
+    append_repeated(&mut extra, "--covered-by", &input.covered_by);
+    let command = mutation_command(&["edge-case", "update"], &arguments.mutation, extra);
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::EdgeCaseUpdate {
+            position: arguments.position,
+            edge_case: input,
+        },
+        command,
+        "Plan edge case updated.",
+    )
+}
+
+fn execute_edge_case_remove(
+    service: &PlanService,
+    arguments: PositionMutationArguments,
+) -> Result<CommandResponse, MinoError> {
+    let command = mutation_command(
+        &["edge-case", "remove"],
+        &arguments.mutation,
+        vec!["--position".to_owned(), arguments.position.to_string()],
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::EdgeCaseRemove {
+            position: arguments.position,
+        },
+        command,
+        "Plan edge case removed.",
+    )
+}
+
 fn execute_task(service: &PlanService, action: TaskAction) -> Result<CommandResponse, MinoError> {
     match action {
         TaskAction::Add(arguments) => execute_task_add(service, arguments),
+        TaskAction::Update(arguments) => execute_task_update(service, arguments),
+        TaskAction::Remove(arguments) => execute_task_remove(service, arguments),
+        TaskAction::Move(arguments) => execute_task_move(service, arguments),
         TaskAction::Step(arguments) => match arguments.action {
             TaskStepAction::Add(arguments) => execute_task_step(service, arguments),
+            TaskStepAction::Update(arguments) => execute_task_step_update(service, arguments),
+            TaskStepAction::Remove(arguments) => execute_task_step_remove(service, arguments),
         },
         TaskAction::Criterion(arguments) => match arguments.action {
             TaskCriterionAction::Add(arguments) => execute_task_criterion(service, arguments),
+            TaskCriterionAction::Update(arguments) => {
+                execute_task_criterion_update(service, arguments)
+            }
+            TaskCriterionAction::Remove(arguments) => {
+                execute_task_criterion_remove(service, arguments)
+            }
         },
         TaskAction::Verification(arguments) => match arguments.action {
             TaskVerificationAction::Add(arguments) => execute_task_verification(service, arguments),
+            TaskVerificationAction::Update(arguments) => {
+                execute_task_verification_update(service, arguments)
+            }
+            TaskVerificationAction::Remove(arguments) => {
+                execute_task_verification_remove(service, arguments)
+            }
         },
     }
 }
@@ -913,6 +1292,114 @@ fn execute_task_add(
     )
 }
 
+fn execute_task_update(
+    service: &PlanService,
+    arguments: TaskUpdateArguments,
+) -> Result<CommandResponse, MinoError> {
+    let task_id = parse_task_id(&arguments.task)?;
+    let depends_on = if arguments.clear_dependencies {
+        Some(Vec::new())
+    } else if arguments.depends_on.is_empty() {
+        None
+    } else {
+        Some(
+            arguments
+                .depends_on
+                .iter()
+                .map(|value| TaskId::parse(value).map_err(|error| domain_error(&error)))
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+    };
+    let has_commit_gate = arguments.commit_required.is_some()
+        || arguments.planned_commit_message.is_some()
+        || !arguments.commit_scope.is_empty();
+    let commit_gate = has_commit_gate.then(|| DraftCommitGateInput {
+        required: arguments.commit_required.unwrap_or(false),
+        planned_message: arguments.planned_commit_message.unwrap_or_default(),
+        scope: arguments.commit_scope,
+    });
+    let update = DraftTaskUpdateInput {
+        title: arguments.title,
+        depends_on,
+        commit_gate,
+        clear_commit_gate: arguments.clear_commit_gate,
+    };
+    let mut extra = vec!["--task".to_owned(), task_id.to_string()];
+    append_optional(&mut extra, "--title", update.title.as_deref());
+    if arguments.clear_dependencies {
+        extra.push("--clear-dependencies".to_owned());
+    } else if let Some(dependencies) = &update.depends_on {
+        for dependency in dependencies {
+            extra.extend(["--depends-on".to_owned(), dependency.to_string()]);
+        }
+    }
+    if update.clear_commit_gate {
+        extra.push("--clear-commit-gate".to_owned());
+    } else if let Some(gate) = &update.commit_gate {
+        extra.extend([
+            "--commit-required".to_owned(),
+            gate.required.to_string(),
+            "--planned-commit-message".to_owned(),
+            gate.planned_message.clone(),
+        ]);
+        append_repeated(&mut extra, "--commit-scope", &gate.scope);
+    }
+    let command = mutation_command(&["task", "update"], &arguments.mutation, extra);
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::TaskUpdate { task_id, update },
+        command,
+        "Plan task updated.",
+    )
+}
+
+fn execute_task_remove(
+    service: &PlanService,
+    arguments: TaskMutationArguments,
+) -> Result<CommandResponse, MinoError> {
+    let task_id = parse_task_id(&arguments.task)?;
+    let command = mutation_command(
+        &["task", "remove"],
+        &arguments.mutation,
+        vec!["--task".to_owned(), task_id.to_string()],
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::TaskRemove { task_id },
+        command,
+        "Plan task removed.",
+    )
+}
+
+fn execute_task_move(
+    service: &PlanService,
+    arguments: TaskMoveArguments,
+) -> Result<CommandResponse, MinoError> {
+    let task_id = parse_task_id(&arguments.task)?;
+    let command = mutation_command(
+        &["task", "move"],
+        &arguments.mutation,
+        vec![
+            "--task".to_owned(),
+            task_id.to_string(),
+            "--position".to_owned(),
+            arguments.position.to_string(),
+        ],
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::TaskMove {
+            task_id,
+            position: arguments.position,
+        },
+        command,
+        "Plan task moved.",
+    )
+}
+
 fn execute_task_step(
     service: &PlanService,
     arguments: TaskStepAddArguments,
@@ -937,6 +1424,63 @@ fn execute_task_step(
         },
         command,
         "Task step added.",
+    )
+}
+
+fn execute_task_step_update(
+    service: &PlanService,
+    arguments: TaskStepUpdateArguments,
+) -> Result<CommandResponse, MinoError> {
+    let task_id = parse_task_id(&arguments.task)?;
+    let command = mutation_command(
+        &["task", "step", "update"],
+        &arguments.mutation,
+        vec![
+            "--task".to_owned(),
+            task_id.to_string(),
+            "--position".to_owned(),
+            arguments.position.to_string(),
+            "--value".to_owned(),
+            arguments.value.clone(),
+        ],
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::TaskStepUpdate {
+            task_id,
+            position: arguments.position,
+            value: arguments.value,
+        },
+        command,
+        "Task step updated.",
+    )
+}
+
+fn execute_task_step_remove(
+    service: &PlanService,
+    arguments: TaskPositionMutationArguments,
+) -> Result<CommandResponse, MinoError> {
+    let task_id = parse_task_id(&arguments.task)?;
+    let command = mutation_command(
+        &["task", "step", "remove"],
+        &arguments.mutation,
+        vec![
+            "--task".to_owned(),
+            task_id.to_string(),
+            "--position".to_owned(),
+            arguments.position.to_string(),
+        ],
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::TaskStepRemove {
+            task_id,
+            position: arguments.position,
+        },
+        command,
+        "Task step removed.",
     )
 }
 
@@ -970,6 +1514,65 @@ fn execute_task_criterion(
     )
 }
 
+fn execute_task_criterion_update(
+    service: &PlanService,
+    arguments: TaskCriterionUpdateArguments,
+) -> Result<CommandResponse, MinoError> {
+    let task_id = parse_task_id(&arguments.task)?;
+    let criterion_id = parse_criterion_id(&arguments.criterion)?;
+    let command = mutation_command(
+        &["task", "criterion", "update"],
+        &arguments.mutation,
+        vec![
+            "--task".to_owned(),
+            task_id.to_string(),
+            "--criterion".to_owned(),
+            criterion_id.to_string(),
+            "--description".to_owned(),
+            arguments.description.clone(),
+        ],
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::TaskCriterionUpdate {
+            task_id,
+            criterion_id,
+            description: arguments.description,
+        },
+        command,
+        "Task acceptance criterion updated.",
+    )
+}
+
+fn execute_task_criterion_remove(
+    service: &PlanService,
+    arguments: TaskCriterionMutationArguments,
+) -> Result<CommandResponse, MinoError> {
+    let task_id = parse_task_id(&arguments.task)?;
+    let criterion_id = parse_criterion_id(&arguments.criterion)?;
+    let command = mutation_command(
+        &["task", "criterion", "remove"],
+        &arguments.mutation,
+        vec![
+            "--task".to_owned(),
+            task_id.to_string(),
+            "--criterion".to_owned(),
+            criterion_id.to_string(),
+        ],
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::TaskCriterionRemove {
+            task_id,
+            criterion_id,
+        },
+        command,
+        "Task acceptance criterion removed.",
+    )
+}
+
 fn execute_task_verification(
     service: &PlanService,
     arguments: TaskVerificationAddArguments,
@@ -988,6 +1591,63 @@ fn execute_task_verification(
         },
         command,
         "Task verification added.",
+    )
+}
+
+fn execute_task_verification_update(
+    service: &PlanService,
+    arguments: TaskVerificationUpdateArguments,
+) -> Result<CommandResponse, MinoError> {
+    let task_id = parse_task_id(&arguments.task)?;
+    let check_id = parse_check_id(&arguments.check)?;
+    let verification = verification_definition_input(check_id.clone(), &arguments.definition);
+    let mut extra = vec![
+        "--task".to_owned(),
+        task_id.to_string(),
+        "--check".to_owned(),
+        check_id.to_string(),
+    ];
+    extra.extend(verification_definition_argv(&verification));
+    let command = mutation_command(
+        &["task", "verification", "update"],
+        &arguments.mutation,
+        extra,
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::TaskVerificationUpdate {
+            task_id,
+            check_id,
+            verification,
+        },
+        command,
+        "Task verification updated.",
+    )
+}
+
+fn execute_task_verification_remove(
+    service: &PlanService,
+    arguments: TaskVerificationMutationArguments,
+) -> Result<CommandResponse, MinoError> {
+    let task_id = parse_task_id(&arguments.task)?;
+    let check_id = parse_check_id(&arguments.check)?;
+    let command = mutation_command(
+        &["task", "verification", "remove"],
+        &arguments.mutation,
+        vec![
+            "--task".to_owned(),
+            task_id.to_string(),
+            "--check".to_owned(),
+            check_id.to_string(),
+        ],
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::TaskVerificationRemove { task_id, check_id },
+        command,
+        "Task verification removed.",
     )
 }
 
@@ -1024,6 +1684,72 @@ fn execute_file(
     )
 }
 
+fn execute_file_update(
+    service: &PlanService,
+    arguments: FileUpdateArguments,
+) -> Result<CommandResponse, MinoError> {
+    let task_id = parse_task_id(&arguments.task)?;
+    let file = DraftFileInput {
+        path: arguments.path,
+        change: arguments.change.into(),
+        reason: arguments.reason,
+    };
+    let command = mutation_command(
+        &["file", "update"],
+        &arguments.mutation,
+        vec![
+            "--task".to_owned(),
+            task_id.to_string(),
+            "--position".to_owned(),
+            arguments.position.to_string(),
+            "--path".to_owned(),
+            file.path.clone(),
+            "--change".to_owned(),
+            file_change_name(file.change).to_owned(),
+            "--reason".to_owned(),
+            file.reason.clone(),
+        ],
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::FileUpdate {
+            task_id,
+            position: arguments.position,
+            file,
+        },
+        command,
+        "Task file responsibility updated.",
+    )
+}
+
+fn execute_file_remove(
+    service: &PlanService,
+    arguments: TaskPositionMutationArguments,
+) -> Result<CommandResponse, MinoError> {
+    let task_id = parse_task_id(&arguments.task)?;
+    let command = mutation_command(
+        &["file", "remove"],
+        &arguments.mutation,
+        vec![
+            "--task".to_owned(),
+            task_id.to_string(),
+            "--position".to_owned(),
+            arguments.position.to_string(),
+        ],
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::FileRemove {
+            task_id,
+            position: arguments.position,
+        },
+        command,
+        "Task file responsibility removed.",
+    )
+}
+
 fn execute_global_verification(
     service: &PlanService,
     arguments: VerificationAddArguments,
@@ -1040,6 +1766,46 @@ fn execute_global_verification(
         &DraftMutation::GlobalVerification(verification),
         command,
         "Global verification added.",
+    )
+}
+
+fn execute_global_verification_update(
+    service: &PlanService,
+    arguments: VerificationUpdateArguments,
+) -> Result<CommandResponse, MinoError> {
+    let check_id = parse_check_id(&arguments.check)?;
+    let verification = verification_definition_input(check_id.clone(), &arguments.definition);
+    let mut extra = vec!["--check".to_owned(), check_id.to_string()];
+    extra.extend(verification_definition_argv(&verification));
+    let command = mutation_command(&["verification", "update"], &arguments.mutation, extra);
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::GlobalVerificationUpdate {
+            check_id,
+            verification,
+        },
+        command,
+        "Global verification updated.",
+    )
+}
+
+fn execute_global_verification_remove(
+    service: &PlanService,
+    arguments: VerificationMutationArguments,
+) -> Result<CommandResponse, MinoError> {
+    let check_id = parse_check_id(&arguments.check)?;
+    let command = mutation_command(
+        &["verification", "remove"],
+        &arguments.mutation,
+        vec!["--check".to_owned(), check_id.to_string()],
+    );
+    execute_mutation(
+        service,
+        arguments.mutation,
+        &DraftMutation::GlobalVerificationRemove { check_id },
+        command,
+        "Global verification removed.",
     )
 }
 
@@ -1136,17 +1902,33 @@ fn scope_argv(input: &DraftScopeInput) -> Vec<String> {
 fn verification_input(
     arguments: &VerificationInputArguments,
 ) -> Result<DraftVerificationInput, MinoError> {
-    Ok(DraftVerificationInput {
-        id: CheckId::parse(&arguments.id).map_err(|error| domain_error(&error))?,
+    Ok(verification_definition_input(
+        parse_check_id(&arguments.id)?,
+        &arguments.definition,
+    ))
+}
+
+fn verification_definition_input(
+    check_id: CheckId,
+    arguments: &VerificationDefinitionArguments,
+) -> DraftVerificationInput {
+    DraftVerificationInput {
+        id: check_id,
         command: arguments.command.clone(),
         cwd: arguments.cwd.clone(),
         expected_exit_code: arguments.expected_exit_code,
         required: arguments.required,
-    })
+    }
 }
 
 fn verification_argv(input: &DraftVerificationInput) -> Vec<String> {
     let mut arguments = vec!["--id".to_owned(), input.id.to_string()];
+    arguments.extend(verification_definition_argv(input));
+    arguments
+}
+
+fn verification_definition_argv(input: &DraftVerificationInput) -> Vec<String> {
+    let mut arguments = Vec::new();
     append_repeated(&mut arguments, "--command", &input.command);
     arguments.extend([
         "--cwd".to_owned(),
@@ -1177,6 +1959,14 @@ fn parse_plan_id(value: &str) -> Result<PlanId, MinoError> {
 
 fn parse_task_id(value: &str) -> Result<TaskId, MinoError> {
     TaskId::parse(value).map_err(|error| domain_error(&error))
+}
+
+fn parse_criterion_id(value: &str) -> Result<CriterionId, MinoError> {
+    CriterionId::parse(value).map_err(|error| domain_error(&error))
+}
+
+fn parse_check_id(value: &str) -> Result<CheckId, MinoError> {
+    CheckId::parse(value).map_err(|error| domain_error(&error))
 }
 
 fn parse_request_id(value: &str) -> Result<RequestId, MinoError> {

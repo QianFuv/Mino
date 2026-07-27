@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CheckId, CheckStatus, CommitStatus, CriterionId, CriterionStatus, DomainError, DomainErrorKind,
-    DraftTaskInput, EvidenceId, TaskId, TaskStatus,
+    DraftFileInput, DraftTaskInput, DraftTaskUpdateInput, DraftVerificationInput, EvidenceId,
+    TaskId, TaskStatus,
 };
 
 /// The planned change kind for a file-map entry.
@@ -561,6 +562,23 @@ pub(crate) fn is_safe_repository_path(value: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+fn one_based_index(position: usize, length: usize, collection: &str) -> Result<usize, DomainError> {
+    let index = position.checked_sub(1).ok_or_else(|| {
+        DomainError::new(
+            DomainErrorKind::InvariantViolation,
+            format!("{collection} position must be one-based"),
+        )
+    })?;
+    if index < length {
+        Ok(index)
+    } else {
+        Err(DomainError::new(
+            DomainErrorKind::InvariantViolation,
+            format!("{collection} position {position} does not exist"),
+        ))
+    }
+}
+
 fn scope_covers(scope: &str, path: &str) -> bool {
     scope == path
         || scope.strip_suffix("/**").is_some_and(|prefix| {
@@ -771,6 +789,29 @@ impl Task {
         &self.acceptance_criteria
     }
 
+    /// Returns the next monotonic acceptance-criterion identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when the numeric identifier would overflow.
+    pub fn next_criterion_id(&self) -> Result<CriterionId, DomainError> {
+        let prefix = format!("{}-A", self.id);
+        let maximum = self
+            .acceptance_criteria
+            .iter()
+            .filter_map(|criterion| criterion.id.as_str().strip_prefix(&prefix))
+            .filter_map(|number| number.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        let number = maximum.checked_add(1).ok_or_else(|| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Acceptance criterion identifier overflowed",
+            )
+        })?;
+        CriterionId::parse(format!("{prefix}{number}"))
+    }
+
     /// Returns the verification checks.
     #[must_use]
     pub fn verification_checks(&self) -> &[VerificationCheck] {
@@ -926,6 +967,182 @@ impl Task {
         }
         self.commit_gate = Some(commit_gate);
         Ok(())
+    }
+
+    pub(crate) fn update_draft(&mut self, update: DraftTaskUpdateInput) -> Result<(), DomainError> {
+        if self.status != TaskStatus::Draft {
+            return Err(self.invalid_transition("update its definition"));
+        }
+        if update.is_empty() || update.clear_commit_gate && update.commit_gate.is_some() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Task update requires compatible replacement fields",
+            ));
+        }
+        if let Some(title) = update.title {
+            self.title = title;
+        }
+        if let Some(depends_on) = update.depends_on {
+            self.depends_on = depends_on;
+        }
+        if update.clear_commit_gate {
+            self.commit_gate = None;
+        } else if let Some(gate) = update.commit_gate {
+            self.commit_gate = Some(CommitGate::new(
+                gate.required,
+                gate.planned_message,
+                gate.scope,
+            ));
+        }
+        self.validate_invariants()
+    }
+
+    pub(crate) fn update_step(
+        &mut self,
+        position: usize,
+        value: String,
+    ) -> Result<(), DomainError> {
+        if self.status != TaskStatus::Draft || value.trim().is_empty() {
+            return Err(self.invalid_transition("update an implementation step"));
+        }
+        let index = one_based_index(position, self.steps.len(), "task step")?;
+        self.steps[index] = value;
+        Ok(())
+    }
+
+    pub(crate) fn remove_step(&mut self, position: usize) -> Result<(), DomainError> {
+        if self.status != TaskStatus::Draft {
+            return Err(self.invalid_transition("remove an implementation step"));
+        }
+        let index = one_based_index(position, self.steps.len(), "task step")?;
+        self.steps.remove(index);
+        Ok(())
+    }
+
+    pub(crate) fn update_criterion(
+        &mut self,
+        criterion_id: &CriterionId,
+        description: String,
+    ) -> Result<(), DomainError> {
+        if self.status != TaskStatus::Draft || description.trim().is_empty() {
+            return Err(self.invalid_transition("update an acceptance criterion"));
+        }
+        let criterion = self
+            .acceptance_criteria
+            .iter_mut()
+            .find(|criterion| &criterion.id == criterion_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no criterion {criterion_id}", self.id),
+                )
+            })?;
+        criterion.description = description;
+        Ok(())
+    }
+
+    pub(crate) fn remove_criterion(
+        &mut self,
+        criterion_id: &CriterionId,
+    ) -> Result<(), DomainError> {
+        if self.status != TaskStatus::Draft {
+            return Err(self.invalid_transition("remove an acceptance criterion"));
+        }
+        let index = self
+            .acceptance_criteria
+            .iter()
+            .position(|criterion| &criterion.id == criterion_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no criterion {criterion_id}", self.id),
+                )
+            })?;
+        self.acceptance_criteria.remove(index);
+        Ok(())
+    }
+
+    pub(crate) fn update_verification(
+        &mut self,
+        check_id: &CheckId,
+        verification: DraftVerificationInput,
+    ) -> Result<(), DomainError> {
+        if self.status != TaskStatus::Draft || &verification.id != check_id {
+            return Err(self.invalid_transition("update a verification check"));
+        }
+        self.verification_checks
+            .iter_mut()
+            .find(|check| &check.id == check_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no check {check_id}", self.id),
+                )
+            })?
+            .replace_definition(
+                verification.command,
+                verification.cwd,
+                verification.expected_exit_code,
+                verification.required,
+            )
+    }
+
+    pub(crate) fn remove_verification(&mut self, check_id: &CheckId) -> Result<(), DomainError> {
+        if self.status != TaskStatus::Draft {
+            return Err(self.invalid_transition("remove a verification check"));
+        }
+        let index = self
+            .verification_checks
+            .iter()
+            .position(|check| &check.id == check_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no check {check_id}", self.id),
+                )
+            })?;
+        self.verification_checks.remove(index);
+        Ok(())
+    }
+
+    pub(crate) fn update_file(
+        &mut self,
+        position: usize,
+        input: DraftFileInput,
+    ) -> Result<FileMapEntry, DomainError> {
+        if self.status != TaskStatus::Draft {
+            return Err(self.invalid_transition("update a file responsibility"));
+        }
+        let index = one_based_index(position, self.file_map.len(), "file responsibility")?;
+        if self
+            .file_map
+            .iter()
+            .enumerate()
+            .any(|(candidate, entry)| candidate != index && entry.path == input.path)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Task {} already owns file path {}", self.id, input.path),
+            ));
+        }
+        let replacement =
+            FileMapEntry::new(input.path, input.change, input.reason, self.id.clone());
+        if replacement.path.trim().is_empty() || replacement.reason.trim().is_empty() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Task {} received an incomplete file entry", self.id),
+            ));
+        }
+        self.file_map[index] = replacement.clone();
+        Ok(replacement)
+    }
+
+    pub(crate) fn remove_file(&mut self, position: usize) -> Result<FileMapEntry, DomainError> {
+        if self.status != TaskStatus::Draft {
+            return Err(self.invalid_transition("remove a file responsibility"));
+        }
+        let index = one_based_index(position, self.file_map.len(), "file responsibility")?;
+        Ok(self.file_map.remove(index))
     }
 
     pub(crate) fn mark_ready(&mut self) -> Result<(), DomainError> {

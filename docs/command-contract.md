@@ -55,12 +55,29 @@
 | `mino plan scope set` | 是 | 替换目标、交付物、in-scope 或 out-of-scope。 |
 | `mino plan scope add` | 是 | 向一个 scope 列表追加单项。 |
 | `mino plan decision add` | 是 | 追加 decision、assumption 或 question。 |
+| `mino plan decision update` | 是 | 按 revision 校验后的 1-based 位置完整替换 decision、assumption 或 question。 |
+| `mino plan decision remove` | 是 | 按 revision 校验后的 1-based 位置删除 decision、assumption 或 question。 |
+| `mino plan edge-case update` | 是 | 按 revision 校验后的 1-based 位置完整替换 edge case。 |
+| `mino plan edge-case remove` | 是 | 按 revision 校验后的 1-based 位置删除 edge case。 |
 | `mino plan task add` | 是 | 追加下一个确定 ID 的任务及可选 commit gate。 |
+| `mino plan task update` | 是 | 按稳定 Task ID 替换给定标题、依赖或 commit gate 字段。 |
+| `mino plan task remove` | 是 | 按稳定 Task ID 删除没有被其他任务依赖的任务。 |
+| `mino plan task move` | 是 | 在不破坏依赖顺序时，把任务移到给定 1-based 实现位置。 |
 | `mino plan task step add` | 是 | 向任务追加有序实现步骤。 |
+| `mino plan task step update` | 是 | 按任务内 1-based 位置替换实现步骤。 |
+| `mino plan task step remove` | 是 | 按任务内 1-based 位置删除实现步骤。 |
 | `mino plan task criterion add` | 是 | 追加下一个确定 ID 的验收条件。 |
+| `mino plan task criterion update` | 是 | 按稳定 Criterion ID 替换验收条件描述。 |
+| `mino plan task criterion remove` | 是 | 按稳定 Criterion ID 删除验收条件。 |
 | `mino plan task verification add` | 是 | 追加任务级计划检查。 |
+| `mino plan task verification update` | 是 | 按稳定 Check ID 替换任务级检查定义，不能更改 ID。 |
+| `mino plan task verification remove` | 是 | 按稳定 Check ID 删除任务级检查。 |
 | `mino plan file add` | 是 | 追加一项由任务负责的 File Map 记录。 |
+| `mino plan file update` | 是 | 按任务内 1-based 位置替换 File Map 责任并同步计划总表。 |
+| `mino plan file remove` | 是 | 按任务内 1-based 位置删除 File Map 责任并同步计划总表。 |
 | `mino plan verification add` | 是 | 追加全局计划检查。 |
+| `mino plan verification update` | 是 | 按稳定 Check ID 替换全局检查定义，不能更改 ID。 |
+| `mino plan verification remove` | 是 | 按稳定 Check ID 删除全局检查。 |
 | `mino plan apply` | 是 | 严格应用一份有界 YAML Draft；拒绝未知字段。 |
 | `mino plan next` | 否 | 返回缺失字段和规范修复动作。 |
 | `mino plan validate` | 否 | 固定顺序运行 schema、semantic、graph 和 policy 校验。 |
@@ -69,7 +86,7 @@
 | `mino plan review` | 否 | 返回绑定当前 revision 与状态哈希的审批摘要。 |
 | `mino plan approve` | 是，审批边界 | 记录显式计划批准，并记录 Approved 或 Disabled Git Flow consent。 |
 
-直接 authored 修改只允许发生在 Draft。Ready 或 In Progress 计划必须使用类型化 amendment；任意 JSON path、未知字段和 execution state 字段都会被拒绝。Ready 计划发生 authored 变化后，其旧批准不再有效。
+直接 authored 修改只允许发生在 Draft。没有持久化 ID 的列表使用 1-based 位置，并始终与 `--expect-revision` 一起校验；已有 Task、Criterion 或 Check ID 的实体使用稳定 ID。位置过期、目标缺失、依赖顺序被破坏或替换定义不完整时，状态、revision 和投影都保持不变。Ready 或 In Progress 计划必须使用类型化 amendment；任意 JSON path、未知字段和 execution state 字段都会被拒绝。Ready 计划发生 authored 变化后，其旧批准不再有效。
 
 批准记录是可审计声明，不是加密签名，也不授权计划之外的文件、网络、部署、消息或 Git 操作。
 

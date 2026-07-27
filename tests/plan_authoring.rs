@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mino::domain::{DraftPlanInput, Plan, PlanId, RequestId, Timestamp};
+use mino::domain::{DraftPlanInput, Plan, PlanId, RequestId, TaskId, Timestamp};
 use mino::git::{ActiveBindingStore, GitAdapter};
 use mino::input::{wizard, yaml};
 use mino::project::{ProjectLayout, initialize};
@@ -206,6 +206,44 @@ fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/drafts")
         .join(name)
+}
+
+fn run_plan_mutation(
+    project: &TestProject,
+    command: &[&str],
+    plan_id: &str,
+    revision: u64,
+    request_number: u64,
+    extra: &[&str],
+) -> Value {
+    let mut arguments = mutation_arguments(project, command, plan_id, revision, request_number);
+    arguments.extend(extra.iter().map(|value| (*value).to_owned()));
+    parse_success(&run_mino(&arguments))
+}
+
+fn create_complete_plan(
+    project: &TestProject,
+    name: &str,
+    create_request: u64,
+    apply_request: u64,
+) -> String {
+    let request_file = project.path().join(format!("{name}-request.md"));
+    fs::write(&request_file, "Edit every authored Draft collection.\n")
+        .expect("request should be written");
+    let created = parse_success(&run_mino(&create_arguments(
+        project,
+        name,
+        &request_file,
+        create_request,
+    )));
+    let plan_id = plan_id_from(&created);
+    let mut apply = mutation_arguments(project, &["plan", "apply"], &plan_id, 1, apply_request);
+    apply.extend([
+        "--file".to_owned(),
+        fixture_path("complete.yaml").to_string_lossy().into_owned(),
+    ]);
+    assert_eq!(parse_success(&run_mino(&apply))["revision"], 2);
+    plan_id
 }
 
 #[test]
@@ -428,6 +466,389 @@ fn granular_commands_require_revisions_and_return_assigned_identifiers() {
     let stale = run_mino(&step);
     assert_eq!(stale.status.code(), Some(3));
     assert_eq!(load_plan(&project, &plan_id).revision(), 9);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn draft_collection_commands_update_remove_and_replay_atomically() {
+    let project = TestProject::new("collection-edits");
+    let plan_id = create_complete_plan(&project, "Collection edits", 100, 101);
+
+    let decision_update =
+        mutation_arguments(&project, &["plan", "decision", "update"], &plan_id, 2, 102);
+    let mut decision_update = decision_update;
+    decision_update.extend(
+        [
+            "--position",
+            "1",
+            "--item",
+            "Replacement decision",
+            "--type",
+            "Assumption",
+            "--decision",
+            "Use stable selectors",
+            "--reason",
+            "Retries must target one item",
+            "--status",
+            "Accepted",
+        ]
+        .map(str::to_owned),
+    );
+    let updated = parse_success(&run_mino(&decision_update));
+    assert_eq!(updated["revision"], 3);
+    assert_eq!(
+        load_plan(&project, &plan_id).decisions()[0].item(),
+        "Replacement decision"
+    );
+    let replay = parse_success(&run_mino(&decision_update));
+    assert_eq!(replay["revision"], 3);
+    assert_eq!(replay["replayed"], true);
+
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "decision", "remove"],
+            &plan_id,
+            3,
+            103,
+            &["--position", "1"],
+        )["revision"],
+        4
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "edge-case", "update"],
+            &plan_id,
+            4,
+            104,
+            &[
+                "--position",
+                "1",
+                "--case",
+                "A stale selector is retried",
+                "--expected-behavior",
+                "Reject without changing the revision",
+                "--covered-by",
+                "T1-A1",
+            ],
+        )["revision"],
+        5
+    );
+    assert_eq!(
+        load_plan(&project, &plan_id).edge_cases()[0].case(),
+        "A stale selector is retried"
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "edge-case", "remove"],
+            &plan_id,
+            5,
+            105,
+            &["--position", "1"],
+        )["revision"],
+        6
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "task", "update"],
+            &plan_id,
+            6,
+            106,
+            &[
+                "--task",
+                "T1",
+                "--title",
+                "Implement editable authoring",
+                "--clear-commit-gate",
+            ],
+        )["revision"],
+        7
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "task", "step", "update"],
+            &plan_id,
+            7,
+            107,
+            &[
+                "--task",
+                "T1",
+                "--position",
+                "1",
+                "--value",
+                "Replace inputs"
+            ],
+        )["revision"],
+        8
+    );
+
+    let mut invalid_position = mutation_arguments(
+        &project,
+        &["plan", "task", "step", "update"],
+        &plan_id,
+        8,
+        108,
+    );
+    invalid_position
+        .extend(["--task", "T1", "--position", "0", "--value", "Invalid"].map(str::to_owned));
+    assert_eq!(run_mino(&invalid_position).status.code(), Some(2));
+    assert_eq!(load_plan(&project, &plan_id).revision(), 8);
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "task", "step", "remove"],
+            &plan_id,
+            8,
+            109,
+            &["--task", "T1", "--position", "1"],
+        )["revision"],
+        9
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "task", "criterion", "update"],
+            &plan_id,
+            9,
+            110,
+            &[
+                "--task",
+                "T1",
+                "--criterion",
+                "T1-A1",
+                "--description",
+                "Edited content persists",
+            ],
+        )["revision"],
+        10
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "task", "criterion", "remove"],
+            &plan_id,
+            10,
+            111,
+            &["--task", "T1", "--criterion", "T1-A1"],
+        )["revision"],
+        11
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "task", "verification", "update"],
+            &plan_id,
+            11,
+            112,
+            &[
+                "--task",
+                "T1",
+                "--check",
+                "TASK-TEST",
+                "--command",
+                "cargo",
+                "--command",
+                "check",
+                "--required",
+                "true",
+            ],
+        )["revision"],
+        12
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "task", "verification", "remove"],
+            &plan_id,
+            12,
+            113,
+            &["--task", "T1", "--check", "TASK-TEST"],
+        )["revision"],
+        13
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "file", "update"],
+            &plan_id,
+            13,
+            114,
+            &[
+                "--task",
+                "T1",
+                "--position",
+                "1",
+                "--path",
+                "src/domain/plan.rs",
+                "--change",
+                "modify",
+                "--reason",
+                "Own collection edits",
+            ],
+        )["revision"],
+        14
+    );
+    let file_updated = load_plan(&project, &plan_id);
+    assert_eq!(
+        file_updated.tasks()[0].file_map()[0].path(),
+        "src/domain/plan.rs"
+    );
+    assert_eq!(
+        file_updated.approach().file_map()[0].path(),
+        "src/domain/plan.rs"
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "file", "remove"],
+            &plan_id,
+            14,
+            115,
+            &["--task", "T1", "--position", "1"],
+        )["revision"],
+        15
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "verification", "update"],
+            &plan_id,
+            15,
+            116,
+            &[
+                "--check",
+                "GLOBAL-SMOKE",
+                "--command",
+                "cargo",
+                "--command",
+                "check",
+                "--required",
+                "true",
+            ],
+        )["revision"],
+        16
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "verification", "remove"],
+            &plan_id,
+            16,
+            117,
+            &["--check", "GLOBAL-SMOKE"],
+        )["revision"],
+        17
+    );
+
+    let plan = load_plan(&project, &plan_id);
+    let task = &plan.tasks()[0];
+    assert!(plan.decisions().is_empty());
+    assert!(plan.edge_cases().is_empty());
+    assert_eq!(task.title(), "Implement editable authoring");
+    assert_eq!(task.steps(), ["Persist one semantic revision"]);
+    assert!(task.acceptance_criteria().is_empty());
+    assert!(task.verification_checks().is_empty());
+    assert!(task.file_map().is_empty());
+    assert!(task.commit_gate().is_none());
+    assert!(plan.approach().file_map().is_empty());
+    assert!(
+        plan.global_verification()
+            .iter()
+            .all(|check| check.id().as_str() != "GLOBAL-SMOKE")
+    );
+}
+
+#[test]
+fn task_move_and_remove_reject_broken_dependencies_without_state_changes() {
+    let project = TestProject::new("task-order-edits");
+    let plan_id = create_complete_plan(&project, "Task order edits", 120, 121);
+    let second = run_plan_mutation(
+        &project,
+        &["plan", "task", "add"],
+        &plan_id,
+        2,
+        122,
+        &["--title", "Second task"],
+    );
+    assert_eq!(second["assigned_id"], "T2");
+    let third = run_plan_mutation(
+        &project,
+        &["plan", "task", "add"],
+        &plan_id,
+        3,
+        123,
+        &["--title", "Dependent task", "--depends-on", "T2"],
+    );
+    assert_eq!(third["assigned_id"], "T3");
+
+    let mut invalid_move =
+        mutation_arguments(&project, &["plan", "task", "move"], &plan_id, 4, 124);
+    invalid_move.extend(["--task", "T3", "--position", "2"].map(str::to_owned));
+    assert_eq!(run_mino(&invalid_move).status.code(), Some(2));
+    assert_eq!(
+        load_plan(&project, &plan_id)
+            .task_order()
+            .iter()
+            .map(TaskId::as_str)
+            .collect::<Vec<_>>(),
+        ["T1", "T2", "T3"]
+    );
+
+    let mut invalid_remove =
+        mutation_arguments(&project, &["plan", "task", "remove"], &plan_id, 4, 125);
+    invalid_remove.extend(["--task", "T2"].map(str::to_owned));
+    assert_eq!(run_mino(&invalid_remove).status.code(), Some(2));
+    assert_eq!(load_plan(&project, &plan_id).revision(), 4);
+
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "task", "update"],
+            &plan_id,
+            4,
+            126,
+            &["--task", "T3", "--clear-dependencies"],
+        )["revision"],
+        5
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "task", "move"],
+            &plan_id,
+            5,
+            127,
+            &["--task", "T3", "--position", "1"],
+        )["revision"],
+        6
+    );
+    assert_eq!(
+        run_plan_mutation(
+            &project,
+            &["plan", "task", "remove"],
+            &plan_id,
+            6,
+            128,
+            &["--task", "T2"],
+        )["revision"],
+        7
+    );
+    let plan = load_plan(&project, &plan_id);
+    assert_eq!(
+        plan.task_order()
+            .iter()
+            .map(TaskId::as_str)
+            .collect::<Vec<_>>(),
+        ["T3", "T1"]
+    );
+    assert!(
+        plan.task(&TaskId::parse("T2").expect("task ID should parse"))
+            .is_none()
+    );
 }
 
 fn author_summary_and_scope(project: &TestProject, plan_id: &str) {

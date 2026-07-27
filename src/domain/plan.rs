@@ -13,11 +13,11 @@ use super::{
     AmendmentStatus, CheckId, CheckStatus, CheckpointKind, CommitStatus, CriterionId, DomainError,
     DomainErrorKind, DraftContextInput, DraftCriterionInput, DraftDecisionInput,
     DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,
-    DraftTaskInput, DraftVerificationInput, EvidenceId, ExecutionState, FileMapEntry,
-    GitFlowConsent, Lineage, PlanArchive, PlanDraftSeed, PlanId, PlanStatus, ProtocolVersion,
-    ReviewClassification, ReviewItem, ReviewStatus, SchemaVersion, StandardConflict,
-    StandardsConflictState, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
-    WorkspaceFingerprint, WorkspaceProtocolState,
+    DraftTaskInput, DraftTaskUpdateInput, DraftVerificationInput, EvidenceId, ExecutionState,
+    FileMapEntry, GitFlowConsent, Lineage, PlanArchive, PlanDraftSeed, PlanId, PlanStatus,
+    ProtocolVersion, ReviewClassification, ReviewItem, ReviewStatus, SchemaVersion,
+    StandardConflict, StandardsConflictState, Task, TaskId, TaskStatus, Timestamp,
+    VerificationCheck, WorkspaceFingerprint, WorkspaceProtocolState,
 };
 
 /// Human and repository metadata associated with a plan.
@@ -1565,17 +1565,7 @@ impl Plan {
         let task_id = task_id.clone();
         self.author_draft(updated_at, move |candidate| {
             let task = candidate.task_mut(&task_id)?;
-            let number = task
-                .acceptance_criteria()
-                .len()
-                .checked_add(1)
-                .ok_or_else(|| {
-                    DomainError::new(
-                        DomainErrorKind::InvariantViolation,
-                        "Acceptance criterion count overflowed",
-                    )
-                })?;
-            let expected = CriterionId::parse(format!("{task_id}-A{number}"))?;
+            let expected = task.next_criterion_id()?;
             if criterion.id.as_ref().is_some_and(|id| id != &expected) {
                 return Err(DomainError::new(
                     DomainErrorKind::InvariantViolation,
@@ -1640,6 +1630,456 @@ impl Plan {
         self.author_draft(updated_at, move |candidate| {
             candidate.add_global_verification_unversioned(verification.into_check())
         })
+    }
+
+    /// Returns the next monotonic authored task identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when the numeric identifier would overflow.
+    pub fn next_task_id(&self) -> Result<TaskId, DomainError> {
+        let maximum = self
+            .tasks
+            .iter()
+            .filter_map(|task| task.id().as_str().strip_prefix('T'))
+            .filter_map(|number| number.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        let number = maximum.checked_add(1).ok_or_else(|| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Task identifier overflowed",
+            )
+        })?;
+        TaskId::parse(format!("T{number}"))
+    }
+
+    /// Replaces supplied fields on one existing Draft task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing tasks, empty updates, invalid dependencies,
+    /// malformed gates, or non-Draft state.
+    pub fn author_task_update(
+        &mut self,
+        task_id: &TaskId,
+        update: DraftTaskUpdateInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            candidate.task_mut(&task_id)?.update_draft(update)?;
+            candidate.validate_authored_dependency_order()
+        })
+    }
+
+    /// Removes one unreferenced Draft task and its file responsibilities.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task is missing, another task depends on it,
+    /// or the plan is not Draft.
+    pub fn author_task_remove(
+        &mut self,
+        task_id: &TaskId,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            if let Some(dependent) = candidate
+                .tasks
+                .iter()
+                .find(|task| task.dependencies().contains(&task_id))
+            {
+                return Err(DomainError::new(
+                    DomainErrorKind::UnmetDependencies,
+                    format!("Task {} depends on {task_id}", dependent.id()),
+                ));
+            }
+            let index = candidate
+                .tasks
+                .iter()
+                .position(|task| task.id() == &task_id)
+                .ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::TaskNotFound,
+                        format!("Task {task_id} does not exist"),
+                    )
+                })?;
+            candidate.tasks.remove(index);
+            candidate.task_order.retain(|current| current != &task_id);
+            candidate.rebuild_authored_file_map();
+            if candidate.extensions.contains_key(WORKSPACE_EXTENSION_KEY) {
+                let mut workspace = candidate.workspace_state()?;
+                workspace.remove_task_baseline(&task_id);
+                candidate.store_workspace_state(&workspace)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Moves one Draft task to a one-based implementation position.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing task, invalid position, dependency order
+    /// violation, or non-Draft state.
+    pub fn author_task_move(
+        &mut self,
+        task_id: &TaskId,
+        position: usize,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            let target = one_based_index(position, candidate.task_order.len(), "task")?;
+            let source = candidate
+                .task_order
+                .iter()
+                .position(|current| current == &task_id)
+                .ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::TaskNotFound,
+                        format!("Task {task_id} does not exist"),
+                    )
+                })?;
+            let moved = candidate.task_order.remove(source);
+            candidate.task_order.insert(target, moved);
+            candidate.validate_authored_dependency_order()?;
+            candidate.rebuild_authored_file_map();
+            Ok(())
+        })
+    }
+
+    /// Replaces one one-based Draft task step.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan, missing task or position, or empty step.
+    pub fn author_task_step_update(
+        &mut self,
+        task_id: &TaskId,
+        position: usize,
+        value: String,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            candidate.task_mut(&task_id)?.update_step(position, value)
+        })
+    }
+
+    /// Removes one one-based Draft task step.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan, missing task, or missing position.
+    pub fn author_task_step_remove(
+        &mut self,
+        task_id: &TaskId,
+        position: usize,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            candidate.task_mut(&task_id)?.remove_step(position)
+        })
+    }
+
+    /// Replaces one stable Draft criterion description.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan, missing task or criterion, or empty description.
+    pub fn author_task_criterion_update(
+        &mut self,
+        task_id: &TaskId,
+        criterion_id: &CriterionId,
+        description: String,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        let criterion_id = criterion_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            candidate
+                .task_mut(&task_id)?
+                .update_criterion(&criterion_id, description)
+        })
+    }
+
+    /// Removes one stable Draft criterion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan, missing task, or missing criterion.
+    pub fn author_task_criterion_remove(
+        &mut self,
+        task_id: &TaskId,
+        criterion_id: &CriterionId,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        let criterion_id = criterion_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            candidate
+                .task_mut(&task_id)?
+                .remove_criterion(&criterion_id)
+        })
+    }
+
+    /// Replaces one stable Draft task verification definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan, missing task or check, changed ID, or malformed check.
+    pub fn author_task_verification_update(
+        &mut self,
+        task_id: &TaskId,
+        check_id: &CheckId,
+        verification: DraftVerificationInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        let check_id = check_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            candidate
+                .task_mut(&task_id)?
+                .update_verification(&check_id, verification)
+        })
+    }
+
+    /// Removes one stable Draft task verification definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan, missing task, or missing check.
+    pub fn author_task_verification_remove(
+        &mut self,
+        task_id: &TaskId,
+        check_id: &CheckId,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        let check_id = check_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            candidate.task_mut(&task_id)?.remove_verification(&check_id)
+        })
+    }
+
+    /// Replaces one one-based Draft file responsibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan, missing task or position, or malformed file entry.
+    pub fn author_file_update(
+        &mut self,
+        task_id: &TaskId,
+        position: usize,
+        file: DraftFileInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            candidate.task_mut(&task_id)?.update_file(position, file)?;
+            candidate.rebuild_authored_file_map();
+            Ok(())
+        })
+    }
+
+    /// Removes one one-based Draft file responsibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan, missing task, or missing position.
+    pub fn author_file_remove(
+        &mut self,
+        task_id: &TaskId,
+        position: usize,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let task_id = task_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            candidate.task_mut(&task_id)?.remove_file(position)?;
+            candidate.rebuild_authored_file_map();
+            Ok(())
+        })
+    }
+
+    /// Replaces one stable global Draft verification definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan, missing check, changed ID, or malformed check.
+    pub fn author_global_verification_update(
+        &mut self,
+        check_id: &CheckId,
+        verification: DraftVerificationInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let check_id = check_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            if verification.id != check_id {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Global verification update cannot change its stable identifier",
+                ));
+            }
+            candidate
+                .global_verification
+                .iter_mut()
+                .find(|check| check.id() == &check_id)
+                .ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Global check {check_id} does not exist"),
+                    )
+                })?
+                .replace_definition(
+                    verification.command,
+                    verification.cwd,
+                    verification.expected_exit_code,
+                    verification.required,
+                )
+        })
+    }
+
+    /// Removes one stable global Draft verification definition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan or missing check.
+    pub fn author_global_verification_remove(
+        &mut self,
+        check_id: &CheckId,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let check_id = check_id.clone();
+        self.author_draft(updated_at, move |candidate| {
+            let index = candidate
+                .global_verification
+                .iter()
+                .position(|check| check.id() == &check_id)
+                .ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Global check {check_id} does not exist"),
+                    )
+                })?;
+            candidate.global_verification.remove(index);
+            Ok(())
+        })
+    }
+
+    /// Replaces one one-based Draft decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan, missing position, or malformed decision.
+    pub fn author_decision_update(
+        &mut self,
+        position: usize,
+        decision: DraftDecisionInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.author_draft(updated_at, move |candidate| {
+            let index = one_based_index(position, candidate.decisions.len(), "decision")?;
+            candidate.decisions[index] = decision_from_input(decision);
+            Ok(())
+        })
+    }
+
+    /// Removes one one-based Draft decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan or missing position.
+    pub fn author_decision_remove(
+        &mut self,
+        position: usize,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.author_draft(updated_at, move |candidate| {
+            let index = one_based_index(position, candidate.decisions.len(), "decision")?;
+            candidate.decisions.remove(index);
+            Ok(())
+        })
+    }
+
+    /// Replaces one one-based Draft edge case.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan, missing position, or malformed edge case.
+    pub fn author_edge_case_update(
+        &mut self,
+        position: usize,
+        edge_case: DraftEdgeCaseInput,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.author_draft(updated_at, move |candidate| {
+            let index = one_based_index(position, candidate.edge_cases.len(), "edge case")?;
+            candidate.edge_cases[index] = edge_case_from_input(edge_case);
+            Ok(())
+        })
+    }
+
+    /// Removes one one-based Draft edge case.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-Draft plan or missing position.
+    pub fn author_edge_case_remove(
+        &mut self,
+        position: usize,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.author_draft(updated_at, move |candidate| {
+            let index = one_based_index(position, candidate.edge_cases.len(), "edge case")?;
+            candidate.edge_cases.remove(index);
+            Ok(())
+        })
+    }
+
+    fn validate_authored_dependency_order(&self) -> Result<(), DomainError> {
+        let positions = self
+            .task_order
+            .iter()
+            .enumerate()
+            .map(|(position, task_id)| (task_id, position))
+            .collect::<BTreeMap<_, _>>();
+        for task in &self.tasks {
+            let task_position = positions.get(task.id()).ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} is missing from implementation order", task.id()),
+                )
+            })?;
+            for dependency in task.dependencies() {
+                let dependency_position = positions.get(dependency).ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::UnmetDependencies,
+                        format!("Task {} depends on missing task {dependency}", task.id()),
+                    )
+                })?;
+                if dependency_position >= task_position {
+                    return Err(DomainError::new(
+                        DomainErrorKind::UnmetDependencies,
+                        format!("Task {} dependency {dependency} must precede it", task.id()),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn rebuild_authored_file_map(&mut self) {
+        self.approach.file_map = self
+            .task_order
+            .iter()
+            .filter_map(|task_id| self.task(task_id))
+            .flat_map(Task::file_map)
+            .cloned()
+            .collect();
     }
 
     fn author_draft<T, F>(&mut self, updated_at: Timestamp, mutation: F) -> Result<T, DomainError>
@@ -1707,10 +2147,7 @@ impl Plan {
     }
 
     fn append_task_unversioned(&mut self, task: DraftTaskInput) -> Result<TaskId, DomainError> {
-        let number = self.tasks.len().checked_add(1).ok_or_else(|| {
-            DomainError::new(DomainErrorKind::InvariantViolation, "Task count overflowed")
-        })?;
-        let expected_id = TaskId::parse(format!("T{number}"))?;
+        let expected_id = self.next_task_id()?;
         let task = Task::from_draft(&expected_id, task)?;
         if self.tasks.iter().any(|current| current.id() == task.id()) {
             return Err(DomainError::new(
@@ -4179,6 +4616,23 @@ fn decision_from_input(input: DraftDecisionInput) -> Decision {
 
 fn edge_case_from_input(input: DraftEdgeCaseInput) -> EdgeCase {
     EdgeCase::new(input.case_, input.expected_behavior, input.covered_by)
+}
+
+fn one_based_index(position: usize, length: usize, collection: &str) -> Result<usize, DomainError> {
+    let index = position.checked_sub(1).ok_or_else(|| {
+        DomainError::new(
+            DomainErrorKind::InvariantViolation,
+            format!("{collection} position must be one-based"),
+        )
+    })?;
+    if index < length {
+        Ok(index)
+    } else {
+        Err(DomainError::new(
+            DomainErrorKind::InvariantViolation,
+            format!("{collection} position {position} does not exist"),
+        ))
+    }
 }
 
 fn non_empty_authored_value(value: impl Into<String>, field: &str) -> Result<String, DomainError> {

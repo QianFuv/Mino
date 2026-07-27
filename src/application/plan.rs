@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::domain::{
-    DraftContextInput, DraftCriterionInput, DraftDecisionInput, DraftEdgeCaseInput, DraftFileInput,
-    DraftMetadataInput, DraftPlanInput, DraftScopeInput, DraftTaskInput, DraftVerificationInput,
-    GitReadiness, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId, StandardSelection, TaskId,
-    Timestamp, VerificationCheck,
+    CheckId, CriterionId, DraftContextInput, DraftCriterionInput, DraftDecisionInput,
+    DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,
+    DraftTaskInput, DraftTaskUpdateInput, DraftVerificationInput, GitReadiness, Plan,
+    PlanDraftSeed, PlanId, PlanStatus, RequestId, StandardSelection, TaskId, Timestamp,
+    VerificationCheck,
 };
 use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitReadinessProbe};
 use crate::managed_fs::{
@@ -124,6 +125,125 @@ pub enum DraftMutation {
     },
     /// Append one global verification command.
     GlobalVerification(DraftVerificationInput),
+    /// Replace supplied fields on one existing task.
+    TaskUpdate {
+        /// Target task identifier.
+        task_id: TaskId,
+        /// Partial task replacement input.
+        update: DraftTaskUpdateInput,
+    },
+    /// Remove one unreferenced task.
+    TaskRemove {
+        /// Target task identifier.
+        task_id: TaskId,
+    },
+    /// Move one task to a one-based implementation position.
+    TaskMove {
+        /// Target task identifier.
+        task_id: TaskId,
+        /// Destination one-based implementation position.
+        position: usize,
+    },
+    /// Replace one one-based task step.
+    TaskStepUpdate {
+        /// Target task identifier.
+        task_id: TaskId,
+        /// One-based step position.
+        position: usize,
+        /// Replacement step text.
+        value: String,
+    },
+    /// Remove one one-based task step.
+    TaskStepRemove {
+        /// Target task identifier.
+        task_id: TaskId,
+        /// One-based step position.
+        position: usize,
+    },
+    /// Replace one stable task criterion.
+    TaskCriterionUpdate {
+        /// Target task identifier.
+        task_id: TaskId,
+        /// Stable criterion identifier.
+        criterion_id: CriterionId,
+        /// Replacement criterion description.
+        description: String,
+    },
+    /// Remove one stable task criterion.
+    TaskCriterionRemove {
+        /// Target task identifier.
+        task_id: TaskId,
+        /// Stable criterion identifier.
+        criterion_id: CriterionId,
+    },
+    /// Replace one stable task verification.
+    TaskVerificationUpdate {
+        /// Target task identifier.
+        task_id: TaskId,
+        /// Stable check identifier.
+        check_id: CheckId,
+        /// Replacement verification definition.
+        verification: DraftVerificationInput,
+    },
+    /// Remove one stable task verification.
+    TaskVerificationRemove {
+        /// Target task identifier.
+        task_id: TaskId,
+        /// Stable check identifier.
+        check_id: CheckId,
+    },
+    /// Replace one one-based task file responsibility.
+    FileUpdate {
+        /// Target task identifier.
+        task_id: TaskId,
+        /// One-based file responsibility position.
+        position: usize,
+        /// Replacement file responsibility.
+        file: DraftFileInput,
+    },
+    /// Remove one one-based task file responsibility.
+    FileRemove {
+        /// Target task identifier.
+        task_id: TaskId,
+        /// One-based file responsibility position.
+        position: usize,
+    },
+    /// Replace one stable global verification.
+    GlobalVerificationUpdate {
+        /// Stable check identifier.
+        check_id: CheckId,
+        /// Replacement verification definition.
+        verification: DraftVerificationInput,
+    },
+    /// Remove one stable global verification.
+    GlobalVerificationRemove {
+        /// Stable check identifier.
+        check_id: CheckId,
+    },
+    /// Replace one one-based decision.
+    DecisionUpdate {
+        /// One-based decision position.
+        position: usize,
+        /// Replacement decision.
+        decision: DraftDecisionInput,
+    },
+    /// Remove one one-based decision.
+    DecisionRemove {
+        /// One-based decision position.
+        position: usize,
+    },
+    /// Replace one one-based edge case.
+    EdgeCaseUpdate {
+        /// One-based edge-case position.
+        position: usize,
+        /// Replacement edge case.
+        edge_case: DraftEdgeCaseInput,
+    },
+    /// Remove one one-based edge case.
+    EdgeCaseRemove {
+        /// One-based edge-case position.
+        position: usize,
+    },
 }
 
 impl DraftMutation {
@@ -160,6 +280,74 @@ impl DraftMutation {
             Self::GlobalVerification(verification) => {
                 plan.author_global_verification(verification.clone(), updated_at)
             }
+            Self::TaskUpdate { task_id, update } => {
+                plan.author_task_update(task_id, update.clone(), updated_at)
+            }
+            Self::TaskRemove { task_id } => plan.author_task_remove(task_id, updated_at),
+            Self::TaskMove { task_id, position } => {
+                plan.author_task_move(task_id, *position, updated_at)
+            }
+            Self::TaskStepUpdate {
+                task_id,
+                position,
+                value,
+            } => plan.author_task_step_update(task_id, *position, value.clone(), updated_at),
+            Self::TaskStepRemove { task_id, position } => {
+                plan.author_task_step_remove(task_id, *position, updated_at)
+            }
+            Self::TaskCriterionUpdate {
+                task_id,
+                criterion_id,
+                description,
+            } => plan.author_task_criterion_update(
+                task_id,
+                criterion_id,
+                description.clone(),
+                updated_at,
+            ),
+            Self::TaskCriterionRemove {
+                task_id,
+                criterion_id,
+            } => plan.author_task_criterion_remove(task_id, criterion_id, updated_at),
+            Self::TaskVerificationUpdate {
+                task_id,
+                check_id,
+                verification,
+            } => plan.author_task_verification_update(
+                task_id,
+                check_id,
+                verification.clone(),
+                updated_at,
+            ),
+            Self::TaskVerificationRemove { task_id, check_id } => {
+                plan.author_task_verification_remove(task_id, check_id, updated_at)
+            }
+            Self::FileUpdate {
+                task_id,
+                position,
+                file,
+            } => plan.author_file_update(task_id, *position, file.clone(), updated_at),
+            Self::FileRemove { task_id, position } => {
+                plan.author_file_remove(task_id, *position, updated_at)
+            }
+            Self::GlobalVerificationUpdate {
+                check_id,
+                verification,
+            } => plan.author_global_verification_update(check_id, verification.clone(), updated_at),
+            Self::GlobalVerificationRemove { check_id } => {
+                plan.author_global_verification_remove(check_id, updated_at)
+            }
+            Self::DecisionUpdate { position, decision } => {
+                plan.author_decision_update(*position, decision.clone(), updated_at)
+            }
+            Self::DecisionRemove { position } => plan.author_decision_remove(*position, updated_at),
+            Self::EdgeCaseUpdate {
+                position,
+                edge_case,
+            } => plan.author_edge_case_update(*position, edge_case.clone(), updated_at),
+            Self::EdgeCaseRemove { position } => {
+                plan.author_edge_case_remove(*position, updated_at)
+            }
         }
     }
 
@@ -173,34 +361,58 @@ impl DraftMutation {
             | Self::AddDeliverable(_)
             | Self::AddInScope(_)
             | Self::AddOutOfScope(_) => vec!["scope".to_owned()],
-            Self::Decision(_) => vec!["decisions".to_owned()],
+            Self::Decision(_) | Self::DecisionUpdate { .. } | Self::DecisionRemove { .. } => {
+                vec!["decisions".to_owned()]
+            }
             Self::Approach(_) => vec!["approach.summary".to_owned()],
             Self::Interfaces(_) => vec!["interfaces".to_owned()],
-            Self::EdgeCase(_) => vec!["edge_cases".to_owned()],
+            Self::EdgeCase(_) | Self::EdgeCaseUpdate { .. } | Self::EdgeCaseRemove { .. } => {
+                vec!["edge_cases".to_owned()]
+            }
             Self::Task(_) => vec!["tasks".to_owned(), "task_order".to_owned()],
-            Self::TaskStep { task_id, .. } => vec![format!("tasks.{task_id}.steps")],
-            Self::TaskCriterion { task_id, .. } => {
+            Self::TaskStep { task_id, .. }
+            | Self::TaskStepUpdate { task_id, .. }
+            | Self::TaskStepRemove { task_id, .. } => vec![format!("tasks.{task_id}.steps")],
+            Self::TaskCriterion { task_id, .. }
+            | Self::TaskCriterionUpdate { task_id, .. }
+            | Self::TaskCriterionRemove { task_id, .. } => {
                 vec![format!("tasks.{task_id}.acceptance_criteria")]
             }
-            Self::TaskVerification { task_id, .. } => {
+            Self::TaskVerification { task_id, .. }
+            | Self::TaskVerificationUpdate { task_id, .. }
+            | Self::TaskVerificationRemove { task_id, .. } => {
                 vec![format!("tasks.{task_id}.verification_checks")]
             }
-            Self::File { task_id, .. } => vec![
+            Self::File { task_id, .. }
+            | Self::FileUpdate { task_id, .. }
+            | Self::FileRemove { task_id, .. } => vec![
                 "approach.file_map".to_owned(),
                 format!("tasks.{task_id}.file_map"),
             ],
-            Self::GlobalVerification(_) => vec!["verification_plan".to_owned()],
+            Self::GlobalVerification(_)
+            | Self::GlobalVerificationUpdate { .. }
+            | Self::GlobalVerificationRemove { .. } => vec!["verification_plan".to_owned()],
+            Self::TaskUpdate { task_id, .. } => vec![format!("tasks.{task_id}")],
+            Self::TaskRemove { task_id } => vec![
+                "tasks".to_owned(),
+                "task_order".to_owned(),
+                "approach.file_map".to_owned(),
+                format!("tasks.{task_id}"),
+            ],
+            Self::TaskMove { .. } => {
+                vec!["task_order".to_owned(), "approach.file_map".to_owned()]
+            }
         }
     }
 
     fn assigned_id(&self, prior: &Plan) -> Result<Option<String>, MinoError> {
         match self {
-            Self::Task(_) => {
-                let number = prior.tasks().len().checked_add(1).ok_or_else(|| {
-                    MinoError::new(ErrorCategory::PolicyViolation, "Task count overflowed")
-                })?;
-                Ok(Some(format!("T{number}")))
-            }
+            Self::Task(_) => Ok(Some(
+                prior
+                    .next_task_id()
+                    .map_err(|error| map_domain_error(&error))?
+                    .to_string(),
+            )),
             Self::TaskCriterion { task_id, .. } => {
                 let task = prior.task(task_id).ok_or_else(|| {
                     MinoError::new(
@@ -208,17 +420,11 @@ impl DraftMutation {
                         format!("Task {task_id} does not exist"),
                     )
                 })?;
-                let number = task
-                    .acceptance_criteria()
-                    .len()
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        MinoError::new(
-                            ErrorCategory::PolicyViolation,
-                            "Acceptance criterion count overflowed",
-                        )
-                    })?;
-                Ok(Some(format!("{task_id}-A{number}")))
+                Ok(Some(
+                    task.next_criterion_id()
+                        .map_err(|error| map_domain_error(&error))?
+                        .to_string(),
+                ))
             }
             _ => Ok(None),
         }
