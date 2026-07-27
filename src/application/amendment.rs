@@ -42,12 +42,12 @@ impl AmendmentService {
         patch: AmendmentPatch,
         requested_classification: Option<AmendmentClassification>,
     ) -> Result<PlanOperationReport, MinoError> {
-        let minimum = patch
-            .minimum_classification()
+        let stored = self.plans.load_stored(&request.plan_id)?;
+        let minimum = stored
+            .amendment_minimum_classification(&patch)
             .map_err(|error| map_domain_error(&error))?;
         let classification = requested_classification.unwrap_or(minimum);
         let changed_fields = proposal_changed_fields(classification);
-        let stored = self.plans.load_stored(&request.plan_id)?;
         if is_replay_position(&stored, request.expected_revision)? {
             return self.plans.replay_semantic(request, changed_fields);
         }

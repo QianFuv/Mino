@@ -1,6 +1,7 @@
 //! Typed standards-conflict snapshots and explicit resolution decisions.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,18 @@ use serde::{Deserialize, Serialize};
 use super::{DomainError, DomainErrorKind, Timestamp};
 
 pub(crate) const STANDARDS_CONFLICT_EXTENSION_KEY: &str = "standards_conflicts";
+
+pub(crate) fn required_language_package_for_path(path: &str) -> Option<&'static str> {
+    let extension = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "rs" => Some("rust"),
+        "py" | "pyi" => Some("python"),
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" => {
+            Some("typescript-javascript")
+        }
+        _ => None,
+    }
+}
 
 /// Deterministic precedence class for one standards rule candidate.
 #[derive(
@@ -485,4 +498,31 @@ fn is_sha256(value: &str) -> bool {
 
 fn invariant(message: impl Into<String>) -> DomainError {
     DomainError::new(DomainErrorKind::InvariantViolation, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::required_language_package_for_path;
+
+    #[test]
+    fn file_extensions_map_to_deterministic_language_packages() {
+        let cases = [
+            ("src/lib.rs", Some("rust")),
+            ("tests/**/*.PY", Some("python")),
+            ("types/schema.pyi", Some("python")),
+            ("src/view.ts", Some("typescript-javascript")),
+            ("src/view.tsx", Some("typescript-javascript")),
+            ("src/tool.js", Some("typescript-javascript")),
+            ("src/tool.jsx", Some("typescript-javascript")),
+            ("src/tool.mjs", Some("typescript-javascript")),
+            ("src/tool.cjs", Some("typescript-javascript")),
+            ("src/tool.mts", Some("typescript-javascript")),
+            ("src/tool.cts", Some("typescript-javascript")),
+            ("snapshots/output.snap", None),
+            ("assets/generated", None),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(required_language_package_for_path(path), expected);
+        }
+    }
 }

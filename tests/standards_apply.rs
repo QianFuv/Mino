@@ -6,18 +6,25 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use mino::application::agent::AgentService;
+use mino::application::amendment::AmendmentService;
 use mino::application::plan::{CreatePlanRequest, DraftMutation, PlanMutationRequest, PlanService};
 use mino::application::standards::StandardsPlanService;
 use mino::domain::{
-    CheckId, CheckStatus, DraftCriterionInput, DraftFileInput, DraftTaskInput,
-    DraftVerificationInput, FileChange, Plan, RequestId, TaskId, Timestamp,
+    AcceptanceCriterion, AmendmentClassification, AmendmentPatch, Approval, CheckId, CheckStatus,
+    CommitGate, CriterionId, DomainError, DraftCriterionInput, DraftFileInput, DraftTaskInput,
+    DraftVerificationInput, FileChange, FileMapEntry, GitFlowConsent, GitReadiness, Plan,
+    PlanDraftSeed, PlanId, PlanStatus, RequestId, StandardSelection, Task, TaskId, Timestamp,
+    VerificationCheck,
 };
 use mino::project::{Language, initialize, scan_root};
+use mino::render::{render_plan, write_projection};
 use mino::standards::{
     CommandSource, EmbeddedCatalog, ResolvedCheckStatus, ToolProbe, ToolProbeOutcome,
     apply_recommendation, recommend_for_paths, recommend_initial,
 };
-use serde_json::Value;
+use mino::store::{MutationRequest, PlanStore};
+use serde_json::{Value, json};
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -100,6 +107,269 @@ fn request_id(number: u64) -> RequestId {
 
 fn timestamp(minute: u8) -> Timestamp {
     Timestamp::parse(format!("2026-07-27T10:{minute:02}:00Z")).expect("timestamp should parse")
+}
+
+fn plan_request(
+    plan_id: &PlanId,
+    expected_revision: u64,
+    request_number: u64,
+    minute: u8,
+    command: &[&str],
+) -> PlanMutationRequest {
+    PlanMutationRequest {
+        plan_id: plan_id.clone(),
+        expected_revision,
+        request_id: request_id(request_number),
+        actor: "codex".to_owned(),
+        command: command.iter().map(|part| (*part).to_owned()).collect(),
+        updated_at: timestamp(minute),
+    }
+}
+
+fn commit_plan<F>(
+    store: &PlanStore,
+    plan_id: &PlanId,
+    expected_revision: u64,
+    request_number: u64,
+    changed_fields: &[&str],
+    mutation: F,
+) where
+    F: FnOnce(&mut Plan) -> Result<(), DomainError>,
+{
+    let request = MutationRequest::new(
+        expected_revision,
+        request_id(request_number),
+        "codex",
+        vec!["test".to_owned(), "prepare-language-amendment".to_owned()],
+        changed_fields
+            .iter()
+            .map(|field| (*field).to_owned())
+            .collect(),
+    )
+    .expect("mutation request should be valid");
+    store
+        .commit(plan_id, request, mutation)
+        .expect("plan mutation should persist");
+}
+
+fn embedded_standard(package_id: &str) -> StandardSelection {
+    StandardSelection::new(
+        package_id,
+        "1.0.0",
+        format!("sha256:{}", "1".repeat(64)),
+        "embedded",
+    )
+}
+
+fn language_plan_seed(plan_id: PlanId, projection_path: String) -> Plan {
+    Plan::from_draft_seed(
+        PlanDraftSeed {
+            id: plan_id,
+            name: "Reconcile an amended language".to_owned(),
+            trigger: "durable".to_owned(),
+            original_request: "Add a new-language fixture during execution.".to_owned(),
+            branch: None,
+            markdown_path: projection_path,
+            git_readiness: GitReadiness::detected(
+                "Missing",
+                "Not Applicable",
+                None,
+                None,
+                "Not Applicable",
+                false,
+            ),
+            standards: vec![embedded_standard("common"), embedded_standard("rust")],
+            verification_plan: vec![VerificationCheck::new(
+                CheckId::parse("CUSTOM-SMOKE").expect("check ID should parse"),
+                vec!["cargo".to_owned(), "test".to_owned()],
+                ".",
+                0,
+                false,
+            )],
+        },
+        timestamp(0),
+    )
+}
+
+fn configured_rust_task() -> Task {
+    let task_id = TaskId::parse("T1").expect("task ID should parse");
+    let mut task = Task::new(task_id.clone(), "Implement the Rust behavior", Vec::new());
+    task.add_step("Implement the approved behavior")
+        .expect("step should be added");
+    task.add_file_map_entry(FileMapEntry::new(
+        "src/lib.rs",
+        FileChange::Modify,
+        "Own the Rust implementation",
+        task_id,
+    ))
+    .expect("file map should be added");
+    task.add_acceptance_criterion(AcceptanceCriterion::new(
+        CriterionId::parse("T1-A1").expect("criterion ID should parse"),
+        "The Rust behavior remains observable",
+    ))
+    .expect("criterion should be added");
+    task.add_verification_check(VerificationCheck::new(
+        CheckId::parse("TASK-CUSTOM").expect("check ID should parse"),
+        vec!["cargo".to_owned(), "test".to_owned()],
+        ".",
+        0,
+        true,
+    ))
+    .expect("verification should be added");
+    task.set_commit_gate(CommitGate::new(
+        true,
+        "test(fixture): verify language reconciliation",
+        vec!["src/lib.rs".to_owned()],
+    ))
+    .expect("commit gate should be added");
+    task
+}
+
+fn persist_started_rust_plan(project: &TestProject) -> (PlanId, u64) {
+    let plan_id =
+        PlanId::parse("2026-07-27-language-amendment").expect("plan identifier should be valid");
+    let projection_path = format!("docs/plan/{plan_id}.md");
+    let plan = language_plan_seed(plan_id.clone(), projection_path.clone());
+    let store = PlanStore::new(project.path());
+    store
+        .create_plan(
+            &plan,
+            request_id(100),
+            "codex",
+            vec!["test".to_owned(), "create-language-plan".to_owned()],
+        )
+        .expect("plan should persist");
+    let task = configured_rust_task();
+    commit_plan(&store, &plan_id, 1, 101, &["tasks"], move |plan| {
+        plan.add_task(task, timestamp(1))
+    });
+    let task_id = TaskId::parse("T1").expect("task ID should parse");
+    commit_plan(
+        &store,
+        &plan_id,
+        2,
+        102,
+        &["tasks.T1.status"],
+        move |plan| plan.mark_task_ready(&task_id, timestamp(2)),
+    );
+    commit_plan(&store, &plan_id, 3, 103, &["status"], |plan| {
+        plan.finalize(timestamp(3))
+    });
+    commit_plan(&store, &plan_id, 4, 104, &["approvals"], |plan| {
+        plan.record_approval(Approval::plan(
+            "user",
+            "chat:language-plan-approved",
+            timestamp(4),
+            GitFlowConsent::Disabled,
+        ))
+    });
+    let task_id = TaskId::parse("T1").expect("task ID should parse");
+    commit_plan(
+        &store,
+        &plan_id,
+        5,
+        105,
+        &["status", "tasks.T1.status"],
+        move |plan| plan.start_task(&task_id, timestamp(5)),
+    );
+    let current = store.load_plan(&plan_id).expect("started plan should load");
+    write_projection(
+        &project.path().join(projection_path),
+        &render_plan(&current).expect("plan should render"),
+        None,
+    )
+    .expect("projection should be written");
+    (plan_id, current.revision())
+}
+
+fn apply_language_amendment(project: &TestProject, plan_id: &PlanId, started_revision: u64) -> u64 {
+    let patch: AmendmentPatch = serde_json::from_value(json!({
+        "operations": [{
+            "operation": "add-task-file",
+            "kind": "Test Fixture",
+            "task_id": "T1",
+            "path": "tests/fixtures/**/*.py",
+            "change": "Test",
+            "reason": "Exercise the approved behavior in Python"
+        }]
+    }))
+    .expect("amendment patch should parse");
+    let amendments =
+        AmendmentService::discover(project.path()).expect("amendment service should discover");
+    let proposed = amendments
+        .propose(
+            plan_request(
+                plan_id,
+                started_revision,
+                106,
+                6,
+                &["mino", "plan", "amend", "propose"],
+            ),
+            "Add the Python fixture".to_owned(),
+            patch,
+            None,
+        )
+        .expect("new language should produce a Material proposal");
+    assert_eq!(proposed.assigned_id.as_deref(), Some("C1"));
+    let plans = PlanService::discover(project.path()).expect("plan service should discover");
+    let blocked = plans
+        .load_verified(plan_id)
+        .expect("blocked plan should load");
+    assert_eq!(blocked.status(), PlanStatus::Blocked);
+    assert_eq!(
+        blocked
+            .amendment("C1")
+            .expect("amendment should exist")
+            .minimum_classification(),
+        AmendmentClassification::Material
+    );
+    let approved = amendments
+        .approve(
+            PlanMutationRequest {
+                actor: "user".to_owned(),
+                ..plan_request(
+                    plan_id,
+                    proposed.revision,
+                    107,
+                    7,
+                    &["mino", "plan", "amend", "approve"],
+                )
+            },
+            "C1".to_owned(),
+            "chat:approve-language-amendment".to_owned(),
+        )
+        .expect("Material amendment should be approved");
+    amendments
+        .apply(
+            plan_request(
+                plan_id,
+                approved.revision,
+                108,
+                8,
+                &["mino", "plan", "amend", "apply"],
+            ),
+            "C1".to_owned(),
+        )
+        .expect("Material amendment should apply")
+        .revision
+}
+
+fn assert_standards_reconciliation_action(project: &TestProject, plan_id: &PlanId) {
+    let context = AgentService::discover(project.path())
+        .expect("Agent service should discover")
+        .context()
+        .expect("Agent context should derive");
+    let reconcile = context
+        .next_actions
+        .iter()
+        .find(|action| action.id == "standards.apply")
+        .expect("Agent should route the missing package to standards apply");
+    assert!(
+        reconcile
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["--plan", plan_id.as_str()])
+    );
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -532,6 +802,69 @@ fn plan_scoped_apply_reconciles_file_map_languages_and_replays_without_probing()
         .expect("exact request should replay without a scan probe");
     assert!(replayed.operation.replayed);
     assert_eq!(replayed.operation.revision, 4);
+}
+
+#[test]
+fn material_file_language_amendment_reconciles_before_reapproval() {
+    let project = TestProject::new("amended-language-reconcile");
+    fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname='amended-language-reconcile'\nversion='0.1.0'\n",
+    )
+    .expect("manifest should be written");
+    fs::create_dir(project.path().join("src")).expect("source directory should be created");
+    fs::write(project.path().join("src/lib.rs"), "pub fn value() {}\n")
+        .expect("Rust source should be written");
+    initialize(project.path()).expect("project should initialize");
+    let (plan_id, started_revision) = persist_started_rust_plan(&project);
+    let applied_revision = apply_language_amendment(&project, &plan_id, started_revision);
+    let plans = PlanService::discover(project.path()).expect("plan service should discover");
+    let ready = plans
+        .load_verified(&plan_id)
+        .expect("amended plan should load");
+    assert_eq!(ready.status(), PlanStatus::Ready);
+    assert!(!ready.has_plan_approval());
+    assert!(
+        ready
+            .standards()
+            .iter()
+            .all(|standard| standard.package_id() != "python")
+    );
+    assert_standards_reconciliation_action(&project, &plan_id);
+
+    let standards =
+        StandardsPlanService::discover(project.path()).expect("standards service should discover");
+    standards
+        .reconcile_with_probe(
+            plan_request(
+                &plan_id,
+                applied_revision,
+                109,
+                9,
+                &["mino", "standards", "apply"],
+            ),
+            &FixedProbe::new(&["cargo", "cargo-sort", "cargo-miri", "uv"]),
+        )
+        .expect("amended File Map languages should reconcile");
+    let reconciled = plans
+        .load_verified(&plan_id)
+        .expect("reconciled plan should load");
+    assert_eq!(reconciled.status(), PlanStatus::Ready);
+    assert!(!reconciled.has_plan_approval());
+    assert_eq!(
+        reconciled
+            .standards()
+            .iter()
+            .map(StandardSelection::package_id)
+            .collect::<Vec<_>>(),
+        vec!["common", "python", "rust"]
+    );
+    assert!(
+        reconciled
+            .global_verification()
+            .iter()
+            .any(|check| check.id().as_str() == "PY-MYPY")
+    );
 }
 
 #[test]

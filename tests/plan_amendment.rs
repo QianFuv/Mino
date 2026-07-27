@@ -260,6 +260,14 @@ fn configured_task(id: &str, dependency: Option<&str>) -> Task {
 }
 
 fn approved_plan(label: &str, two_tasks: bool) -> Plan {
+    approved_plan_with_standards(label, two_tasks, Vec::new())
+}
+
+fn approved_plan_with_standards(
+    label: &str,
+    two_tasks: bool,
+    standards: Vec<StandardSelection>,
+) -> Plan {
     let mut plan = Plan::from_draft_seed(
         PlanDraftSeed {
             id: plan_id(label),
@@ -276,7 +284,7 @@ fn approved_plan(label: &str, two_tasks: bool) -> Plan {
                 "Clean",
                 true,
             ),
-            standards: Vec::<StandardSelection>::new(),
+            standards,
             verification_plan: vec![VerificationCheck::new(
                 check_id("GLOBAL-V1"),
                 vec!["cargo".to_owned(), "test".to_owned()],
@@ -307,6 +315,15 @@ fn approved_plan(label: &str, two_tasks: bool) -> Plan {
     ))
     .expect("plan should be approved");
     plan
+}
+
+fn embedded_standard(package_id: &str) -> StandardSelection {
+    StandardSelection::new(
+        package_id,
+        "1.0.0",
+        format!("sha256:{}", "1".repeat(64)),
+        "embedded",
+    )
 }
 
 fn start_and_satisfy_first_task(plan: &mut Plan) {
@@ -436,6 +453,111 @@ fn minor_file_and_note_allowlist_expands_only_the_task_local_contract() {
     assert_eq!(
         plan.git_readiness().git_flow_consent(),
         GitFlowConsent::Pending
+    );
+}
+
+#[test]
+fn add_task_file_for_missing_language_is_material_and_invalidates_approval() {
+    let mut uncovered = approved_plan_with_standards(
+        "uncovered-language",
+        false,
+        vec![embedded_standard("common"), embedded_standard("rust")],
+    );
+    let python_file = patch(&json!([{
+        "operation": "add-task-file",
+        "kind": "Test Fixture",
+        "task_id": "T1",
+        "path": "tests/fixtures/**/*.py",
+        "change": "Test",
+        "reason": "Exercise the approved behavior in a Python fixture"
+    }]));
+    let before = canonical_json_bytes(&uncovered).expect("plan should canonicalize");
+    assert!(
+        uncovered
+            .propose_amendment(
+                "Add the cross-language fixture".to_owned(),
+                python_file.clone(),
+                Some(AmendmentClassification::Minor),
+                state_hash(&uncovered),
+                "codex".to_owned(),
+                timestamp(8),
+            )
+            .is_err()
+    );
+    assert_eq!(
+        canonical_json_bytes(&uncovered).expect("plan should canonicalize"),
+        before
+    );
+
+    uncovered
+        .propose_amendment(
+            "Add the cross-language fixture".to_owned(),
+            python_file,
+            None,
+            state_hash(&uncovered),
+            "codex".to_owned(),
+            timestamp(9),
+        )
+        .expect("uncovered language should be classified as Material");
+    let amendment = uncovered.amendment("C1").expect("amendment should exist");
+    assert_eq!(
+        amendment.minimum_classification(),
+        AmendmentClassification::Material
+    );
+    assert_eq!(amendment.status(), AmendmentStatus::ApprovalRequired);
+    uncovered
+        .approve_amendment(
+            "C1",
+            "user".to_owned(),
+            "chat:approve-python-fixture".to_owned(),
+            timestamp(10),
+        )
+        .expect("Material amendment should be approved");
+    uncovered
+        .apply_amendment("C1", timestamp(11))
+        .expect("Material amendment should apply");
+    assert_eq!(uncovered.status(), PlanStatus::Ready);
+    assert!(!uncovered.has_plan_approval());
+    assert!(
+        uncovered
+            .task(&task_id("T1"))
+            .expect("task should exist")
+            .file_map()
+            .iter()
+            .any(|entry| entry.path() == "tests/fixtures/**/*.py")
+    );
+}
+
+#[test]
+fn add_task_file_for_selected_language_remains_minor() {
+    let mut covered = approved_plan_with_standards(
+        "covered-language",
+        false,
+        vec![embedded_standard("common"), embedded_standard("rust")],
+    );
+    covered
+        .propose_amendment(
+            "Add another Rust support file".to_owned(),
+            patch(&json!([{
+                "operation": "add-task-file",
+                "kind": "Support File",
+                "task_id": "T1",
+                "path": "src/support.rs",
+                "change": "Create",
+                "reason": "Support the already covered Rust implementation"
+            }])),
+            Some(AmendmentClassification::Minor),
+            state_hash(&covered),
+            "codex".to_owned(),
+            timestamp(8),
+        )
+        .expect("covered language should remain Minor");
+    assert_eq!(
+        covered
+            .amendment("C1")
+            .expect("amendment should exist")
+            .minimum_classification(),
+        AmendmentClassification::Minor
     );
 }
 

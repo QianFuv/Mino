@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::WORKSPACE_EXTENSION_KEY;
 use super::execution::EXECUTION_EXTENSION_KEY;
 use super::review::review_number;
-use super::standards::STANDARDS_CONFLICT_EXTENSION_KEY;
+use super::standards::{STANDARDS_CONFLICT_EXTENSION_KEY, required_language_package_for_path};
 use super::{
     AcceptanceCriterion, Amendment, AmendmentClassification, AmendmentImpact, AmendmentOperation,
     AmendmentPatch, AmendmentStatus, CheckId, CheckStatus, CheckpointKind, CommitGate,
@@ -1534,6 +1534,14 @@ impl Plan {
         Ok(format!("C{number}"))
     }
 
+    pub(crate) fn amendment_minimum_classification(
+        &self,
+        patch: &AmendmentPatch,
+    ) -> Result<AmendmentClassification, DomainError> {
+        let operation_minimum = patch.minimum_classification()?;
+        self.contextual_amendment_minimum(patch.operations(), operation_minimum)
+    }
+
     /// Proposes one typed protected change against the exact current revision.
     ///
     /// # Errors
@@ -1579,9 +1587,7 @@ impl Plan {
                 "Material review feedback requires an explicit accept-change disposition",
             ));
         }
-        let operation_minimum = patch.minimum_classification()?;
-        let minimum_classification =
-            self.contextual_amendment_minimum(patch.operations(), operation_minimum)?;
+        let minimum_classification = self.amendment_minimum_classification(&patch)?;
         let classification = requested_classification.unwrap_or(minimum_classification);
         if classification < minimum_classification
             || (is_material_review && classification != AmendmentClassification::Material)
@@ -5397,6 +5403,15 @@ impl Plan {
         mut minimum: AmendmentClassification,
     ) -> Result<AmendmentClassification, DomainError> {
         for operation in operations {
+            if let AmendmentOperation::AddTaskFile { path, .. } = operation
+                && let Some(package_id) = required_language_package_for_path(path)
+                && !self
+                    .standards
+                    .iter()
+                    .any(|standard| standard.package_id() == package_id)
+            {
+                minimum = AmendmentClassification::Material;
+            }
             if let AmendmentOperation::ReplaceTaskVerification {
                 task_id,
                 check_id,
