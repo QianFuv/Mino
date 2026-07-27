@@ -532,6 +532,7 @@ fn agent_cli_is_direct_strict_and_uses_the_only_active_plan() {
     let next = parse_success(&run_mino(&agent_arguments(&project, "next")));
     assert_eq!(next["kind"], "mino.agent-next/v1");
     assert_eq!(next["active_plan"], context["active_plan"]);
+    assert_eq!(next["plan_selection"], context["plan_selection"]);
     assert_eq!(next["next_actions"], context["next_actions"]);
     let capabilities = parse_success(&run_mino(&agent_arguments(&project, "capabilities")));
     assert_eq!(capabilities["kind"], "mino.agent-capabilities/v1");

@@ -48,6 +48,10 @@ pub(crate) enum PlanAction {
     Fork(variant::ForkArguments),
     /// Compare authored values across current or retained revisions.
     Diff(variant::DiffArguments),
+    /// List the selected project plan and every live alternative.
+    Alternatives,
+    /// Explicitly choose one live project plan alternative.
+    Select(variant::SelectArguments),
     /// Record approval-bound deactivation without deleting plan history.
     Archive(variant::ArchiveArguments),
     /// Replace human plan metadata while Draft.
@@ -772,6 +776,8 @@ pub(crate) fn execute(
         PlanAction::Amend(arguments) => amend::execute(start, arguments),
         PlanAction::Fork(arguments) => variant::execute_fork(start, &service, arguments),
         PlanAction::Diff(arguments) => variant::execute_diff(start, &arguments),
+        PlanAction::Alternatives => variant::execute_alternatives(&service),
+        PlanAction::Select(arguments) => variant::execute_select(&service, arguments),
         PlanAction::Archive(arguments) => variant::execute_archive(start, arguments),
         PlanAction::Metadata(arguments) => match arguments.action {
             MetadataAction::Set(arguments) => execute_metadata(&service, arguments),

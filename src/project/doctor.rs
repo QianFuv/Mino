@@ -9,9 +9,11 @@ use crate::managed_fs::{
     ManagedDirEntry, ManagedEntryKind, ManagedFsErrorKind, ManagedPath, ProjectFs,
 };
 use crate::render::{ProjectionStatus, check_managed_projection, render_plan};
+use crate::store::PlanStore;
 use crate::{ErrorCategory, MinoError};
 use serde::Serialize;
 
+use super::ProjectPlanSelectionStore;
 use super::config::{
     PROTOCOL_LOCK_VERSION, ProjectConfig, ProjectLayout, ProtocolLock, STANDARDS_LOCK_VERSION,
     StandardsLock, parse_managed_toml,
@@ -118,6 +120,7 @@ pub fn diagnose(layout: &ProjectLayout) -> Result<DoctorReport, MinoError> {
             &mut findings,
         );
         inspect_active_binding(layout, &filesystem, &mut findings);
+        inspect_plan_selection(layout, &filesystem, &mut findings);
     }
     inspect_integrations(layout, &mut findings)?;
     findings.sort_by(|left, right| {
@@ -129,6 +132,58 @@ pub fn diagnose(layout: &ProjectLayout) -> Result<DoctorReport, MinoError> {
         root: layout.root().to_path_buf(),
         findings,
     })
+}
+
+fn inspect_plan_selection(
+    layout: &ProjectLayout,
+    filesystem: &ProjectFs,
+    findings: &mut Vec<DoctorFinding>,
+) {
+    let path = layout.plan_selection();
+    let managed_path = ProjectLayout::plan_selection_managed();
+    if !inspect_optional_file(filesystem, &managed_path, findings) {
+        return;
+    }
+    let selection = match ProjectPlanSelectionStore::new(layout.root()).inspect() {
+        Ok(Some(selection)) => selection,
+        Ok(None) => return,
+        Err(error) => {
+            findings.push(DoctorFinding::new(
+                "plan_selection_corrupt",
+                FindingSeverity::Error,
+                error.to_string(),
+                Some(path),
+            ));
+            return;
+        }
+    };
+    if selection.selected_plan.is_none() && !selection.alternatives.is_empty() {
+        findings.push(DoctorFinding::new(
+            "plan_selection_required",
+            FindingSeverity::Warning,
+            "Live plan alternatives require an explicit selected plan",
+            Some(path.clone()),
+        ));
+    }
+    let store = PlanStore::new(layout.root());
+    for plan_id in selection.candidates() {
+        match store.load_plan(plan_id) {
+            Ok(plan) if plan.status() != crate::domain::PlanStatus::Done && !plan.is_archived() => {
+            }
+            Ok(_) => findings.push(DoctorFinding::new(
+                "plan_selection_inactive",
+                FindingSeverity::Error,
+                format!("Project selection references inactive plan {plan_id}"),
+                Some(path.clone()),
+            )),
+            Err(error) => findings.push(DoctorFinding::new(
+                "plan_selection_plan_missing",
+                FindingSeverity::Error,
+                format!("Project selection references unavailable plan {plan_id}: {error}"),
+                Some(path.clone()),
+            )),
+        }
+    }
 }
 
 fn inspect_required_directory(

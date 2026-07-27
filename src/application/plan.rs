@@ -11,11 +11,14 @@ use crate::domain::{
     PlanDraftSeed, PlanId, PlanStatus, ProjectScanSummary, RequestId, StandardSelection, TaskId,
     Timestamp, VerificationCheck,
 };
-use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitReadinessProbe};
+use crate::git::{GitAdapter, GitReadinessProbe};
 use crate::managed_fs::{
     ManagedEntryKind, ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs,
 };
-use crate::project;
+use crate::project::{
+    self, PlanSelectionRequest, PlanSelectionWriteReport, ProjectPlanSelection,
+    ProjectPlanSelectionStore,
+};
 use crate::render::{
     ProjectionStatus, RenderError, RenderErrorKind, RenderedPlan, check_managed_projection,
     render_plan, write_managed_projection,
@@ -474,6 +477,7 @@ pub struct PlanService {
     root: PathBuf,
     filesystem: ProjectFs,
     store: PlanStore,
+    selection: ProjectPlanSelectionStore,
 }
 
 impl PlanService {
@@ -489,6 +493,7 @@ impl PlanService {
             root: root.path().to_path_buf(),
             filesystem,
             store: PlanStore::new(root.path()),
+            selection: ProjectPlanSelectionStore::new(root.path()),
         })
     }
 
@@ -513,31 +518,34 @@ impl PlanService {
         if preflight_projection.exists() && !state_path.exists() {
             return Err(plan_collision_error(&plan_id));
         }
-        if !state_path.exists()
-            && let Some(active) = self.active_plan()?
-        {
-            return Err(MinoError::new(
-                ErrorCategory::PolicyViolation,
-                format!(
-                    "Project already has active plan {} at revision {}",
-                    active.id(),
-                    active.revision()
-                ),
-            )
-            .with_remediation(
-                vec!["active_plan".to_owned()],
-                vec![NextAction {
-                    id: "agent.context".to_owned(),
-                    argv: vec![
-                        "mino".to_owned(),
-                        "agent".to_owned(),
-                        "context".to_owned(),
-                        "--format".to_owned(),
-                        "json".to_owned(),
-                        "--no-input".to_owned(),
-                    ],
-                }],
-            ));
+        if !state_path.exists() {
+            let selection = self.plan_selection()?;
+            if !selection.is_empty() {
+                let candidates = selection
+                    .candidates()
+                    .into_iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(MinoError::new(
+                    ErrorCategory::PolicyViolation,
+                    format!("Project already has active plan candidates: {candidates}"),
+                )
+                .with_remediation(
+                    vec!["active_plan".to_owned()],
+                    vec![NextAction {
+                        id: "agent.context".to_owned(),
+                        argv: vec![
+                            "mino".to_owned(),
+                            "agent".to_owned(),
+                            "context".to_owned(),
+                            "--format".to_owned(),
+                            "json".to_owned(),
+                            "--no-input".to_owned(),
+                        ],
+                    }],
+                ));
+            }
         }
         let proposed = if state_path.exists() {
             self.store
@@ -569,6 +577,8 @@ impl PlanService {
         let managed_projection = projection_managed_path(&plan)?;
         write_managed_projection(&self.filesystem, &managed_projection, &rendered, None)
             .map_err(|error| map_render_error(&error))?;
+        let live_plan_ids = self.live_plan_ids()?;
+        self.selection.register_created(&plan_id, &live_plan_ids)?;
         Ok(operation_report(
             &plan,
             &rendered,
@@ -850,54 +860,71 @@ impl PlanService {
         crate::validation::validate_plan(&self.root, &plan)
     }
 
-    /// Locates the only non-Done plan in the project, when one exists.
+    /// Returns the current project-level selection and every live alternative.
     ///
     /// # Errors
     ///
-    /// Returns a typed error for malformed private state, projection drift, I/O
-    /// failure, or more than one active non-Done plan.
-    pub fn active_plan(&self) -> Result<Option<Plan>, MinoError> {
-        let facts = GitAdapter::new(&self.root)
-            .inspect()
-            .map_err(|error| crate::application::git_binding::map_git_error(&error))?;
-        let binding = ActiveBindingStore::new(&self.root)
-            .resolve(&facts)
-            .map_err(|error| crate::application::git_binding::map_git_error(&error))?;
-        match binding.status {
-            ActiveBindingStatus::Current => {
-                let binding = binding.binding.ok_or_else(|| {
-                    MinoError::new(
-                        ErrorCategory::DriftDetected,
-                        "Current active binding has no plan identity",
-                    )
-                })?;
-                let plan = self.load_verified(&binding.plan_id)?;
-                if plan.revision() < binding.plan_revision {
-                    return Err(MinoError::new(
-                        ErrorCategory::DriftDetected,
-                        format!(
-                            "Active binding records plan {} revision {}, but current state is revision {}",
-                            binding.plan_id,
-                            binding.plan_revision,
-                            plan.revision()
-                        ),
-                    ));
-                }
-                return if plan.status() == PlanStatus::Done || plan.is_archived() {
-                    Ok(None)
-                } else {
-                    Ok(Some(plan))
-                };
-            }
-            ActiveBindingStatus::ForeignWorktree
-            | ActiveBindingStatus::StaleBranch
-            | ActiveBindingStatus::StaleHead => return Ok(None),
-            ActiveBindingStatus::Missing | ActiveBindingStatus::NotRepository => {}
-        }
-        self.legacy_active_plan()
+    /// Returns a typed error for malformed private state, projection drift, or
+    /// unsafe/unreadable selection state.
+    pub fn plan_selection(&self) -> Result<ProjectPlanSelection, MinoError> {
+        let live_plan_ids = self.live_plan_ids()?;
+        self.selection.resolve(&live_plan_ids)
     }
 
-    fn legacy_active_plan(&self) -> Result<Option<Plan>, MinoError> {
+    /// Locates the explicitly selected live plan, when one exists.
+    ///
+    /// Git worktree binding is intentionally not used as a plan-selection
+    /// mechanism; it remains an independent Git identity fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for malformed private state, projection drift, or
+    /// unsafe/unreadable selection state.
+    pub fn active_plan(&self) -> Result<Option<Plan>, MinoError> {
+        let plans = self.live_plans()?;
+        let live_plan_ids = plans
+            .iter()
+            .map(|plan| plan.id().clone())
+            .collect::<Vec<_>>();
+        let selection = self.selection.resolve(&live_plan_ids)?;
+        Ok(selection
+            .selected_plan
+            .and_then(|selected| plans.into_iter().find(|plan| plan.id() == &selected)))
+    }
+
+    /// Changes the selected plan using project-selection optimistic concurrency.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a stale/reused request, unknown or completed
+    /// candidate, incomplete approval audit, or persistence failure.
+    pub fn select_plan(
+        &self,
+        request: PlanSelectionRequest,
+    ) -> Result<PlanSelectionWriteReport, MinoError> {
+        let live_plan_ids = self.live_plan_ids()?;
+        self.selection.select(request, &live_plan_ids)
+    }
+
+    pub(crate) fn register_fork_selection(
+        &self,
+        source_plan_id: &PlanId,
+    ) -> Result<ProjectPlanSelection, MinoError> {
+        let live_plan_ids = self.live_plan_ids()?;
+        self.selection.register_fork(source_plan_id, &live_plan_ids)
+    }
+
+    pub(crate) fn remove_archived_selection(&self) -> Result<ProjectPlanSelection, MinoError> {
+        let live_plan_ids = self.live_plan_ids()?;
+        self.selection.remove_archived(&live_plan_ids)
+    }
+
+    fn live_plan_ids(&self) -> Result<Vec<PlanId>, MinoError> {
+        self.live_plans()
+            .map(|plans| plans.into_iter().map(|plan| plan.id().clone()).collect())
+    }
+
+    fn live_plans(&self) -> Result<Vec<Plan>, MinoError> {
         let plans_directory = self.store.paths().plans_managed();
         let entries = self
             .filesystem
@@ -933,21 +960,7 @@ impl PlanService {
                 active.push(plan);
             }
         }
-        match active.len() {
-            0 => Ok(None),
-            1 => Ok(active.pop()),
-            _ => Err(MinoError::new(
-                ErrorCategory::PolicyViolation,
-                format!(
-                    "Project has multiple active plans: {}",
-                    active
-                        .iter()
-                        .map(|plan| plan.id().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            )),
-        }
+        Ok(active)
     }
 
     /// Loads a plan only when its managed Markdown projection is current.

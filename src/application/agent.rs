@@ -13,6 +13,7 @@ use crate::domain::{
     ReviewClassification, ReviewStatus, TaskId, TaskStatus,
 };
 use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitHeadState};
+use crate::project::ProjectPlanSelection;
 use crate::validation::validate_plan;
 use crate::{ErrorCategory, MinoError, NextAction};
 
@@ -57,6 +58,7 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("git.hook.run", false, false),
     ("git.hook.status", false, false),
     ("git.inspect", false, false),
+    ("plan.alternatives", false, false),
     ("plan.amend.apply", true, false),
     ("plan.amend.approve", true, true),
     ("plan.amend.cancel", true, true),
@@ -86,6 +88,7 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("plan.scan.accept", true, true),
     ("plan.scope.add", true, false),
     ("plan.scope.set", true, false),
+    ("plan.select", true, true),
     ("plan.show", false, false),
     ("plan.summary.set", true, false),
     ("plan.task.add", true, false),
@@ -198,6 +201,9 @@ pub struct AgentContext {
     pub git: Option<AgentGitContext>,
     /// Only active non-Done plan, when one exists.
     pub active_plan: Option<AgentActivePlan>,
+    /// Project-level selected plan and live alternatives when candidates exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_selection: Option<ProjectPlanSelection>,
     /// Legal action identifiers in deterministic order.
     pub allowed_actions: Vec<String>,
     /// Important unavailable actions and stable reasons.
@@ -220,6 +226,9 @@ pub struct AgentNextReport {
     pub kind: &'static str,
     /// Current active plan identity, when one exists.
     pub active_plan: Option<AgentActivePlan>,
+    /// Project-level selected plan and live alternatives when candidates exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_selection: Option<ProjectPlanSelection>,
     /// Whether the Agent must stop for explicit human approval.
     pub approval_required: bool,
     /// Important unavailable actions and stable reasons.
@@ -301,8 +310,13 @@ impl AgentService {
     /// Returns a typed error for malformed/multiple active state, projection
     /// drift, or repository facts required to validate a Draft.
     pub fn context(&self) -> Result<AgentContext, MinoError> {
+        let selection = self.plans.plan_selection()?;
         let active_plan = self.plans.active_plan()?;
-        build_agent_context(self.plans.root(), active_plan.as_ref())
+        build_agent_context_with_selection(
+            self.plans.root(),
+            active_plan.as_ref(),
+            Some(&selection),
+        )
     }
 
     /// Returns only the current approval boundary and canonical next commands.
@@ -315,6 +329,7 @@ impl AgentService {
         Ok(AgentNextReport {
             kind: AGENT_NEXT_KIND,
             active_plan: context.active_plan,
+            plan_selection: context.plan_selection,
             approval_required: context.approval_required,
             blocked_actions: context.blocked_actions,
             next_actions: context.next_actions,
@@ -358,17 +373,53 @@ pub fn build_agent_context(
     root: &Path,
     active_plan: Option<&Plan>,
 ) -> Result<AgentContext, MinoError> {
+    build_agent_context_with_selection(root, active_plan, None)
+}
+
+fn build_agent_context_with_selection(
+    root: &Path,
+    active_plan: Option<&Plan>,
+    plan_selection: Option<&ProjectPlanSelection>,
+) -> Result<AgentContext, MinoError> {
     let project = AgentProject {
         root: root.to_string_lossy().into_owned(),
         protocol: protocol_name(),
     };
     let git = agent_git_context(root)?;
+    let serialized_selection = plan_selection
+        .filter(|selection| !selection.is_empty())
+        .cloned();
     let Some(plan) = active_plan else {
+        if serialized_selection.is_some() {
+            return Ok(AgentContext {
+                kind: AGENT_CONTEXT_KIND,
+                project,
+                git,
+                active_plan: None,
+                plan_selection: serialized_selection,
+                allowed_actions: action_ids(&[
+                    "plan.alternatives",
+                    "plan.select",
+                    "plan.diff",
+                    "plan.show",
+                    "plan.archive",
+                ]),
+                blocked_actions: vec![blocked(
+                    "plan.create",
+                    "Live alternatives require an explicit project plan selection",
+                )],
+                standards: Vec::new(),
+                scan_incomplete: false,
+                approval_required: true,
+                next_actions: vec![alternatives_action()],
+            });
+        }
         return Ok(AgentContext {
             kind: AGENT_CONTEXT_KIND,
             project,
             git,
             active_plan: None,
+            plan_selection: None,
             allowed_actions: vec!["plan.create".to_owned(), "project.import.legacy".to_owned()],
             blocked_actions: Vec::new(),
             standards: Vec::new(),
@@ -395,18 +446,51 @@ pub fn build_agent_context(
         )
     })?;
     let guidance = guidance(root, plan)?;
+    let has_alternatives = serialized_selection
+        .as_ref()
+        .is_some_and(|selection| !selection.alternatives.is_empty());
+    let mut allowed_actions = guidance.allowed_actions;
+    let mut next_actions = guidance.next_actions;
+    if has_alternatives {
+        for action in [
+            "plan.alternatives",
+            "plan.select",
+            "plan.diff",
+            "plan.archive",
+        ] {
+            if !allowed_actions.iter().any(|allowed| allowed == action) {
+                allowed_actions.push(action.to_owned());
+            }
+        }
+        next_actions = vec![alternatives_action()];
+    }
     Ok(AgentContext {
         kind: AGENT_CONTEXT_KIND,
         project,
         git,
         active_plan: Some(active_plan),
-        allowed_actions: guidance.allowed_actions,
+        plan_selection: serialized_selection,
+        allowed_actions,
         blocked_actions: guidance.blocked_actions,
         standards,
         scan_incomplete,
-        approval_required: guidance.approval_required,
-        next_actions: guidance.next_actions,
+        approval_required: guidance.approval_required || has_alternatives,
+        next_actions,
     })
+}
+
+fn alternatives_action() -> NextAction {
+    NextAction {
+        id: "plan.alternatives".to_owned(),
+        argv: vec![
+            "mino".to_owned(),
+            "plan".to_owned(),
+            "alternatives".to_owned(),
+            "--format".to_owned(),
+            "json".to_owned(),
+            "--no-input".to_owned(),
+        ],
+    }
 }
 
 fn agent_git_context(root: &Path) -> Result<Option<AgentGitContext>, MinoError> {

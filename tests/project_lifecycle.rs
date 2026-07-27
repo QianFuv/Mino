@@ -16,8 +16,9 @@ use mino::integration::{
     IntegrationFailurePoint, IntegrationOptions, integrate_project_with_failure,
 };
 use mino::project::{
-    FindingSeverity, ProjectConfig, ProjectLayout, ProtocolLock, RootSource, StandardsLock,
-    discover, doctor, initialize, initialize_with_options, show,
+    FindingSeverity, PlanSelectionRequest, ProjectConfig, ProjectLayout, ProjectPlanSelectionStore,
+    ProtocolLock, RootSource, StandardsLock, discover, doctor, initialize, initialize_with_options,
+    show,
 };
 use mino::render::{render_plan, write_projection};
 use mino::store::PlanStore;
@@ -390,6 +391,116 @@ fn doctor_distinguishes_transactions_render_drift_locks_and_integrations() {
             .findings
             .iter()
             .any(|finding| finding.severity == FindingSeverity::Error)
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn project_plan_selection_is_revision_checked_bounded_and_doctor_visible() {
+    let project = TestProject::new("plan-selection");
+    initialize(project.path()).expect("project should initialize");
+    let store = PlanStore::new(project.path());
+    let first_id = PlanId::parse("2026-07-25-selection-first").expect("plan ID should parse");
+    let second_id = PlanId::parse("2026-07-25-selection-second").expect("plan ID should parse");
+    for (plan_id, request) in [
+        (first_id.clone(), "90000000-0000-0000-0000-000000000001"),
+        (second_id.clone(), "90000000-0000-0000-0000-000000000002"),
+    ] {
+        let plan = Plan::new(plan_id.clone(), "Selection fixture", timestamp());
+        store
+            .create_plan(
+                &plan,
+                RequestId::parse(request).expect("request ID should parse"),
+                "codex",
+                command(&["mino", "plan", "create"]),
+            )
+            .expect("selection fixture plan should persist");
+        write_projection(
+            &project
+                .path()
+                .join("docs/plan")
+                .join(format!("{plan_id}.md")),
+            &render_plan(&plan).expect("plan should render"),
+            None,
+        )
+        .expect("selection fixture projection should publish");
+    }
+    let selection_store = ProjectPlanSelectionStore::new(project.path());
+    let live = vec![first_id.clone(), second_id.clone()];
+    let legacy = selection_store
+        .resolve(&live)
+        .expect("legacy alternatives should resolve");
+    assert_eq!(legacy.selection_revision, 0);
+    assert_eq!(legacy.selected_plan, None);
+    assert_eq!(legacy.alternatives, live);
+    let request = PlanSelectionRequest {
+        plan_id: second_id.clone(),
+        expected_selection_revision: 0,
+        request_id: RequestId::parse("90000000-0000-0000-0000-000000000003")
+            .expect("request ID should parse"),
+        actor: "codex".to_owned(),
+        approval_reference: "chat:selection".to_owned(),
+        reason: "Select the second plan".to_owned(),
+        command: command(&["mino", "plan", "select"]),
+        selected_at: timestamp(),
+    };
+    let selected = selection_store
+        .select(request.clone(), &live)
+        .expect("selection should persist");
+    assert!(!selected.replayed);
+    assert_eq!(selected.selection.selection_revision, 1);
+    assert_eq!(selected.selection.selected_plan, Some(second_id));
+    let replayed = selection_store
+        .select(request, &live)
+        .expect("exact selection should replay");
+    assert!(replayed.replayed);
+    let stale = selection_store
+        .select(
+            PlanSelectionRequest {
+                plan_id: first_id,
+                expected_selection_revision: 0,
+                request_id: RequestId::parse("90000000-0000-0000-0000-000000000004")
+                    .expect("request ID should parse"),
+                actor: "codex".to_owned(),
+                approval_reference: "chat:stale-selection".to_owned(),
+                reason: "Attempt a stale choice".to_owned(),
+                command: command(&["mino", "plan", "select"]),
+                selected_at: timestamp(),
+            },
+            &live,
+        )
+        .expect_err("stale selection revision should fail");
+    assert_eq!(stale.category(), mino::ErrorCategory::RevisionConflict);
+    let persisted: Value = serde_json::from_slice(
+        &fs::read(selection_store.path()).expect("selection file should be readable"),
+    )
+    .expect("selection file should be JSON");
+    assert_eq!(persisted["schema_version"], 1);
+    assert_eq!(persisted["selection_revision"], 1);
+    assert!(
+        fs::read_dir(project.path().join(".mino"))
+            .expect("Mino directory should be readable")
+            .all(|entry| {
+                let path = entry.expect("Mino entry should be readable").path();
+                path.extension().is_none_or(|extension| {
+                    !extension.eq_ignore_ascii_case("tmp") && !extension.eq_ignore_ascii_case("bak")
+                })
+            })
+    );
+
+    fs::write(selection_store.path(), vec![b'x'; 1024 * 1024 + 1])
+        .expect("oversized selection should be injected");
+    let oversized = selection_store
+        .inspect()
+        .expect_err("oversized selection must be rejected before parsing");
+    assert_eq!(oversized.category(), mino::ErrorCategory::DriftDetected);
+    assert!(
+        finding_codes(
+            &doctor(project.path())
+                .expect("doctor should inspect oversized selection")
+                .findings
+        )
+        .contains(&"plan_selection_corrupt")
     );
 }
 

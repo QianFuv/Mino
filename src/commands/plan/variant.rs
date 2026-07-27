@@ -9,6 +9,7 @@ use crate::application::plan::{PlanMutationRequest, PlanService};
 use crate::application::plan_variant::{ForkPlanRequest, PlanVariantService};
 use crate::commands::CommandResponse;
 use crate::domain::Timestamp;
+use crate::project::PlanSelectionRequest;
 use crate::{MinoError, NextAction};
 
 /// Arguments for creating an independent Draft from one retained revision.
@@ -49,6 +50,29 @@ pub(crate) struct DiffArguments {
     /// Optional exact retained right revision; current is used when omitted.
     #[arg(long)]
     right_revision: Option<u64>,
+}
+
+/// Arguments for approval-bound project plan selection.
+#[derive(Debug, Args)]
+pub(crate) struct SelectArguments {
+    /// Live plan candidate to select.
+    #[arg(long)]
+    plan: String,
+    /// Required project selection revision from `plan alternatives`.
+    #[arg(long)]
+    expect_selection_revision: u64,
+    /// Idempotency UUID for this exact selection decision.
+    #[arg(long)]
+    request_id: String,
+    /// Actor recorded in the selection audit.
+    #[arg(long, default_value = "user")]
+    actor: String,
+    /// Auditable user approval reference.
+    #[arg(long)]
+    approval_ref: String,
+    /// Non-empty reason for selecting this alternative.
+    #[arg(long, allow_hyphen_values = true)]
+    reason: String,
 }
 
 /// Arguments for approval-bound non-destructive plan deactivation.
@@ -126,6 +150,67 @@ pub(crate) fn execute_diff(
     )?;
     let message = report.render_human();
     response(message, true, report, Vec::new(), Vec::new())
+}
+
+/// Returns the selected project plan and every live alternative.
+pub(crate) fn execute_alternatives(plans: &PlanService) -> Result<CommandResponse, MinoError> {
+    let selection = plans.plan_selection()?;
+    let complete = selection.selected_plan.is_some() || selection.is_empty();
+    let missing = if complete {
+        Vec::new()
+    } else {
+        vec!["plan_selection".to_owned()]
+    };
+    response(
+        "Project plan alternatives inspected.",
+        complete,
+        selection,
+        missing,
+        Vec::<NextAction>::new(),
+    )
+}
+
+/// Records an explicit project-level alternative selection.
+pub(crate) fn execute_select(
+    plans: &PlanService,
+    arguments: SelectArguments,
+) -> Result<CommandResponse, MinoError> {
+    let plan_id = parse_plan_id(&arguments.plan)?;
+    let request_id = parse_request_id(&arguments.request_id)?;
+    let command = vec![
+        "mino".to_owned(),
+        "plan".to_owned(),
+        "select".to_owned(),
+        "--plan".to_owned(),
+        plan_id.to_string(),
+        "--expect-selection-revision".to_owned(),
+        arguments.expect_selection_revision.to_string(),
+        "--request-id".to_owned(),
+        request_id.to_string(),
+        "--actor".to_owned(),
+        arguments.actor.clone(),
+        "--approval-ref".to_owned(),
+        arguments.approval_ref.clone(),
+        "--reason".to_owned(),
+        arguments.reason.clone(),
+    ];
+    let report = plans.select_plan(PlanSelectionRequest {
+        plan_id,
+        expected_selection_revision: arguments.expect_selection_revision,
+        request_id,
+        actor: arguments.actor,
+        approval_reference: arguments.approval_ref,
+        reason: arguments.reason,
+        command,
+        selected_at: Timestamp::now_utc(),
+    })?;
+    response(
+        "Project plan alternative selected.",
+        true,
+        report,
+        Vec::new(),
+        Vec::<NextAction>::new(),
+    )
 }
 
 /// Records approval-bound semantic deactivation without deleting plan history.

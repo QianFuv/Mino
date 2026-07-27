@@ -10,6 +10,7 @@ use crate::application::plan::{
 };
 use crate::diff::{PlanDiff, diff_plans};
 use crate::domain::{Lineage, Plan, PlanId, RequestId, Timestamp};
+use crate::project::ProjectPlanSelection;
 use crate::render::{render_plan, write_managed_projection};
 use crate::store::{PlanStore, StoreErrorKind, canonical_json_bytes, sha256_digest};
 use crate::{ErrorCategory, MinoError, NextAction};
@@ -44,6 +45,8 @@ pub struct ForkPlanReport {
     pub operation: PlanOperationReport,
     /// Verified fork provenance stored in the new plan.
     pub lineage: Lineage,
+    /// Project selection with the source retained and the fork listed as an alternative.
+    pub plan_selection: ProjectPlanSelection,
 }
 
 /// Application boundary for plan alternatives and archive state.
@@ -143,9 +146,13 @@ impl PlanVariantService {
                 format!("Forked plan {plan_id} has no lineage"),
             )
         })?;
+        let plan_selection = self
+            .plans
+            .register_fork_selection(&request.source_plan_id)?;
         Ok(ForkPlanReport {
             operation: operation_report(&plan, &rendered, receipt.is_replay(), None),
             lineage,
+            plan_selection,
         })
     }
 
@@ -184,8 +191,31 @@ impl PlanVariantService {
         reason: String,
         approval_reference: String,
     ) -> Result<PlanOperationReport, MinoError> {
+        let plan_id = request.plan_id.clone();
+        let selection = self.plans.plan_selection()?;
+        if selection.selected_plan.as_ref() == Some(&plan_id) && !selection.alternatives.is_empty()
+        {
+            return Err(MinoError::new(
+                ErrorCategory::PolicyViolation,
+                format!("Select another alternative before archiving selected plan {plan_id}"),
+            )
+            .with_remediation(
+                vec!["plan_selection".to_owned()],
+                vec![NextAction {
+                    id: "plan.alternatives".to_owned(),
+                    argv: vec![
+                        "mino".to_owned(),
+                        "plan".to_owned(),
+                        "alternatives".to_owned(),
+                        "--format".to_owned(),
+                        "json".to_owned(),
+                        "--no-input".to_owned(),
+                    ],
+                }],
+            ));
+        }
         let actor = request.actor.clone();
-        self.plans.commit_semantic(
+        let report = self.plans.commit_semantic(
             request,
             vec!["archive".to_owned()],
             |_| Ok(None),
@@ -197,7 +227,9 @@ impl PlanVariantService {
                     at,
                 )
             },
-        )
+        )?;
+        self.plans.remove_archived_selection()?;
+        Ok(report)
     }
 
     fn load_revision(&self, plan_id: &PlanId, revision: Option<u64>) -> Result<Plan, MinoError> {

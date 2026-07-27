@@ -651,6 +651,7 @@ fn semantic_diff_is_stable_directional_revision_aware_and_non_mutating() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn cli_exposes_the_complete_fork_diff_archive_and_active_selection_sequence() {
     let project = TestProject::new("cli-sequence");
     let source = stored_draft(&project, "2026-07-26-cli-source", "CLI source", 350);
@@ -696,13 +697,77 @@ fn cli_exposes_the_complete_fork_diff_archive_and_active_selection_sequence() {
             .any(|change| change["category"] == "changed" && change["path"] == "metadata.name")
     }));
 
-    let ambiguous = parse_failure(&run_mino(&project, &["agent", "context"]), 5);
-    assert_eq!(ambiguous["error"]["code"], "policy_violation");
-    assert!(
-        ambiguous["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("multiple active plans"))
+    let alternatives = parse_success(&run_mino(&project, &["plan", "alternatives"]));
+    assert_eq!(alternatives["selection_revision"], 1);
+    assert_eq!(alternatives["selected_plan"], source_id);
+    assert_eq!(alternatives["alternatives"], serde_json::json!([fork_id]));
+    let comparison_context = parse_success(&run_mino(&project, &["agent", "context"]));
+    assert_eq!(comparison_context["active_plan"]["id"], source_id);
+    assert_eq!(
+        comparison_context["plan_selection"]["selection_revision"],
+        1
     );
+    assert_eq!(
+        comparison_context["plan_selection"]["selected_plan"],
+        source_id
+    );
+    assert_eq!(
+        comparison_context["plan_selection"]["alternatives"],
+        serde_json::json!([fork_id])
+    );
+    assert_eq!(comparison_context["approval_required"], true);
+    assert_eq!(
+        comparison_context["next_actions"][0]["id"],
+        "plan.alternatives"
+    );
+
+    let selected_archive = parse_failure(
+        &run_mino(
+            &project,
+            &[
+                "plan",
+                "archive",
+                "--plan",
+                &source_id,
+                "--expect-revision",
+                "1",
+                "--request-id",
+                "80000000-0000-0000-0000-000000000352",
+                "--actor",
+                "codex",
+                "--reason",
+                "Attempt to archive the selected plan",
+                "--approval-ref",
+                "chat:selected-archive-refused",
+            ],
+        ),
+        5,
+    );
+    assert_eq!(selected_archive["error"]["code"], "policy_violation");
+
+    let selection_arguments = [
+        "plan",
+        "select",
+        "--plan",
+        &fork_id,
+        "--expect-selection-revision",
+        "1",
+        "--request-id",
+        "80000000-0000-0000-0000-000000000353",
+        "--actor",
+        "codex",
+        "--approval-ref",
+        "chat:cli-alternative-selected",
+        "--reason",
+        "Choose the CLI alternative",
+    ];
+    let selected = parse_success(&run_mino(&project, &selection_arguments));
+    assert_eq!(selected["selection_revision"], 2);
+    assert_eq!(selected["selected_plan"], fork_id);
+    assert_eq!(selected["alternatives"], serde_json::json!([source_id]));
+    let replayed_selection = parse_success(&run_mino(&project, &selection_arguments));
+    assert_eq!(replayed_selection["replayed"], true);
+    assert_eq!(replayed_selection["selection_revision"], 2);
 
     let archived = parse_success(&run_mino(
         &project,
@@ -714,7 +779,7 @@ fn cli_exposes_the_complete_fork_diff_archive_and_active_selection_sequence() {
             "--expect-revision",
             "1",
             "--request-id",
-            "80000000-0000-0000-0000-000000000352",
+            "80000000-0000-0000-0000-000000000354",
             "--actor",
             "codex",
             "--reason",
@@ -747,7 +812,7 @@ fn cli_exposes_the_complete_fork_diff_archive_and_active_selection_sequence() {
                 "--expect-revision",
                 "2",
                 "--request-id",
-                "80000000-0000-0000-0000-000000000353",
+                "80000000-0000-0000-0000-000000000355",
                 "--actor",
                 "codex",
                 "--value",
@@ -769,6 +834,50 @@ fn non_git_fallback_returns_none_when_retained_binding_has_no_plan_candidate() {
             .active_plan()
             .expect("empty non-Git fallback should resolve")
             .is_none()
+    );
+}
+
+#[test]
+fn legacy_multiple_candidates_remain_visible_until_explicit_selection() {
+    let project = TestProject::new("legacy-selection");
+    let first = stored_draft(&project, "2026-07-26-legacy-first", "Legacy first", 380);
+    let second = stored_draft(&project, "2026-07-26-legacy-second", "Legacy second", 381);
+    let context = parse_success(&run_mino(&project, &["agent", "context"]));
+    assert_eq!(context["active_plan"], Value::Null);
+    assert_eq!(context["plan_selection"]["selection_revision"], 0);
+    assert_eq!(
+        context["plan_selection"]["alternatives"],
+        serde_json::json!([first.id(), second.id()])
+    );
+    assert_eq!(context["approval_required"], true);
+    assert_eq!(context["next_actions"][0]["id"], "plan.alternatives");
+
+    let selected = parse_success(&run_mino(
+        &project,
+        &[
+            "plan",
+            "select",
+            "--plan",
+            second.id().as_str(),
+            "--expect-selection-revision",
+            "0",
+            "--request-id",
+            "80000000-0000-0000-0000-000000000382",
+            "--actor",
+            "codex",
+            "--approval-ref",
+            "chat:legacy-selection",
+            "--reason",
+            "Choose the second retained alternative",
+        ],
+    ));
+    assert_eq!(selected["selection_revision"], 1);
+    assert_eq!(selected["selected_plan"], second.id().as_str());
+    let selected_context = parse_success(&run_mino(&project, &["agent", "context"]));
+    assert_eq!(selected_context["active_plan"]["id"], second.id().as_str());
+    assert_eq!(
+        selected_context["plan_selection"]["alternatives"],
+        serde_json::json!([first.id()])
     );
 }
 

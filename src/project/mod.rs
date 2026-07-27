@@ -6,6 +6,7 @@ mod import;
 mod migrate;
 mod root;
 mod scan;
+mod selection;
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +33,9 @@ pub use root::{ProjectRoot, RootSource, discover, discover_for_init};
 pub use scan::{
     Language, LanguageScore, ProjectScan, ScanEvidence, ScanLimits, WorkspaceScan, scan_root,
     scan_root_with_limits,
+};
+pub use selection::{
+    PlanSelectionRequest, PlanSelectionWriteReport, ProjectPlanSelection, ProjectPlanSelectionStore,
 };
 
 use config::{create_file, map_managed_error, parse_managed_toml, serialize_toml};

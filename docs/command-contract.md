@@ -104,15 +104,17 @@
 | `mino plan amend apply` | 是 | 原子应用符合条件的提案，并按 Minor 或 Material 规则使旧状态失效。 |
 | `mino plan fork` | 新 Draft | 审计指定历史 revision，复制 authored values，记录 lineage，并清除执行与信任状态。 |
 | `mino plan diff` | 否 | 比较两个当前或历史版本，输出 `mino.plan-diff/v1` 的 Added、Removed、Changed、Moved 路径。 |
+| `mino plan alternatives` | 否 | 返回 project selection revision、当前 selected plan 和稳定排序的 live alternatives；旧项目没有 selection 文件时以 revision 0 呈现。 |
+| `mino plan select` | selection，审批边界 | 以 `--expect-selection-revision` 和 request ID 选择一个 live alternative，并保存 actor、approval reference、reason 与时间；精确重试不重复递增 revision。 |
 | `mino plan archive` | 是，审批边界 | 保存 reason 和 approval reference，以 overlay 停用计划，不删除历史或改变 lifecycle status。 |
 
 `Minor` 只覆盖不会改变用户可见行为的任务局部支持文件、fixture、snapshot、barrel export、检查命令修正和实现说明。公开 API、schema、依赖、兼容性、范围、安全约束和核心任务顺序属于 `Material`。
 
 Material apply 会清除计划批准与 Git consent，重置任务、检查和 commit gate，移除 execution-only checkpoints，把相关证据标为 stale，并要求重新校验和批准。
 
-fork 只读取经过审计的不可变 source snapshot。新计划保留原始需求、范围、决策、标准、任务、检查和提交意图，但清除 lifecycle、审批、amendment、review、evidence、result、execution extension、Git readiness、final outcome 与 archive state。`plan diff` 只比较 authored values；Mino 不提供 plan merge。
+fork 只读取经过审计的不可变 source snapshot。新计划保留原始需求、范围、决策、标准、任务、检查和提交意图，但清除 lifecycle、审批、amendment、review、evidence、result、execution extension、Git readiness、final outcome 与 archive state。`plan diff` 只比较 authored values；Mino 不提供 plan merge。fork 后原 selected plan 保持不变，新 Draft 进入 alternatives；选中另一个方案前不能归档当前 selected plan。
 
-普通 `plan create` 和 `project import legacy` 在 Git 与非 Git 项目中都要求至多一个非 Done、未归档计划。显式 `plan fork` 可以为比较创建并存候选；存在多个候选时，`agent context`/`agent next` 返回策略冲突，不隐式选中计划。使用审批绑定的 `plan archive` 停用未选方案后，唯一剩余候选重新成为活动计划。
+普通 `plan create` 和 `project import legacy` 在 Git 与非 Git 项目中都拒绝已有 live candidate。显式 `plan fork` 可以为比较创建并存候选；`agent context`/`agent next` 返回 `plan_selection`、候选操作和审批边界，不再因多个方案失败。旧项目没有 selection 文件且只有一个 live plan 时会虚拟选择它；有多个 live plan 时保持 revision 0 且要求显式 `plan select`。Git binding 只描述 worktree identity，不参与项目方案选择。
 
 ### 标准检测、目录与冲突
 
@@ -139,8 +141,8 @@ detect、recommend 和 apply 只使用内嵌或已缓存数据；只有 sync 使
 
 | 命令 | 返回内容 |
 |---|---|
-| `mino agent context` | 完整项目、Git、活动计划、扫描完整性、allowed/blocked actions、审批状态和规范 next argv。 |
-| `mino agent next` | 聚焦当前计划、审批边界、blocked actions 和下一步。 |
+| `mino agent context` | 完整项目、Git、project plan selection/alternatives、活动计划、扫描完整性、allowed/blocked actions、审批状态和规范 next argv。 |
+| `mino agent next` | 聚焦 project plan selection、当前计划、审批边界、blocked actions 和下一步。 |
 | `mino agent capabilities` | 静态能力清单，以及调用和 mutation 约束。 |
 
 Agent 命令直接返回各自 schema，不套 `mino.result/v1`。缺少 JSON 或 no-input 模式时以 exit 5 失败。

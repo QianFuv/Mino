@@ -69,6 +69,12 @@ impl ProjectLayout {
         self.mino_directory().join("active.json")
     }
 
+    /// Returns the project-level selected plan and alternatives path.
+    #[must_use]
+    pub fn plan_selection(&self) -> PathBuf {
+        self.mino_directory().join("plan-selection.json")
+    }
+
     /// Returns the plan-state directory.
     #[must_use]
     pub fn plans_directory(&self) -> PathBuf {
@@ -117,6 +123,10 @@ impl ProjectLayout {
 
     pub(crate) fn active_bindings_managed() -> ManagedPath {
         managed_path(".mino/active.json")
+    }
+
+    pub(crate) fn plan_selection_managed() -> ManagedPath {
+        managed_path(".mino/plan-selection.json")
     }
 
     pub(crate) fn plans_directory_managed() -> ManagedPath {
