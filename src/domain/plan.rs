@@ -4979,10 +4979,11 @@ impl Plan {
             .map(VerificationCheck::id)
             .collect::<Vec<_>>();
         let unique_task_check_ids = task_check_ids.iter().copied().collect::<BTreeSet<_>>();
-        if unique_task_check_ids.len() != task_check_ids.len()
-            || global_check_ids
-                .iter()
-                .any(|check_id| unique_task_check_ids.contains(check_id))
+        if self.status != PlanStatus::Draft
+            && (unique_task_check_ids.len() != task_check_ids.len()
+                || global_check_ids
+                    .iter()
+                    .any(|check_id| unique_task_check_ids.contains(check_id)))
         {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,

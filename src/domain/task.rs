@@ -541,7 +541,10 @@ impl CommitGate {
             ));
         }
         if self.planned_message.contains(['\r', '\n'])
-            || self.scope.iter().any(|path| !is_safe_repository_path(path))
+            || self.scope.iter().any(|path| {
+                path.trim().is_empty()
+                    || (task_status != TaskStatus::Draft && !is_safe_repository_path(path))
+            })
         {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
@@ -1769,7 +1772,8 @@ impl Task {
         if file_paths.len() != self.file_map.len()
             || self.file_map.iter().any(|entry| {
                 entry.task_id != self.id
-                    || !is_safe_repository_path(&entry.path)
+                    || entry.path.trim().is_empty()
+                    || (self.status != TaskStatus::Draft && !is_safe_repository_path(&entry.path))
                     || entry.reason.trim().is_empty()
             })
         {
