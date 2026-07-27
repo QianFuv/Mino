@@ -1,7 +1,7 @@
 //! Bounded workspace fingerprint capture for verification freshness.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
 
@@ -304,20 +304,39 @@ fn scoped_paths(
     scope: &WorkspaceFingerprintScope,
 ) -> Result<BTreeSet<String>, MinoError> {
     let mut paths = BTreeSet::new();
-    let mut requires_walk = false;
+    let mut walk_patterns = Vec::new();
     for pattern in scope.patterns() {
-        if pattern.contains('*') {
-            requires_walk = true;
+        if is_mino_owned_path(plan, pattern) {
+            continue;
+        }
+        let requires_walk = if pattern.contains('*') {
+            true
         } else {
             let managed = ManagedPath::new(pattern).map_err(managed_error)?;
-            if filesystem.is_directory(&managed).map_err(managed_error)? {
-                requires_walk = true;
-            }
+            filesystem.is_directory(&managed).map_err(managed_error)?
+        };
+        if requires_walk {
+            walk_patterns.push(pattern.clone());
+        } else {
             paths.insert(pattern.clone());
         }
     }
-    if requires_walk {
-        collect_matching_paths(filesystem, plan, scope.patterns(), &mut paths)?;
+    if !walk_patterns.is_empty() {
+        collect_matching_paths(
+            filesystem,
+            plan,
+            filesystem.root(),
+            &walk_patterns,
+            true,
+            &mut paths,
+        )?;
+    }
+    let explicit_patterns = explicit_scope_patterns(plan, scope);
+    for pattern in walk_patterns
+        .iter()
+        .filter(|pattern| explicit_patterns.contains(pattern.as_str()))
+    {
+        collect_explicit_matching_paths(filesystem, plan, pattern, &mut paths)?;
     }
     if paths.len() > MAX_FINGERPRINT_FILES {
         return Err(fingerprint_budget_error("file count"));
@@ -328,13 +347,15 @@ fn scoped_paths(
 fn collect_matching_paths(
     filesystem: &ProjectFs,
     plan: &Plan,
+    walk_root: &Path,
     patterns: &[String],
+    standard_filters: bool,
     paths: &mut BTreeSet<String>,
 ) -> Result<(), MinoError> {
     let root = filesystem.root();
-    let mut builder = WalkBuilder::new(root);
+    let mut builder = WalkBuilder::new(walk_root);
     builder
-        .standard_filters(true)
+        .standard_filters(standard_filters)
         .hidden(false)
         .parents(false)
         .follow_links(false)
@@ -386,6 +407,74 @@ fn collect_matching_paths(
         }
     }
     Ok(())
+}
+
+fn explicit_scope_patterns<'a>(
+    plan: &'a Plan,
+    scope: &WorkspaceFingerprintScope,
+) -> BTreeSet<&'a str> {
+    let scoped = scope
+        .patterns()
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    plan.tasks()
+        .iter()
+        .flat_map(crate::domain::Task::file_map)
+        .filter(|entry| entry.change() != FileChange::NotApplicable)
+        .map(crate::domain::FileMapEntry::path)
+        .filter(|pattern| scoped.contains(pattern))
+        .collect()
+}
+
+fn collect_explicit_matching_paths(
+    filesystem: &ProjectFs,
+    plan: &Plan,
+    pattern: &str,
+    paths: &mut BTreeSet<String>,
+) -> Result<(), MinoError> {
+    let Some(walk_root) = explicit_walk_root(filesystem, plan, pattern)? else {
+        return Ok(());
+    };
+    collect_matching_paths(
+        filesystem,
+        plan,
+        &walk_root,
+        &[pattern.to_owned()],
+        false,
+        paths,
+    )
+}
+
+fn explicit_walk_root(
+    filesystem: &ProjectFs,
+    plan: &Plan,
+    pattern: &str,
+) -> Result<Option<PathBuf>, MinoError> {
+    let prefix = pattern
+        .split('/')
+        .take_while(|segment| !segment.contains('*'))
+        .collect::<Vec<_>>()
+        .join("/");
+    if prefix.is_empty() {
+        return Ok(Some(filesystem.root().to_path_buf()));
+    }
+    if is_mino_owned_path(plan, &prefix) {
+        return Ok(None);
+    }
+    let managed = ManagedPath::new(&prefix).map_err(managed_error)?;
+    match filesystem.entry_kind(&managed).map_err(managed_error)? {
+        None | Some(ManagedEntryKind::File) => Ok(None),
+        Some(ManagedEntryKind::Directory) => Ok(Some(filesystem.root().join(prefix))),
+        Some(ManagedEntryKind::Symlink) => Err(MinoError::new(
+            ErrorCategory::PolicyViolation,
+            format!("Workspace fingerprint path {prefix} is a symbolic link"),
+        )),
+        Some(ManagedEntryKind::Other) => Err(MinoError::new(
+            ErrorCategory::PolicyViolation,
+            format!("Workspace fingerprint path {prefix} has an unsupported file type"),
+        )),
+    }
 }
 
 fn capture_snapshots(
@@ -460,7 +549,11 @@ fn protocol_path(path: &Path) -> Result<String, MinoError> {
 }
 
 fn is_mino_owned_path(plan: &Plan, path: &str) -> bool {
-    path == ".mino" || path.starts_with(".mino/") || plan.metadata().markdown_path() == Some(path)
+    path == ".git"
+        || path.starts_with(".git/")
+        || path == ".mino"
+        || path.starts_with(".mino/")
+        || plan.metadata().markdown_path() == Some(path)
 }
 
 #[cfg(unix)]

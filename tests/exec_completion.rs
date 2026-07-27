@@ -11,9 +11,9 @@ use mino::application::execution::ExecutionService;
 use mino::application::plan::PlanMutationRequest;
 use mino::domain::{
     AcceptanceCriterion, Approval, CheckId, CheckStatus, CheckpointKind, CriterionId,
-    CriterionStatus, DeviationStatus, EvidenceId, EvidenceType, FileChange, FileMapEntry,
+    CriterionStatus, DeviationStatus, Evidence, EvidenceId, EvidenceType, FileChange, FileMapEntry,
     GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId, Task, TaskId,
-    TaskStatus, Timestamp, VerificationCheck,
+    TaskStatus, Timestamp, VerificationCheck, WorkspaceRepositoryMode,
 };
 use mino::evidence::{AddEvidenceRequest, EvidenceRequestContext, EvidenceSource, EvidenceStore};
 use mino::git::matches_file_map_path;
@@ -43,11 +43,37 @@ impl TestProject {
         Self::new_with_repository(label, task_mode, true, true)
     }
 
+    fn new_with_ignored_file_map(label: &str, task_mode: &str, has_git_repository: bool) -> Self {
+        Self::new_with_repository_and_file_map(
+            label,
+            task_mode,
+            has_git_repository,
+            false,
+            "dist/**",
+        )
+    }
+
     fn new_with_repository(
         label: &str,
         task_mode: &str,
         has_git_repository: bool,
         has_second_task: bool,
+    ) -> Self {
+        Self::new_with_repository_and_file_map(
+            label,
+            task_mode,
+            has_git_repository,
+            has_second_task,
+            "src/feature.rs",
+        )
+    }
+
+    fn new_with_repository_and_file_map(
+        label: &str,
+        task_mode: &str,
+        has_git_repository: bool,
+        has_second_task: bool,
+        task_file_map: &str,
     ) -> Self {
         let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
@@ -63,8 +89,11 @@ impl TestProject {
         fs::create_dir(path.join("src")).expect("fixture source should be created");
         fs::write(path.join("src/lib.rs"), "pub fn fixture() -> u8 { 1 }\n")
             .expect("fixture library should be written");
-        fs::write(path.join(".gitignore"), ".mino/\ndocs/plan/\n*.pdb\n")
-            .expect("ignore rules should be written");
+        fs::write(
+            path.join(".gitignore"),
+            ".mino/\ndocs/plan/\ndist/\n*.pdb\n",
+        )
+        .expect("ignore rules should be written");
         let helper = compile_helper(&path);
         initialize(&path).expect("Mino project should initialize");
         if has_git_repository {
@@ -77,6 +106,7 @@ impl TestProject {
             task_mode,
             has_git_repository,
             has_second_task,
+            task_file_map,
         );
         Self {
             path,
@@ -185,6 +215,7 @@ fn create_approved_plan(
     task_mode: &str,
     has_git_repository: bool,
     has_second_task: bool,
+    task_file_map: &str,
 ) -> u64 {
     let plan = fixture_plan(helper, has_git_repository);
     let store = PlanStore::new(root);
@@ -211,7 +242,7 @@ fn create_approved_plan(
     ))
     .expect("task check should be added");
     task.add_file_map_entry(FileMapEntry::new(
-        "src/feature.rs",
+        task_file_map,
         FileChange::Create,
         "Own the feature implementation",
         task_id(),
@@ -497,6 +528,183 @@ fn non_git_project_completes_a_real_file_change_from_its_task_baseline() {
         plan.task(&task_id()).expect("task should exist").status(),
         TaskStatus::Done
     );
+}
+
+#[test]
+fn ignored_file_map_glob_is_fingerprinted_and_directory_delta_is_detected() {
+    let project = TestProject::new_with_ignored_file_map("ignored-git", "pass", true);
+    let (_, evidence) = capture_ignored_file_change(&project, 60);
+    let fingerprint = evidence
+        .workspace_fingerprint()
+        .expect("ignored file check should capture a workspace fingerprint");
+    assert_eq!(fingerprint.repository_mode(), WorkspaceRepositoryMode::Git);
+    assert!(
+        fingerprint
+            .file_snapshots()
+            .iter()
+            .any(|snapshot| snapshot.path() == "dist/generated.txt")
+    );
+    let ignored = Command::new("git")
+        .args(["check-ignore", "--quiet", "--", "dist/generated.txt"])
+        .current_dir(project.path())
+        .output()
+        .expect("Git ignored-path probe should run");
+    assert!(ignored.status.success());
+}
+
+#[test]
+fn non_git_ignored_file_map_glob_is_detected() {
+    let project = TestProject::new_with_ignored_file_map("ignored-non-git", "pass", false);
+    let (_, evidence) = capture_ignored_file_change(&project, 65);
+    let fingerprint = evidence
+        .workspace_fingerprint()
+        .expect("ignored file check should capture a workspace fingerprint");
+    assert_eq!(
+        fingerprint.repository_mode(),
+        WorkspaceRepositoryMode::NonGit
+    );
+    assert!(
+        fingerprint
+            .file_snapshots()
+            .iter()
+            .any(|snapshot| snapshot.path() == "dist/generated.txt")
+    );
+}
+
+#[test]
+fn ignored_file_change_stales_check_evidence() {
+    let project = TestProject::new_with_ignored_file_map("ignored-stale", "pass", true);
+    let (revision, _) = capture_ignored_file_change(&project, 70);
+    fs::write(
+        project.path().join("dist/generated.txt"),
+        "changed after verification\n",
+    )
+    .expect("ignored file should change after verification");
+
+    let error = CompletionService::discover(project.path())
+        .expect("completion service should discover")
+        .complete_task(
+            mutation(
+                revision,
+                72,
+                vec!["mino".to_owned(), "exec".to_owned(), "complete".to_owned()],
+            ),
+            task_id(),
+        )
+        .expect_err("changed ignored file should stale its check evidence");
+    assert_eq!(error.category(), ErrorCategory::IncompleteOrValidation);
+    let plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("stale plan should load");
+    assert_eq!(
+        plan.task(&task_id())
+            .expect("task should exist")
+            .verification_checks()[0]
+            .status(),
+        CheckStatus::Stale
+    );
+}
+
+#[test]
+fn ignored_file_map_override_preserves_resource_limits() {
+    let project = TestProject::new_with_ignored_file_map("ignored-budget", "pass", false);
+    fs::create_dir(project.path().join("dist")).expect("ignored directory should be created");
+    fs::write(
+        project.path().join("dist/oversized.bin"),
+        vec![0_u8; 16 * 1024 * 1024 + 1],
+    )
+    .expect("ignored oversized fixture should be written");
+
+    let error = ExecutionService::discover(project.path())
+        .expect("execution service should discover")
+        .start_task(
+            mutation(
+                project.base_revision,
+                75,
+                vec!["mino".to_owned(), "exec".to_owned(), "start".to_owned()],
+            ),
+            task_id(),
+        )
+        .expect_err("ignored explicit scope must retain the file-size limit");
+    assert_eq!(error.category(), ErrorCategory::EnvironmentUnavailable);
+    assert!(error.message().contains("16777216-byte limit"));
+}
+
+#[test]
+fn ignored_file_map_override_rejects_symlinks() {
+    let project = TestProject::new_with_ignored_file_map("ignored-symlink", "pass", false);
+    fs::create_dir(project.path().join("dist")).expect("ignored directory should be created");
+    let target = project.path().join("outside-target.txt");
+    fs::write(&target, "outside explicit scope\n").expect("symlink target should be written");
+    if !create_file_symlink(&target, &project.path().join("dist/linked.txt")) {
+        return;
+    }
+
+    let error = ExecutionService::discover(project.path())
+        .expect("execution service should discover")
+        .start_task(
+            mutation(
+                project.base_revision,
+                78,
+                vec!["mino".to_owned(), "exec".to_owned(), "start".to_owned()],
+            ),
+            task_id(),
+        )
+        .expect_err("ignored explicit scope must reject symbolic links");
+    assert_eq!(error.category(), ErrorCategory::PolicyViolation);
+    assert!(error.message().contains("symbolic link"));
+}
+
+fn capture_ignored_file_change(project: &TestProject, sequence: u64) -> (u64, Evidence) {
+    let started = start_active_task(project, sequence);
+    let baseline_plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("started plan should load");
+    let workspace = baseline_plan
+        .workspace_state()
+        .expect("workspace state should decode");
+    let baseline = workspace
+        .task_baseline(&task_id())
+        .expect("task baseline should exist");
+    assert!(
+        baseline
+            .file_snapshots()
+            .iter()
+            .all(|snapshot| snapshot.path() != "dist/generated.txt")
+    );
+    fs::create_dir(project.path().join("dist")).expect("ignored directory should be created");
+    fs::write(
+        project.path().join("dist/generated.txt"),
+        "generated after task start\n",
+    )
+    .expect("ignored file should be written");
+    let report = ExecutionService::discover(project.path())
+        .expect("execution service should discover")
+        .run_check(
+            &mutation(
+                started,
+                sequence + 1,
+                vec!["mino".to_owned(), "exec".to_owned(), "check".to_owned()],
+            ),
+            &check_id("TASK-CHECK"),
+        )
+        .expect("ignored file check should pass");
+    (report.plan().revision, report.evidence().clone())
+}
+
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_file(target, link).is_ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_file_symlink(_target: &Path, _link: &Path) -> bool {
+    false
 }
 
 #[test]
