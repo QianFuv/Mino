@@ -4,8 +4,9 @@ use mino::domain::{
     AcceptanceCriterion, AmendmentPatch, CheckId, CheckpointKind, CommitGate, CriterionId,
     DeviationClassification, DeviationStatus, DomainError, DomainErrorKind, Event, Evidence,
     EvidenceId, GitFlowConsent, Plan, PlanId, PlanStatus, RequestId, ReviewClassification, Task,
-    TaskId, TaskStatus, Timestamp, VerificationCheck,
+    TaskId, TaskStatus, Timestamp, VerificationCheck, WorkspaceFingerprint, WorkspaceGitEntry,
 };
+use mino::store::{canonical_json_bytes, sha256_digest};
 use schemars::schema_for;
 use serde_json::{Value, json};
 
@@ -985,4 +986,65 @@ fn identifiers_timestamps_evidence_and_events_are_strict() {
     assert!(serde_json::from_value::<Evidence>(invalid_evidence).is_err());
     assert!(serde_json::to_value(schema_for!(Evidence)).is_ok());
     assert!(serde_json::to_value(schema_for!(Event)).is_ok());
+}
+
+#[test]
+fn legacy_workspace_fingerprint_loads_without_granting_git_blob_identity() {
+    let normalized = WorkspaceGitEntry::new(&"A".repeat(40), "100644")
+        .expect("valid Git entry should normalize");
+    assert_eq!(normalized.blob_oid(), "a".repeat(40));
+    assert!(WorkspaceGitEntry::new(&"d".repeat(64), "100755").is_ok());
+    assert!(WorkspaceGitEntry::new(&"g".repeat(40), "100644").is_err());
+    assert!(WorkspaceGitEntry::new(&"a".repeat(40), "100664").is_err());
+
+    let mut payload = json!({
+        "repository_mode": "git",
+        "head": "a".repeat(40),
+        "index_tree": format!("sha256:{}", "b".repeat(64)),
+        "status_entries": [],
+        "scope": {
+            "kind": "task",
+            "task_id": "T1",
+            "patterns": ["src/feature.rs"]
+        },
+        "file_snapshots": [{
+            "path": "src/feature.rs",
+            "kind": "regular",
+            "length": 1,
+            "executable": false,
+            "sha256": format!("sha256:{}", "c".repeat(64))
+        }]
+    });
+    let digest = fingerprint_payload_digest(&payload);
+    payload["fingerprint_digest"] = Value::String(digest);
+    let legacy: WorkspaceFingerprint =
+        serde_json::from_value(payload.clone()).expect("legacy fingerprint should remain readable");
+    assert!(!legacy.has_complete_git_entries());
+    assert!(
+        serde_json::to_value(&legacy)
+            .expect("legacy fingerprint should serialize")
+            ["file_snapshots"][0]
+            .get("expected_git_entry")
+            .is_none()
+    );
+
+    let mut malformed = payload;
+    malformed
+        .as_object_mut()
+        .expect("fingerprint should be an object")
+        .remove("fingerprint_digest");
+    malformed["file_snapshots"][0]["expected_git_entry"] = json!({
+        "blob_oid": "g".repeat(40),
+        "mode": "100644"
+    });
+    let malformed_digest = fingerprint_payload_digest(&malformed);
+    malformed["fingerprint_digest"] = Value::String(malformed_digest);
+    assert!(serde_json::from_value::<WorkspaceFingerprint>(malformed).is_err());
+}
+
+fn fingerprint_payload_digest(payload: &Value) -> String {
+    let mut bytes =
+        canonical_json_bytes(payload).expect("workspace fingerprint payload should canonicalize");
+    assert_eq!(bytes.pop(), Some(b'\n'));
+    sha256_digest(&bytes)
 }

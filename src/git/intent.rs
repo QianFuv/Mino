@@ -10,7 +10,7 @@ use fs4::{FileExt, TryLockError};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{EvidenceId, PlanId, TaskId, Timestamp};
+use crate::domain::{EvidenceId, PlanId, TaskId, Timestamp, WorkspaceGitEntry};
 use crate::managed_fs::{ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs};
 
 use super::{GitError, GitErrorKind};
@@ -45,6 +45,9 @@ pub struct CommitFileSnapshot {
     pub length: u64,
     /// Whether the Unix executable mode was observed.
     pub executable: bool,
+    /// Filtered blob and mode expected in the staged and committed tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_git_entry: Option<WorkspaceGitEntry>,
     /// Porcelain index status observed before Mino staging.
     pub index_status: char,
     /// Porcelain worktree status observed before Mino staging.
@@ -601,7 +604,10 @@ fn invalid_snapshot(snapshot: &CommitFileSnapshot) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
         || snapshot.kind == CommitFileSnapshotKind::Deleted
-            && (snapshot.length != 0 || snapshot.executable)
+            && (snapshot.length != 0
+                || snapshot.executable
+                || snapshot.expected_git_entry.is_some())
+        || snapshot.kind == CommitFileSnapshotKind::File && snapshot.expected_git_entry.is_none()
         || !matches!(
             (snapshot.index_status, snapshot.worktree_status),
             ('.', 'M' | 'D' | 'T') | ('?', '?')

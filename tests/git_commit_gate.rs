@@ -23,10 +23,13 @@ use mino::application::plan::{PlanMutationRequest, PlanService};
 use mino::domain::{
     AcceptanceCriterion, Approval, CheckId, CommitGate, CommitStatus, CriterionId, EvidenceType,
     FileChange, FileMapEntry, GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId,
-    PlanStatus, RequestId, Task, TaskId, Timestamp, VerificationCheck,
+    PlanStatus, RequestId, Task, TaskId, Timestamp, VerificationCheck, WorkspaceGitEntry,
 };
 use mino::evidence::EvidenceStore;
-use mino::git::{GitAdapter, GitCommitJournalStore, GitErrorKind};
+use mino::git::{
+    CommitFileSnapshot, CommitFileSnapshotKind, GitAdapter, GitCommitJournalStore, GitErrorKind,
+    verify_tree_matches_commit_snapshots,
+};
 use mino::project::initialize;
 use mino::render::{render_plan, write_projection};
 use mino::store::{MutationRequest, PlanStore};
@@ -135,7 +138,7 @@ fn commit_journal_rejects_a_symlinked_git_state_directory() {
 }
 
 #[test]
-fn valid_commit_is_exact_evidenced_clean_and_idempotent() {
+fn auto_commit_blob_matches_checked_expected_blob_and_is_idempotent() {
     let repository = TestRepository::new("success", FixtureState::Done, true);
     let base = git_text(repository.root(), &["rev-parse", "HEAD"]);
     let output = json_success(&run_commit(&repository));
@@ -171,6 +174,59 @@ fn valid_commit_is_exact_evidenced_clean_and_idempotent() {
     );
     assert!(git_status(repository.root()).is_empty());
 
+    let all_evidence = EvidenceStore::new(repository.root())
+        .list(repository.plan_id())
+        .expect("evidence should load");
+    let checked = all_evidence
+        .iter()
+        .find(|evidence| evidence.kind() == EvidenceType::Command)
+        .expect("task command evidence should exist");
+    let expected = checked
+        .workspace_fingerprint()
+        .expect("task evidence should contain a workspace fingerprint")
+        .file_snapshots()
+        .iter()
+        .find(|snapshot| snapshot.path() == TASK_PATH)
+        .and_then(|snapshot| snapshot.expected_git_entry())
+        .expect("checked task file should contain expected Git identity");
+    assert_eq!(
+        git_text(repository.root(), &["ls-tree", "HEAD", "--", TASK_PATH]),
+        format!(
+            "{} blob {}\t{TASK_PATH}",
+            expected.mode(),
+            expected.blob_oid()
+        )
+    );
+    let intent: Value = serde_json::from_slice(
+        &fs::read(
+            repository
+                .journal()
+                .intent_path(repository.plan_id(), &task_id()),
+        )
+        .expect("commit intent should be readable"),
+    )
+    .expect("commit intent should be JSON");
+    assert_eq!(
+        intent["files"][0]["expected_git_entry"]["blob_oid"],
+        expected.blob_oid()
+    );
+    assert_eq!(
+        intent["files"][0]["expected_git_entry"]["mode"],
+        expected.mode()
+    );
+    let deleted = CommitFileSnapshot {
+        path: "removed.txt".to_owned(),
+        kind: CommitFileSnapshotKind::Deleted,
+        digest: format!("sha256:{}", "0".repeat(64)),
+        length: 0,
+        executable: false,
+        expected_git_entry: None,
+        index_status: '.',
+        worktree_status: 'D',
+    };
+    verify_tree_matches_commit_snapshots(repository.root(), &commit, &[deleted])
+        .expect("a checked deletion should be absent from the commit tree");
+
     let plan = load_plan(&repository);
     let gate = plan
         .task(&task_id())
@@ -179,10 +235,8 @@ fn valid_commit_is_exact_evidenced_clean_and_idempotent() {
     assert_eq!(gate.status(), CommitStatus::Committed);
     assert_eq!(gate.actual_commit(), Some(commit.as_str()));
     assert_eq!(gate.committed_files(), [TASK_PATH]);
-    let commit_evidence = EvidenceStore::new(repository.root())
-        .list(repository.plan_id())
-        .expect("evidence should load")
-        .into_iter()
+    let commit_evidence = all_evidence
+        .iter()
         .filter(|evidence| evidence.kind() == EvidenceType::Commit)
         .collect::<Vec<_>>();
     assert_eq!(commit_evidence.len(), 1);
@@ -299,6 +353,143 @@ fn verified_manual_commit_closes_a_disabled_git_flow_gate_idempotently() {
     assert!(replay.plan.replayed);
     assert_eq!(replay.evidence.id(), report.evidence.id());
     assert_eq!(load_plan(&repository).revision(), plan.revision());
+}
+
+#[test]
+fn manual_commit_with_clean_filter_is_rejected_without_mutation() {
+    let repository =
+        TestRepository::new_with_git_flow("manual-filter", FixtureState::Done, true, false);
+    fs::write(
+        repository.root().join(".git/info/attributes"),
+        format!("{TASK_PATH} filter=transform\n"),
+    )
+    .expect("filter attributes should be written");
+    git(
+        repository.root(),
+        &["config", "filter.transform.clean", "cat"],
+    );
+    git(
+        repository.root(),
+        &["config", "filter.transform.smudge", "cat"],
+    );
+    git(repository.root(), &["add", "--", TASK_PATH]);
+    git(
+        repository.root(),
+        &["commit", "--quiet", "-m", COMMIT_MESSAGE],
+    );
+    let plan = load_plan(&repository);
+    let evidence_before = EvidenceStore::new(repository.root())
+        .list(repository.plan_id())
+        .expect("pre-refusal evidence should load");
+    let commit = git_text(repository.root(), &["rev-parse", "HEAD"]);
+    let error = GitCommitService::discover(repository.root())
+        .expect("manual commit service should discover")
+        .record_manual(
+            mutation(plan.revision(), 98, "record-manual-filter"),
+            &task_id(),
+            &commit,
+            "chat:manual-commit-approved",
+        )
+        .expect_err("manual commit using a clean filter should be rejected");
+
+    assert_eq!(error.category(), ErrorCategory::PolicyViolation);
+    assert_eq!(load_plan(&repository).revision(), plan.revision());
+    assert_eq!(
+        EvidenceStore::new(repository.root())
+            .list(repository.plan_id())
+            .expect("post-refusal evidence should load"),
+        evidence_before
+    );
+    assert_eq!(
+        load_plan(&repository)
+            .task(&task_id())
+            .and_then(Task::commit_gate)
+            .map(CommitGate::status),
+        Some(CommitStatus::Pending)
+    );
+}
+
+#[test]
+fn text_normalization_blob_identity_is_verified() {
+    let repository = TestRepository::new("text-normalization", FixtureState::InProgress, true);
+    fs::write(
+        repository.root().join(".git/info/attributes"),
+        format!("{TASK_PATH} text eol=lf\n"),
+    )
+    .expect("text attributes should be written");
+    fs::write(
+        repository.root().join(TASK_PATH),
+        b"pub fn feature() -> u8 {\r\n    2\r\n}\r\n",
+    )
+    .expect("CRLF task content should be written");
+    complete_in_progress_task(&repository, 120);
+    let expected = task_expected_git_entry(&repository);
+    let raw = git_text(
+        repository.root(),
+        &["hash-object", "--no-filters", "--", TASK_PATH],
+    );
+    let filtered = git_text(repository.root(), &["hash-object", "--", TASK_PATH]);
+    assert_ne!(raw, filtered);
+    assert_eq!(expected.blob_oid(), filtered);
+
+    json_success(&run_commit(&repository));
+    assert_eq!(
+        git_text(repository.root(), &["ls-tree", "HEAD", "--", TASK_PATH]),
+        format!(
+            "{} blob {}\t{TASK_PATH}",
+            expected.mode(),
+            expected.blob_oid()
+        )
+    );
+    assert!(git_status(repository.root()).is_empty());
+}
+
+#[test]
+fn working_tree_encoding_drift_stales_checked_blob_before_commit() {
+    let repository = TestRepository::new("encoding-drift", FixtureState::InProgress, true);
+    fs::write(
+        repository.root().join(".git/info/attributes"),
+        format!("{TASK_PATH} working-tree-encoding=UTF-16LE\n"),
+    )
+    .expect("initial encoding attributes should be written");
+    fs::write(repository.root().join(TASK_PATH), [0x41, 0x00, 0x0a, 0x00])
+        .expect("UTF-16LE task content should be written");
+    complete_in_progress_task(&repository, 130);
+    let checked_entry = task_expected_git_entry(&repository);
+    let plan = load_plan(&repository);
+    let head = git_text(repository.root(), &["rev-parse", "HEAD"]);
+    fs::write(
+        repository.root().join(".git/info/attributes"),
+        format!("{TASK_PATH} working-tree-encoding=UTF-16BE\n"),
+    )
+    .expect("drifted encoding attributes should be written");
+    assert_ne!(
+        git_text(repository.root(), &["hash-object", "--", TASK_PATH]),
+        checked_entry.blob_oid()
+    );
+
+    let error = GitCommitService::discover(repository.root())
+        .expect("commit service should discover")
+        .commit(repository.plan_id(), &task_id())
+        .expect_err("encoding drift should stale checked Git identity");
+
+    assert_eq!(error.category(), ErrorCategory::IncompleteOrValidation);
+    assert_eq!(git_text(repository.root(), &["rev-parse", "HEAD"]), head);
+    let stale = load_plan(&repository);
+    assert!(stale.revision() > plan.revision());
+    assert_eq!(
+        stale
+            .task(&task_id())
+            .and_then(|task| task.verification_checks().first())
+            .map(VerificationCheck::status),
+        Some(mino::domain::CheckStatus::Stale)
+    );
+    assert!(
+        !repository
+            .journal()
+            .intent_path(repository.plan_id(), &task_id())
+            .exists()
+    );
 }
 
 #[test]
@@ -788,6 +979,56 @@ fn prepare_task(root: &Path, plan_id: &PlanId, state: FixtureState) {
         .expect("binding service should discover")
         .bind_current(plan_id.clone())
         .expect("plan should bind to the current worktree");
+}
+
+fn complete_in_progress_task(repository: &TestRepository, sequence: u64) {
+    let revision = load_plan(repository).revision();
+    let execution =
+        ExecutionService::discover(repository.root()).expect("execution service should discover");
+    let checked = execution
+        .run_check(
+            &mutation(revision, sequence, "check-custom-content"),
+            &check_id(CHECK_ID),
+        )
+        .expect("custom-content task check should run");
+    assert!(checked.is_success());
+    let completion =
+        CompletionService::discover(repository.root()).expect("completion service should discover");
+    let criterion = completion
+        .pass_criterion(
+            mutation(
+                checked.plan().revision,
+                sequence + 1,
+                "criterion-custom-content",
+            ),
+            criterion_id(),
+            checked.evidence().id().clone(),
+        )
+        .expect("custom-content criterion should bind to command evidence");
+    completion
+        .complete_task(
+            mutation(criterion.revision, sequence + 2, "complete-custom-content"),
+            task_id(),
+        )
+        .expect("custom-content task should complete");
+}
+
+fn task_expected_git_entry(repository: &TestRepository) -> WorkspaceGitEntry {
+    EvidenceStore::new(repository.root())
+        .list(repository.plan_id())
+        .expect("task evidence should load")
+        .into_iter()
+        .find(|evidence| evidence.kind() == EvidenceType::Command)
+        .and_then(|evidence| {
+            evidence
+                .workspace_fingerprint()?
+                .file_snapshots()
+                .iter()
+                .find(|snapshot| snapshot.path() == TASK_PATH)
+                .and_then(|snapshot| snapshot.expected_git_entry())
+                .cloned()
+        })
+        .expect("task evidence should contain expected Git identity")
 }
 
 fn mutate<F>(

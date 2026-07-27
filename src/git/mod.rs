@@ -22,7 +22,8 @@ pub use changes::{
 };
 pub use command::{GitError, GitErrorKind};
 pub use commit::{
-    GitCommitObject, GitMutationResult, ensure_no_clean_filters, inspect_commit, run_task_commit,
+    GitCommitObject, GitMutationResult, GitTreeEntry, ensure_no_clean_filters,
+    expected_worktree_entries, inspect_commit, inspect_tree_entries, run_task_commit,
     stage_commit_paths, write_index_tree,
 };
 pub use hooks::{
@@ -40,7 +41,7 @@ pub use intent::{
 };
 pub use policy::{
     capture_commit_snapshots, task_commit_entries, validate_commit_snapshot_scope,
-    verify_commit_snapshots,
+    verify_commit_snapshots, verify_tree_matches_commit_snapshots,
 };
 pub use porcelain::{GitStatusEntry, GitStatusKind, PorcelainStatus, parse_porcelain_v2};
 pub use worktree::{

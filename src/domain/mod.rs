@@ -66,5 +66,6 @@ pub use version::{
 pub(crate) use workspace::WORKSPACE_EXTENSION_KEY;
 pub use workspace::{
     WorkspaceFileKind, WorkspaceFileSnapshot, WorkspaceFingerprint, WorkspaceFingerprintScope,
-    WorkspaceProtocolState, WorkspaceRepositoryMode, WorkspaceScopeKind, WorkspaceStatusEntry,
+    WorkspaceGitEntry, WorkspaceProtocolState, WorkspaceRepositoryMode, WorkspaceScopeKind,
+    WorkspaceStatusEntry,
 };

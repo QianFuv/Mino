@@ -1,5 +1,6 @@
 //! Pure task File Map, commit-scope, status, and content-snapshot policy.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path};
@@ -10,7 +11,7 @@ use crate::domain::{FileChange, Plan, Task};
 
 use super::{
     CommitFileSnapshot, CommitFileSnapshotKind, GitError, GitErrorKind, GitFacts, GitStatusEntry,
-    GitStatusKind, matches_file_map_path,
+    GitStatusKind, expected_worktree_entries, inspect_tree_entries, matches_file_map_path,
 };
 
 const MAX_COMMIT_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -117,6 +118,7 @@ pub fn capture_commit_snapshots(
                     digest: deletion_digest(),
                     length: 0,
                     executable: false,
+                    expected_git_entry: None,
                     index_status: entry.index_status,
                     worktree_status: entry.worktree_status,
                 }
@@ -155,12 +157,36 @@ pub fn capture_commit_snapshots(
                     digest: hash_file(&path)?,
                     length: metadata.len(),
                     executable: is_executable(&metadata),
+                    expected_git_entry: None,
                     index_status: entry.index_status,
                     worktree_status: entry.worktree_status,
                 }
             }
         };
         snapshots.push(snapshot);
+    }
+    let files = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.kind == CommitFileSnapshotKind::File)
+        .map(|snapshot| (snapshot.path.clone(), snapshot.executable))
+        .collect::<Vec<_>>();
+    let mut expected = expected_worktree_entries(root, &files)?
+        .into_iter()
+        .map(|entry| (entry.path().to_owned(), entry.entry().clone()))
+        .collect::<BTreeMap<_, _>>();
+    for snapshot in &mut snapshots {
+        if snapshot.kind == CommitFileSnapshotKind::File {
+            snapshot.expected_git_entry =
+                Some(expected.remove(&snapshot.path).ok_or_else(|| {
+                    invalid(format!(
+                        "Git did not return an expected blob identity for {}",
+                        snapshot.path
+                    ))
+                })?);
+        }
+    }
+    if !expected.is_empty() {
+        return Err(invalid("Git returned unexpected prepared blob identities"));
     }
     Ok(snapshots)
 }
@@ -198,6 +224,41 @@ pub fn verify_commit_snapshots(
             "Task file content or mode changed after commit intent preparation",
         ))
     }
+}
+
+/// Verifies that a Git commit or tree contains the exact prepared blobs and modes.
+///
+/// # Errors
+///
+/// Returns a drift-style invalid-output error when a file entry differs or a
+/// prepared deletion remains present in the supplied tree.
+pub fn verify_tree_matches_commit_snapshots(
+    root: &Path,
+    revision: &str,
+    expected: &[CommitFileSnapshot],
+) -> Result<(), GitError> {
+    let paths = expected
+        .iter()
+        .map(|snapshot| snapshot.path.clone())
+        .collect::<Vec<_>>();
+    let actual = inspect_tree_entries(root, revision, &paths)?
+        .into_iter()
+        .map(|entry| (entry.path().to_owned(), entry.entry().clone()))
+        .collect::<BTreeMap<_, _>>();
+    for snapshot in expected {
+        match snapshot.kind {
+            CommitFileSnapshotKind::File
+                if actual.get(&snapshot.path) == snapshot.expected_git_entry.as_ref() => {}
+            CommitFileSnapshotKind::Deleted if !actual.contains_key(&snapshot.path) => {}
+            _ => {
+                return Err(invalid(format!(
+                    "Git tree entry for {} differs from checked worktree content",
+                    snapshot.path
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Revalidates prepared paths against the current task File Map and commit scope.

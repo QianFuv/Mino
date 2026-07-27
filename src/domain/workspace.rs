@@ -45,6 +45,45 @@ pub enum WorkspaceFileKind {
     Directory,
 }
 
+/// Expected immutable Git tree identity for one regular worktree file.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceGitEntry {
+    blob_oid: String,
+    mode: String,
+}
+
+impl WorkspaceGitEntry {
+    /// Creates one normalized regular-file Git tree entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error for a malformed object ID or unsupported mode.
+    pub fn new(blob_oid: &str, mode: &str) -> Result<Self, DomainError> {
+        let entry = Self {
+            blob_oid: blob_oid.to_ascii_lowercase(),
+            mode: mode.to_owned(),
+        };
+        if valid_git_entry(&entry) {
+            Ok(entry)
+        } else {
+            Err(invariant("Workspace Git entry is malformed"))
+        }
+    }
+
+    /// Returns the expected Git blob object ID.
+    #[must_use]
+    pub fn blob_oid(&self) -> &str {
+        &self.blob_oid
+    }
+
+    /// Returns the expected regular-file Git mode.
+    #[must_use]
+    pub fn mode(&self) -> &str {
+        &self.mode
+    }
+}
+
 /// One normalized Git status entry included in a fingerprint.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -92,6 +131,8 @@ pub struct WorkspaceFileSnapshot {
     length: u64,
     executable: bool,
     sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_git_entry: Option<WorkspaceGitEntry>,
 }
 
 impl WorkspaceFileSnapshot {
@@ -101,6 +142,7 @@ impl WorkspaceFileSnapshot {
         length: u64,
         executable: bool,
         sha256: String,
+        expected_git_entry: Option<WorkspaceGitEntry>,
     ) -> Self {
         Self {
             path,
@@ -108,6 +150,7 @@ impl WorkspaceFileSnapshot {
             length,
             executable,
             sha256,
+            expected_git_entry,
         }
     }
 
@@ -139,6 +182,12 @@ impl WorkspaceFileSnapshot {
     #[must_use]
     pub fn sha256(&self) -> &str {
         &self.sha256
+    }
+
+    /// Returns the Git blob and mode expected from these worktree bytes.
+    #[must_use]
+    pub const fn expected_git_entry(&self) -> Option<&WorkspaceGitEntry> {
+        self.expected_git_entry.as_ref()
     }
 }
 
@@ -305,6 +354,16 @@ impl WorkspaceFingerprint {
         &self.fingerprint_digest
     }
 
+    /// Returns whether every regular Git file has a checked tree identity.
+    #[must_use]
+    pub fn has_complete_git_entries(&self) -> bool {
+        self.repository_mode != WorkspaceRepositoryMode::Git
+            || self.file_snapshots.iter().all(|snapshot| {
+                (snapshot.kind == WorkspaceFileKind::Regular)
+                    == snapshot.expected_git_entry.is_some()
+            })
+    }
+
     /// Validates path safety, ordering, repository fields, and the canonical digest.
     ///
     /// # Errors
@@ -360,6 +419,10 @@ impl WorkspaceFingerprint {
                 if self.head.is_some()
                     || self.index_tree.is_some()
                     || !self.status_entries.is_empty()
+                    || self
+                        .file_snapshots
+                        .iter()
+                        .any(|snapshot| snapshot.expected_git_entry.is_some())
                 {
                     return Err(invariant(
                         "Non-Git workspace fingerprint contains Git-only identity",
@@ -501,6 +564,18 @@ fn valid_file_snapshot(snapshot: &WorkspaceFileSnapshot) -> bool {
         && is_sha256(&snapshot.sha256)
         && (snapshot.kind == WorkspaceFileKind::Regular
             || snapshot.length == 0 && !snapshot.executable)
+        && snapshot.expected_git_entry.as_ref().is_none_or(|entry| {
+            snapshot.kind == WorkspaceFileKind::Regular && valid_git_entry(entry)
+        })
+}
+
+fn valid_git_entry(entry: &WorkspaceGitEntry) -> bool {
+    matches!(entry.blob_oid.len(), 40 | 64)
+        && entry
+            .blob_oid
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && matches!(entry.mode.as_str(), "100644" | "100755")
 }
 
 fn is_safe_pattern(value: &str) -> bool {

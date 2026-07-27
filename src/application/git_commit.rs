@@ -1,6 +1,6 @@
 //! Plan-scoped commit preflight, staging, recovery, evidence, and gate recording.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -15,7 +15,7 @@ use crate::application::plan::{
 use crate::domain::{
     CheckStatus, CommitStatus, CriterionStatus, Evidence, EvidenceId, EvidenceType, FileChange,
     GitFlowConsent, Plan, PlanId, PlanStatus, RequestId, Task, TaskId, TaskStatus, Timestamp,
-    VerificationCheck, WorkspaceRepositoryMode,
+    VerificationCheck, WorkspaceFileKind, WorkspaceFingerprint, WorkspaceRepositoryMode,
 };
 use crate::evidence::{
     AddEvidenceRequest, EvidenceError, EvidenceErrorKind, EvidenceRequestContext, EvidenceSource,
@@ -25,9 +25,9 @@ use crate::git::{
     ActiveBindingStatus, ActiveBindingStore, CommitFileSnapshot, GitAdapter, GitBranchJournalStore,
     GitCommitCompletion, GitCommitCompletionInput, GitCommitIntent, GitCommitJournal,
     GitCommitJournalStore, GitCommitObject, GitFacts, GitStagedCommit, capture_commit_snapshots,
-    ensure_no_clean_filters, inspect_commit, matches_file_map_path, run_task_commit,
-    stage_commit_paths, task_commit_entries, validate_commit_snapshot_scope,
-    verify_commit_snapshots, write_index_tree,
+    ensure_no_clean_filters, inspect_commit, inspect_tree_entries, matches_file_map_path,
+    run_task_commit, stage_commit_paths, task_commit_entries, validate_commit_snapshot_scope,
+    verify_commit_snapshots, verify_tree_matches_commit_snapshots, write_index_tree,
 };
 use crate::runner::Redactor;
 use crate::workspace::{
@@ -199,6 +199,8 @@ impl GitCommitService {
         let evidence = if is_replay {
             terminal_gate_evidence(&self.evidence, &current, task, EvidenceType::Commit)?
         } else {
+            ensure_no_clean_filters(&self.root, &commit.files)
+                .map_err(|error| map_git_error(&error))?;
             let evidence = self
                 .evidence
                 .list(current.id())
@@ -495,6 +497,8 @@ impl GitCommitService {
         verify_commit_snapshots(&self.root, &intent.files)
             .map_err(|error| map_git_error(&error))?;
         let tree = write_index_tree(&self.root).map_err(|error| map_git_error(&error))?;
+        verify_tree_matches_commit_snapshots(&self.root, &tree, &intent.files)
+            .map_err(|error| map_git_error(&error))?;
         let staged = GitStagedCommit::new(intent, tree, Timestamp::now_utc())
             .map_err(|error| map_git_error(&error))?;
         store
@@ -521,14 +525,14 @@ impl GitCommitService {
         verify_commit_snapshots(&self.root, &intent.files)
             .map_err(|error| map_git_error(&error))?;
         let tree = write_index_tree(&self.root).map_err(|error| map_git_error(&error))?;
-        if tree == staged.tree {
-            Ok(())
-        } else {
-            Err(MinoError::new(
+        if tree != staged.tree {
+            return Err(MinoError::new(
                 ErrorCategory::DriftDetected,
                 "Current index tree differs from the recorded staged tree",
-            ))
+            ));
         }
+        verify_tree_matches_commit_snapshots(&self.root, &tree, &intent.files)
+            .map_err(|error| map_git_error(&error))
     }
 
     fn run_and_reconcile(
@@ -609,6 +613,8 @@ impl GitCommitService {
         let commit =
             inspect_commit(&self.root, commit_id).map_err(|error| map_git_error(&error))?;
         validate_commit_object(&intent, &staged, &commit)?;
+        verify_tree_matches_commit_snapshots(&self.root, &commit.tree, &intent.files)
+            .map_err(|error| map_git_error(&error))?;
         self.finish_commit(store, intent, staged, commit, facts.clone(), reconciled)
     }
 
@@ -1363,6 +1369,15 @@ fn validate_manual_check(
             format!("Check {} evidence has no workspace fingerprint", check.id()),
         )
     })?;
+    if !fingerprint.has_complete_git_entries() {
+        return Err(MinoError::new(
+            ErrorCategory::IncompleteOrValidation,
+            format!(
+                "Check {} evidence predates Git blob verification; rerun the check",
+                check.id()
+            ),
+        ));
+    }
     let current = recapture_workspace_fingerprint(root, plan, fingerprint)?;
     let mismatch = if fingerprint.repository_mode() != WorkspaceRepositoryMode::Git
         || current.repository_mode() != WorkspaceRepositoryMode::Git
@@ -1385,6 +1400,46 @@ fn validate_manual_check(
                 check.id()
             ),
         ));
+    }
+    validate_fingerprint_commit_tree(root, fingerprint, &commit.tree, check)?;
+    Ok(())
+}
+
+fn validate_fingerprint_commit_tree(
+    root: &Path,
+    fingerprint: &WorkspaceFingerprint,
+    tree: &str,
+    check: &VerificationCheck,
+) -> Result<(), MinoError> {
+    let paths = fingerprint
+        .file_snapshots()
+        .iter()
+        .filter(|snapshot| snapshot.kind() != WorkspaceFileKind::Directory)
+        .map(|snapshot| snapshot.path().to_owned())
+        .collect::<Vec<_>>();
+    let actual = inspect_tree_entries(root, tree, &paths)
+        .map_err(|error| map_git_error(&error))?
+        .into_iter()
+        .map(|entry| (entry.path().to_owned(), entry.entry().clone()))
+        .collect::<BTreeMap<_, _>>();
+    for snapshot in fingerprint.file_snapshots() {
+        let matches = match snapshot.kind() {
+            WorkspaceFileKind::Regular => {
+                actual.get(snapshot.path()) == snapshot.expected_git_entry()
+            }
+            WorkspaceFileKind::Missing => !actual.contains_key(snapshot.path()),
+            WorkspaceFileKind::Directory => true,
+        };
+        if !matches {
+            return Err(MinoError::new(
+                ErrorCategory::IncompleteOrValidation,
+                format!(
+                    "Check {} expected Git tree entry for {} differs from the manual commit",
+                    check.id(),
+                    snapshot.path()
+                ),
+            ));
+        }
     }
     Ok(())
 }

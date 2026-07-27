@@ -9,7 +9,10 @@ use crate::domain::{
     FileChange, Plan, TaskId, WorkspaceFileKind, WorkspaceFileSnapshot, WorkspaceFingerprint,
     WorkspaceFingerprintScope, WorkspaceRepositoryMode, WorkspaceScopeKind, WorkspaceStatusEntry,
 };
-use crate::git::{GitAdapter, GitError, GitStatusEntry, GitStatusKind, matches_file_map_path};
+use crate::git::{
+    GitAdapter, GitError, GitStatusEntry, GitStatusKind, expected_worktree_entries,
+    matches_file_map_path,
+};
 use crate::managed_fs::{ManagedEntryKind, ManagedFsError, ManagedPath, ProjectFs};
 use crate::store::sha256_digest;
 use crate::{ErrorCategory, MinoError};
@@ -241,7 +244,7 @@ fn capture_scope(
     for entry in &status_entries {
         paths.insert(entry.path().to_owned());
     }
-    let file_snapshots = capture_snapshots(&filesystem, paths)?;
+    let file_snapshots = capture_snapshots(&filesystem, paths, repository_mode)?;
     WorkspaceFingerprint::new(
         repository_mode,
         head,
@@ -488,9 +491,10 @@ fn explicit_walk_root(
 fn capture_snapshots(
     filesystem: &ProjectFs,
     paths: BTreeSet<String>,
+    repository_mode: WorkspaceRepositoryMode,
 ) -> Result<Vec<WorkspaceFileSnapshot>, MinoError> {
     let mut total_bytes = 0_u64;
-    paths
+    let snapshots = paths
         .into_iter()
         .map(|path| {
             let managed = ManagedPath::new(&path).map_err(managed_error)?;
@@ -501,6 +505,7 @@ fn capture_snapshots(
                     0,
                     false,
                     sha256_digest(b"mino.workspace.missing/v1"),
+                    None,
                 )),
                 Some(ManagedEntryKind::Directory) => Ok(WorkspaceFileSnapshot::new(
                     path,
@@ -508,6 +513,7 @@ fn capture_snapshots(
                     0,
                     false,
                     sha256_digest(b"mino.workspace.directory/v1"),
+                    None,
                 )),
                 Some(ManagedEntryKind::File) => {
                     let (bytes, metadata) = filesystem
@@ -526,6 +532,7 @@ fn capture_snapshots(
                         length,
                         is_executable(&metadata),
                         sha256_digest(&bytes),
+                        None,
                     ))
                 }
                 Some(ManagedEntryKind::Symlink) => Err(MinoError::new(
@@ -538,7 +545,54 @@ fn capture_snapshots(
                 )),
             }
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    if repository_mode == WorkspaceRepositoryMode::NonGit {
+        return Ok(snapshots);
+    }
+    let files = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.kind() == WorkspaceFileKind::Regular)
+        .map(|snapshot| (snapshot.path().to_owned(), snapshot.executable()))
+        .collect::<Vec<_>>();
+    let mut expected = expected_worktree_entries(filesystem.root(), &files)
+        .map_err(|error| git_error(&error))?
+        .into_iter()
+        .map(|entry| (entry.path().to_owned(), entry.entry().clone()))
+        .collect::<BTreeMap<_, _>>();
+    let snapshots = snapshots
+        .into_iter()
+        .map(|snapshot| {
+            let expected_git_entry = if snapshot.kind() == WorkspaceFileKind::Regular {
+                Some(expected.remove(snapshot.path()).ok_or_else(|| {
+                    MinoError::new(
+                        ErrorCategory::DriftDetected,
+                        format!(
+                            "Git did not return an expected blob identity for {}",
+                            snapshot.path()
+                        ),
+                    )
+                })?)
+            } else {
+                None
+            };
+            Ok(WorkspaceFileSnapshot::new(
+                snapshot.path().to_owned(),
+                snapshot.kind(),
+                snapshot.length(),
+                snapshot.executable(),
+                snapshot.sha256().to_owned(),
+                expected_git_entry,
+            ))
+        })
+        .collect::<Result<Vec<_>, MinoError>>()?;
+    if expected.is_empty() {
+        Ok(snapshots)
+    } else {
+        Err(MinoError::new(
+            ErrorCategory::DriftDetected,
+            "Git returned unexpected workspace blob identities",
+        ))
+    }
 }
 
 fn protocol_path(path: &Path) -> Result<String, MinoError> {
