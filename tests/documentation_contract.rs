@@ -105,7 +105,9 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     ),
     (
         &["plan", "amend", "--help"],
-        &["propose", "approve", "apply", "help"],
+        &[
+            "propose", "approve", "reject", "withdraw", "cancel", "apply", "help",
+        ],
     ),
     (
         &["standards", "--help"],
@@ -203,7 +205,10 @@ const LEAF_COMMANDS: &[&str] = &[
     "plan apply",
     "plan amend apply",
     "plan amend approve",
+    "plan amend cancel",
     "plan amend propose",
+    "plan amend reject",
+    "plan amend withdraw",
     "plan approve",
     "plan archive",
     "plan context add",
@@ -397,6 +402,8 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             "git.gate.skip",
             "git.hook.install",
             "plan.amend.approve",
+            "plan.amend.cancel",
+            "plan.amend.reject",
             "plan.approve",
             "plan.archive",
             "review.accept",

@@ -109,6 +109,71 @@ impl AmendmentService {
         )
     }
 
+    /// Rejects one unapproved Material proposal without applying its operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for an ineligible change, incomplete disposition,
+    /// stale revision, storage failure, or projection drift.
+    pub fn reject(
+        &self,
+        request: PlanMutationRequest,
+        change_id: String,
+        decision_reference: String,
+        reason: String,
+    ) -> Result<PlanOperationReport, MinoError> {
+        self.dispose(
+            request,
+            change_id,
+            AmendmentDisposition::Reject {
+                decision_reference,
+                reason,
+            },
+        )
+    }
+
+    /// Withdraws one unapproved proposal as its original proposer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for an ineligible actor or change, incomplete reason,
+    /// stale revision, storage failure, or projection drift.
+    pub fn withdraw(
+        &self,
+        request: PlanMutationRequest,
+        change_id: String,
+        reason: String,
+    ) -> Result<PlanOperationReport, MinoError> {
+        self.dispose(
+            request,
+            change_id,
+            AmendmentDisposition::Withdraw { reason },
+        )
+    }
+
+    /// Cancels one approved Material proposal without applying its operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for an ineligible actor or change, incomplete disposition,
+    /// stale revision, storage failure, or projection drift.
+    pub fn cancel(
+        &self,
+        request: PlanMutationRequest,
+        change_id: String,
+        decision_reference: String,
+        reason: String,
+    ) -> Result<PlanOperationReport, MinoError> {
+        self.dispose(
+            request,
+            change_id,
+            AmendmentDisposition::Cancel {
+                decision_reference,
+                reason,
+            },
+        )
+    }
+
     /// Applies one eligible proposal and revalidates every resulting plan layer.
     ///
     /// # Errors
@@ -151,6 +216,71 @@ impl AmendmentService {
             move |plan, at| plan.apply_amendment(&change_id, at),
         )
     }
+
+    fn dispose(
+        &self,
+        request: PlanMutationRequest,
+        change_id: String,
+        disposition: AmendmentDisposition,
+    ) -> Result<PlanOperationReport, MinoError> {
+        let stored = self.plans.load_stored(&request.plan_id)?;
+        let amendment = stored.amendment(&change_id).ok_or_else(|| {
+            MinoError::new(
+                ErrorCategory::IncompleteOrValidation,
+                format!("Amendment {change_id} does not exist"),
+            )
+        })?;
+        let changed_fields = proposal_changed_fields(amendment.classification());
+        if is_replay_position(&stored, request.expected_revision)? {
+            return self.plans.replay_semantic(request, changed_fields);
+        }
+        let actor = request.actor.clone();
+        self.plans.commit_semantic(
+            request,
+            changed_fields,
+            |_| Ok(None),
+            move |plan, at| match &disposition {
+                AmendmentDisposition::Reject {
+                    decision_reference,
+                    reason,
+                } => plan.reject_amendment(
+                    &change_id,
+                    actor.clone(),
+                    decision_reference.clone(),
+                    reason.clone(),
+                    at,
+                ),
+                AmendmentDisposition::Withdraw { reason } => {
+                    plan.withdraw_amendment(&change_id, actor.clone(), reason.clone(), at)
+                }
+                AmendmentDisposition::Cancel {
+                    decision_reference,
+                    reason,
+                } => plan.cancel_amendment(
+                    &change_id,
+                    actor.clone(),
+                    decision_reference.clone(),
+                    reason.clone(),
+                    at,
+                ),
+            },
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+enum AmendmentDisposition {
+    Reject {
+        decision_reference: String,
+        reason: String,
+    },
+    Withdraw {
+        reason: String,
+    },
+    Cancel {
+        decision_reference: String,
+        reason: String,
+    },
 }
 
 fn proposal_changed_fields(classification: AmendmentClassification) -> Vec<String> {

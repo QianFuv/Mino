@@ -96,6 +96,9 @@
 |---|---:|---|
 | `mino plan amend propose` | 是 | 保存类型化 patch、基准 revision/hash、计算出的影响和递增 `C<n>`；调用方可提高但不能降低最低分类。 |
 | `mino plan amend approve` | 是，审批边界 | 用 `--change C<n> --approval-ref <ref>` 批准当前待处理的 Material 修订。 |
+| `mino plan amend reject` | 是，审批边界 | 用 decision reference 和 reason 拒绝尚未批准的 Material 修订，不应用其操作。 |
+| `mino plan amend withdraw` | 是 | 原提案人用 reason 撤回尚未批准的 Minor 或 Material 修订，不应用其操作。 |
+| `mino plan amend cancel` | 是，审批边界 | 原批准人用 decision reference 和 reason 取消已批准但尚未应用的 Material 修订。 |
 | `mino plan amend apply` | 是 | 原子应用符合条件的提案，并按 Minor 或 Material 规则使旧状态失效。 |
 | `mino plan fork` | 新 Draft | 审计指定历史 revision，复制 authored values，记录 lineage，并清除执行与信任状态。 |
 | `mino plan diff` | 否 | 比较两个当前或历史版本，输出 `mino.plan-diff/v1` 的 Added、Removed、Changed、Moved 路径。 |

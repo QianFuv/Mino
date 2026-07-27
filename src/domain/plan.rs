@@ -898,7 +898,7 @@ impl Plan {
     #[must_use]
     pub fn is_evidence_stale(&self, evidence_id: &EvidenceId) -> bool {
         self.amendments.iter().any(|amendment| {
-            !amendment.is_pending() && amendment.impact().stale_evidence().contains(evidence_id)
+            amendment.is_applied() && amendment.impact().stale_evidence().contains(evidence_id)
         })
     }
 
@@ -1197,6 +1197,62 @@ impl Plan {
         candidate.validate_invariants()?;
         *self = candidate;
         Ok(())
+    }
+
+    /// Rejects one unapproved Material amendment without applying its operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the named proposal awaits Material approval and
+    /// the actor, decision reference, and reason are complete.
+    pub fn reject_amendment(
+        &mut self,
+        change_id: &str,
+        actor: String,
+        decision_reference: String,
+        reason: String,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.dispose_amendment(change_id, updated_at, move |amendment, at| {
+            amendment.reject(actor, decision_reference, reason, at)
+        })
+    }
+
+    /// Withdraws one unapproved proposal as its original proposer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the proposal is unapproved, the actor is its
+    /// proposer, and the reason is complete.
+    pub fn withdraw_amendment(
+        &mut self,
+        change_id: &str,
+        actor: String,
+        reason: String,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.dispose_amendment(change_id, updated_at, move |amendment, at| {
+            amendment.withdraw(actor, reason, at)
+        })
+    }
+
+    /// Cancels one approved Material amendment without applying its operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the named proposal is approved, the actor is its
+    /// original approver, and the decision reference and reason are complete.
+    pub fn cancel_amendment(
+        &mut self,
+        change_id: &str,
+        actor: String,
+        decision_reference: String,
+        reason: String,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.dispose_amendment(change_id, updated_at, move |amendment, at| {
+            amendment.cancel(actor, decision_reference, reason, at)
+        })
     }
 
     /// Atomically applies one eligible typed amendment and its invalidations.
@@ -4445,6 +4501,56 @@ impl Plan {
             })
     }
 
+    fn dispose_amendment<F>(
+        &mut self,
+        change_id: &str,
+        updated_at: Timestamp,
+        disposition: F,
+    ) -> Result<(), DomainError>
+    where
+        F: FnOnce(&mut Amendment, Timestamp) -> Result<(), DomainError>,
+    {
+        let amendment_index = self.pending_amendment_index(change_id)?;
+        let amendment_blocker =
+            format!("Material amendment {change_id} requires explicit approval");
+        let owns_blocked_state = self.status == PlanStatus::Blocked
+            && self.blocker.as_deref() == Some(amendment_blocker.as_str());
+        let next_revision = self.next_revision()?;
+        let mut candidate = self.clone();
+        disposition(
+            &mut candidate.amendments[amendment_index],
+            updated_at.clone(),
+        )?;
+        if owns_blocked_state {
+            let resume_status = candidate.resume_status.ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "Material amendment blocked state has no resume status",
+                )
+            })?;
+            if resume_status == PlanStatus::InProgress {
+                candidate
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.status() == TaskStatus::Blocked)
+                    .ok_or_else(|| {
+                        DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            "Material amendment blocked state has no blocked task",
+                        )
+                    })?
+                    .resume()?;
+            }
+            candidate.status = resume_status;
+            candidate.resume_status = None;
+            candidate.blocker = None;
+        }
+        candidate.record_revision(next_revision, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
+    }
+
     fn validate_amendment_state(&self) -> Result<(), DomainError> {
         let mut pending_count = 0_usize;
         let mut previous_base_revision = 0_u64;
@@ -4483,7 +4589,10 @@ impl Plan {
                     .checked_add(match amendment.status() {
                         AmendmentStatus::Approved => 2,
                         AmendmentStatus::Proposed | AmendmentStatus::ApprovalRequired => 1,
-                        AmendmentStatus::Applied => 0,
+                        AmendmentStatus::Rejected
+                        | AmendmentStatus::Withdrawn
+                        | AmendmentStatus::Cancelled
+                        | AmendmentStatus::Applied => 0,
                     })
                     .ok_or_else(|| {
                         DomainError::new(

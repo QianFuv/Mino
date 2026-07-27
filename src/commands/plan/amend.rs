@@ -28,6 +28,12 @@ enum AmendAction {
     Propose(ProposeArguments),
     /// Record explicit approval for a pending Material change.
     Approve(ApproveArguments),
+    /// Reject an unapproved Material change without applying it.
+    Reject(DispositionArguments),
+    /// Withdraw an unapproved change as its original proposer.
+    Withdraw(WithdrawArguments),
+    /// Cancel an approved Material change without applying it.
+    Cancel(DispositionArguments),
     /// Atomically apply an eligible typed proposal.
     Apply(ApplyArguments),
 }
@@ -86,6 +92,33 @@ struct ApplyArguments {
     change: String,
 }
 
+#[derive(Debug, Args)]
+struct DispositionArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    /// Stable protected-change identifier such as C1.
+    #[arg(long)]
+    change: String,
+    /// Auditable reference for the protected terminal decision.
+    #[arg(long)]
+    decision_ref: String,
+    /// Exact reason the proposal will not be applied.
+    #[arg(long, allow_hyphen_values = true)]
+    reason: String,
+}
+
+#[derive(Debug, Args)]
+struct WithdrawArguments {
+    #[command(flatten)]
+    mutation: MutationArguments,
+    /// Stable protected-change identifier such as C1.
+    #[arg(long)]
+    change: String,
+    /// Exact reason the original proposer withdrew the proposal.
+    #[arg(long, allow_hyphen_values = true)]
+    reason: String,
+}
+
 pub(crate) fn execute(
     start: &Path,
     arguments: AmendArguments,
@@ -94,6 +127,9 @@ pub(crate) fn execute(
     match arguments.action {
         AmendAction::Propose(arguments) => propose(start, &service, arguments),
         AmendAction::Approve(arguments) => approve(start, &service, arguments),
+        AmendAction::Reject(arguments) => reject(start, &service, arguments),
+        AmendAction::Withdraw(arguments) => withdraw(start, &service, arguments),
+        AmendAction::Cancel(arguments) => cancel(start, &service, arguments),
         AmendAction::Apply(arguments) => apply(start, &service, arguments),
     }
 }
@@ -174,6 +210,73 @@ fn apply(
     let request = mutation_request(arguments.mutation, command)?;
     let report = service.apply(request, arguments.change)?;
     response_with_guidance(start, "Protected amendment applied.", report)
+}
+
+fn reject(
+    start: &Path,
+    service: &AmendmentService,
+    arguments: DispositionArguments,
+) -> Result<CommandResponse, MinoError> {
+    let command = disposition_command("reject", &arguments);
+    let request = mutation_request(arguments.mutation, command)?;
+    let report = service.reject(
+        request,
+        arguments.change,
+        arguments.decision_ref,
+        arguments.reason,
+    )?;
+    response_with_guidance(start, "Protected amendment rejected.", report)
+}
+
+fn withdraw(
+    start: &Path,
+    service: &AmendmentService,
+    arguments: WithdrawArguments,
+) -> Result<CommandResponse, MinoError> {
+    let command = mutation_command(
+        &["withdraw"],
+        &arguments.mutation,
+        vec![
+            "--change".to_owned(),
+            arguments.change.clone(),
+            "--reason".to_owned(),
+            arguments.reason.clone(),
+        ],
+    );
+    let request = mutation_request(arguments.mutation, command)?;
+    let report = service.withdraw(request, arguments.change, arguments.reason)?;
+    response_with_guidance(start, "Protected amendment withdrawn.", report)
+}
+
+fn cancel(
+    start: &Path,
+    service: &AmendmentService,
+    arguments: DispositionArguments,
+) -> Result<CommandResponse, MinoError> {
+    let command = disposition_command("cancel", &arguments);
+    let request = mutation_request(arguments.mutation, command)?;
+    let report = service.cancel(
+        request,
+        arguments.change,
+        arguments.decision_ref,
+        arguments.reason,
+    )?;
+    response_with_guidance(start, "Protected amendment cancelled.", report)
+}
+
+fn disposition_command(action: &str, arguments: &DispositionArguments) -> Vec<String> {
+    mutation_command(
+        &[action],
+        &arguments.mutation,
+        vec![
+            "--change".to_owned(),
+            arguments.change.clone(),
+            "--decision-ref".to_owned(),
+            arguments.decision_ref.clone(),
+            "--reason".to_owned(),
+            arguments.reason.clone(),
+        ],
+    )
 }
 
 fn mutation_request(

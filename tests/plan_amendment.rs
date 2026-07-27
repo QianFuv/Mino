@@ -485,6 +485,193 @@ fn verification_gate_weakening_is_contextually_material() {
 }
 
 #[test]
+fn proposer_can_withdraw_unapproved_amendment_without_applying_it() {
+    let mut plan = approved_plan("withdraw-amendment", false);
+    let original = plan
+        .task(&task_id("T1"))
+        .expect("task should exist")
+        .verification_checks()[0]
+        .command()
+        .to_vec();
+    plan.propose_amendment(
+        "Correct the verification command".to_owned(),
+        patch(&json!([{
+            "operation": "replace-task-verification",
+            "task_id": "T1",
+            "check_id": "T1-V1",
+            "command": ["cargo", "test", "--lib"],
+            "cwd": ".",
+            "expected_exit_code": 0,
+            "required": true
+        }])),
+        None,
+        state_hash(&plan),
+        "codex".to_owned(),
+        timestamp(8),
+    )
+    .expect("proposal should succeed");
+    let before_invalid = canonical_json_bytes(&plan).expect("plan should canonicalize");
+    assert!(
+        plan.withdraw_amendment(
+            "C1",
+            "other".to_owned(),
+            "Not the proposer".to_owned(),
+            timestamp(9),
+        )
+        .is_err()
+    );
+    assert_eq!(canonical_json_bytes(&plan).unwrap(), before_invalid);
+
+    plan.withdraw_amendment(
+        "C1",
+        "codex".to_owned(),
+        "The replacement was incorrect".to_owned(),
+        timestamp(10),
+    )
+    .expect("proposer should withdraw");
+    let amendment = plan.amendment("C1").expect("change should exist");
+    assert_eq!(amendment.status(), AmendmentStatus::Withdrawn);
+    assert_eq!(amendment.disposition_actor(), Some("codex"));
+    assert_eq!(
+        amendment.disposition_reason(),
+        Some("The replacement was incorrect")
+    );
+    assert!(amendment.disposition_reference().is_none());
+    assert!(!plan.has_pending_amendment());
+    assert_eq!(
+        plan.task(&task_id("T1"))
+            .expect("task should exist")
+            .verification_checks()[0]
+            .command(),
+        original
+    );
+}
+
+#[test]
+fn material_rejection_restores_execution_without_staling_evidence() {
+    let mut plan = approved_plan("reject-amendment", false);
+    start_and_satisfy_first_task(&mut plan);
+    plan.propose_amendment(
+        "Change the promised behavior".to_owned(),
+        patch(&json!([{
+            "operation": "replace-summary",
+            "summary": "Rejected behavior"
+        }])),
+        None,
+        state_hash(&plan),
+        "codex".to_owned(),
+        timestamp(12),
+    )
+    .expect("Material proposal should succeed");
+    assert_eq!(plan.status(), PlanStatus::Blocked);
+    assert_eq!(
+        plan.task(&task_id("T1")).unwrap().status(),
+        TaskStatus::Blocked
+    );
+    let before_invalid = canonical_json_bytes(&plan).expect("plan should canonicalize");
+    assert!(
+        plan.reject_amendment(
+            "C1",
+            "user".to_owned(),
+            String::new(),
+            "Reject the proposal".to_owned(),
+            timestamp(13),
+        )
+        .is_err()
+    );
+    assert_eq!(canonical_json_bytes(&plan).unwrap(), before_invalid);
+
+    plan.reject_amendment(
+        "C1",
+        "user".to_owned(),
+        "chat:material-rejected".to_owned(),
+        "Keep the approved behavior".to_owned(),
+        timestamp(14),
+    )
+    .expect("Material proposal should reject");
+    let amendment = plan.amendment("C1").expect("change should exist");
+    assert_eq!(amendment.status(), AmendmentStatus::Rejected);
+    assert_eq!(amendment.disposition_actor(), Some("user"));
+    assert_eq!(
+        amendment.disposition_reference(),
+        Some("chat:material-rejected")
+    );
+    assert_eq!(plan.status(), PlanStatus::InProgress);
+    assert_eq!(
+        plan.task(&task_id("T1")).unwrap().status(),
+        TaskStatus::InProgress
+    );
+    assert!(!plan.is_evidence_stale(&evidence_id(1)));
+    assert!(!plan.is_evidence_stale(&evidence_id(2)));
+    assert!(plan.has_plan_approval());
+    assert_ne!(plan.summary(), "Rejected behavior");
+    plan.record_checkpoint(
+        &task_id("T1"),
+        CheckpointKind::Verification,
+        "Continue after rejecting the amendment",
+        "codex",
+        timestamp(15),
+    )
+    .expect("terminal amendment must not block later evidence-bearing mutations");
+}
+
+#[test]
+fn original_approver_can_cancel_approved_material_amendment() {
+    let mut plan = approved_plan("cancel-amendment", false);
+    plan.propose_amendment(
+        "Change the promised behavior".to_owned(),
+        patch(&json!([{
+            "operation": "replace-summary",
+            "summary": "Cancelled behavior"
+        }])),
+        None,
+        state_hash(&plan),
+        "codex".to_owned(),
+        timestamp(8),
+    )
+    .expect("Material proposal should succeed");
+    plan.approve_amendment(
+        "C1",
+        "user".to_owned(),
+        "chat:material-approved".to_owned(),
+        timestamp(9),
+    )
+    .expect("Material proposal should approve");
+    let before_invalid = canonical_json_bytes(&plan).expect("plan should canonicalize");
+    assert!(
+        plan.cancel_amendment(
+            "C1",
+            "other".to_owned(),
+            "chat:cancelled".to_owned(),
+            "Wrong actor".to_owned(),
+            timestamp(10),
+        )
+        .is_err()
+    );
+    assert_eq!(canonical_json_bytes(&plan).unwrap(), before_invalid);
+
+    plan.cancel_amendment(
+        "C1",
+        "user".to_owned(),
+        "chat:material-cancelled".to_owned(),
+        "Approval was rescinded".to_owned(),
+        timestamp(11),
+    )
+    .expect("original approver should cancel");
+    let amendment = plan.amendment("C1").expect("change should exist");
+    assert_eq!(amendment.status(), AmendmentStatus::Cancelled);
+    assert_eq!(amendment.disposition_actor(), Some("user"));
+    assert_eq!(
+        amendment.disposition_reference(),
+        Some("chat:material-cancelled")
+    );
+    assert_eq!(plan.status(), PlanStatus::Ready);
+    assert!(plan.has_plan_approval());
+    assert_ne!(plan.summary(), "Cancelled behavior");
+    assert!(!plan.has_pending_amendment());
+}
+
+#[test]
 fn material_amendment_cannot_be_lowered_or_applied_without_approval() {
     let mut plan = approved_plan("material-amendment", false);
     start_and_satisfy_first_task(&mut plan);
@@ -735,4 +922,177 @@ fn cli_amendment_is_strict_revision_checked_and_replayable() {
         after_rejection["amendments"].as_array().map(Vec::len),
         Some(1)
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cli_terminal_dispositions_are_revision_checked_and_replayable() {
+    let project = TestProject::new();
+    let (plan_id, revision) = create_approved_cli_plan(&project);
+    let minor_patch = project.path().join("withdraw-amendment.yaml");
+    fs::write(
+        &minor_patch,
+        "operations:\n  - operation: add-implementation-note\n    task_id: T1\n    note: This proposal will be withdrawn.\n",
+    )
+    .expect("Minor patch should be written");
+    let mut minor_proposal_command = mutation_arguments(
+        &project,
+        &["plan", "amend", "propose"],
+        &plan_id,
+        revision,
+        20,
+    );
+    minor_proposal_command.extend([
+        "--reason".to_owned(),
+        "Propose a task-local note".to_owned(),
+        "--patch-file".to_owned(),
+        minor_patch.to_string_lossy().into_owned(),
+    ]);
+    let minor_proposal = parse_success(&run_mino(&minor_proposal_command));
+    let mut agent_context = base_arguments(&project);
+    agent_context.extend(["agent".to_owned(), "context".to_owned()]);
+    let minor_guidance = parse_success(&run_mino(&agent_context));
+    assert!(
+        minor_guidance["allowed_actions"]
+            .as_array()
+            .is_some_and(|actions| actions.contains(&json!("plan.amend.withdraw")))
+    );
+    let mut withdraw = mutation_arguments(
+        &project,
+        &["plan", "amend", "withdraw"],
+        &plan_id,
+        minor_proposal["revision"].as_u64().unwrap(),
+        21,
+    );
+    withdraw.extend([
+        "--change".to_owned(),
+        "C1".to_owned(),
+        "--reason".to_owned(),
+        "The note is unnecessary".to_owned(),
+    ]);
+    let withdrawn = parse_success(&run_mino(&withdraw));
+    assert_eq!(withdrawn["replayed"], false);
+    let replay = parse_success(&run_mino(&withdraw));
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["revision"], withdrawn["revision"]);
+
+    let material_patch = project.path().join("terminal-material-amendment.yaml");
+    fs::write(
+        &material_patch,
+        "operations:\n  - operation: replace-summary\n    summary: This terminal proposal must not apply.\n",
+    )
+    .expect("Material patch should be written");
+    let mut rejected_proposal_command = mutation_arguments(
+        &project,
+        &["plan", "amend", "propose"],
+        &plan_id,
+        withdrawn["revision"].as_u64().unwrap(),
+        22,
+    );
+    rejected_proposal_command.extend([
+        "--reason".to_owned(),
+        "Propose a rejected behavior".to_owned(),
+        "--patch-file".to_owned(),
+        material_patch.to_string_lossy().into_owned(),
+    ]);
+    let rejected_proposal = parse_success(&run_mino(&rejected_proposal_command));
+    let rejection_guidance = parse_success(&run_mino(&agent_context));
+    assert!(
+        rejection_guidance["allowed_actions"]
+            .as_array()
+            .is_some_and(|actions| actions.contains(&json!("plan.amend.reject")))
+    );
+    let mut reject = mutation_arguments(
+        &project,
+        &["plan", "amend", "reject"],
+        &plan_id,
+        rejected_proposal["revision"].as_u64().unwrap(),
+        23,
+    );
+    reject.extend([
+        "--change".to_owned(),
+        "C2".to_owned(),
+        "--decision-ref".to_owned(),
+        "chat:rejected".to_owned(),
+        "--reason".to_owned(),
+        "Keep the approved summary".to_owned(),
+    ]);
+    let rejected = parse_success(&run_mino(&reject));
+
+    let mut cancelled_proposal_command = mutation_arguments(
+        &project,
+        &["plan", "amend", "propose"],
+        &plan_id,
+        rejected["revision"].as_u64().unwrap(),
+        24,
+    );
+    cancelled_proposal_command.extend([
+        "--reason".to_owned(),
+        "Propose a cancelled behavior".to_owned(),
+        "--patch-file".to_owned(),
+        material_patch.to_string_lossy().into_owned(),
+    ]);
+    let cancelled_proposal = parse_success(&run_mino(&cancelled_proposal_command));
+    let mut approve = mutation_arguments(
+        &project,
+        &["plan", "amend", "approve"],
+        &plan_id,
+        cancelled_proposal["revision"].as_u64().unwrap(),
+        25,
+    );
+    approve.extend([
+        "--change".to_owned(),
+        "C3".to_owned(),
+        "--approval-ref".to_owned(),
+        "chat:approved-before-cancel".to_owned(),
+    ]);
+    let approved = parse_success(&run_mino(&approve));
+    let cancellation_guidance = parse_success(&run_mino(&agent_context));
+    assert!(
+        cancellation_guidance["allowed_actions"]
+            .as_array()
+            .is_some_and(|actions| actions.contains(&json!("plan.amend.cancel")))
+    );
+    let mut cancel = mutation_arguments(
+        &project,
+        &["plan", "amend", "cancel"],
+        &plan_id,
+        approved["revision"].as_u64().unwrap(),
+        26,
+    );
+    cancel.extend([
+        "--change".to_owned(),
+        "C3".to_owned(),
+        "--decision-ref".to_owned(),
+        "chat:cancelled".to_owned(),
+        "--reason".to_owned(),
+        "Rescind the approved proposal".to_owned(),
+    ]);
+    parse_success(&run_mino(&cancel));
+
+    let mut show = base_arguments(&project);
+    show.extend([
+        "plan".to_owned(),
+        "show".to_owned(),
+        "--plan".to_owned(),
+        plan_id.clone(),
+    ]);
+    let current = parse_success(&run_mino(&show));
+    assert_eq!(current["amendments"][0]["status"], "Withdrawn");
+    assert_eq!(current["amendments"][1]["status"], "Rejected");
+    assert_eq!(current["amendments"][2]["status"], "Cancelled");
+    assert_eq!(
+        current["amendments"][2]["disposition_reference"],
+        "chat:cancelled"
+    );
+    assert_ne!(current["summary"], "This terminal proposal must not apply.");
+    let projection = fs::read_to_string(
+        project
+            .path()
+            .join("docs/plan")
+            .join(format!("{plan_id}.md")),
+    )
+    .expect("projection should be readable");
+    assert!(projection.contains("chat:cancelled"));
+    assert!(projection.contains("Rescind the approved proposal"));
 }

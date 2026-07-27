@@ -29,6 +29,12 @@ pub enum AmendmentStatus {
     ApprovalRequired,
     /// A Material proposal has an auditable approval declaration.
     Approved,
+    /// An unapproved Material proposal was explicitly rejected.
+    Rejected,
+    /// The original proposer withdrew an unapplied proposal.
+    Withdrawn,
+    /// The original approver cancelled an approved Material proposal.
+    Cancelled,
     /// The typed operations were applied and their invalidations recorded.
     Applied,
 }
@@ -387,6 +393,14 @@ pub struct Amendment {
     approval_reference: Option<String>,
     approved_at: Option<Timestamp>,
     applied_at: Option<Timestamp>,
+    #[serde(default)]
+    disposition_actor: Option<String>,
+    #[serde(default)]
+    disposition_reference: Option<String>,
+    #[serde(default)]
+    disposition_reason: Option<String>,
+    #[serde(default)]
+    disposed_at: Option<Timestamp>,
 }
 
 impl Amendment {
@@ -423,6 +437,10 @@ impl Amendment {
             approval_reference: None,
             approved_at: None,
             applied_at: None,
+            disposition_actor: None,
+            disposition_reference: None,
+            disposition_reason: None,
+            disposed_at: None,
         };
         amendment.validate()?;
         Ok(amendment)
@@ -518,10 +536,45 @@ impl Amendment {
         self.applied_at.as_ref()
     }
 
+    /// Returns the actor who recorded a terminal disposition without applying the patch.
+    #[must_use]
+    pub fn disposition_actor(&self) -> Option<&str> {
+        self.disposition_actor.as_deref()
+    }
+
+    /// Returns the approval or decision reference for a protected terminal disposition.
+    #[must_use]
+    pub fn disposition_reference(&self) -> Option<&str> {
+        self.disposition_reference.as_deref()
+    }
+
+    /// Returns why the proposal was terminated without applying it.
+    #[must_use]
+    pub fn disposition_reason(&self) -> Option<&str> {
+        self.disposition_reason.as_deref()
+    }
+
+    /// Returns when the terminal disposition was recorded.
+    #[must_use]
+    pub const fn disposed_at(&self) -> Option<&Timestamp> {
+        self.disposed_at.as_ref()
+    }
+
     /// Returns whether the proposal still blocks unrelated plan mutations.
     #[must_use]
     pub fn is_pending(&self) -> bool {
-        self.status != AmendmentStatus::Applied
+        matches!(
+            self.status,
+            AmendmentStatus::Proposed
+                | AmendmentStatus::ApprovalRequired
+                | AmendmentStatus::Approved
+        )
+    }
+
+    /// Returns whether the typed operations were applied to the plan.
+    #[must_use]
+    pub fn is_applied(&self) -> bool {
+        self.status == AmendmentStatus::Applied
     }
 
     pub(crate) fn approve(
@@ -566,6 +619,87 @@ impl Amendment {
         self.validate()
     }
 
+    pub(crate) fn reject(
+        &mut self,
+        actor: String,
+        reference: String,
+        reason: String,
+        disposed_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if self.classification != AmendmentClassification::Material
+            || self.status != AmendmentStatus::ApprovalRequired
+            || actor.trim().is_empty()
+            || reference.trim().is_empty()
+            || reason.trim().is_empty()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Amendment {} is not eligible for rejection", self.id),
+            ));
+        }
+        self.status = AmendmentStatus::Rejected;
+        self.record_disposition(actor, Some(reference), reason, disposed_at);
+        self.validate()
+    }
+
+    pub(crate) fn withdraw(
+        &mut self,
+        actor: String,
+        reason: String,
+        disposed_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if !matches!(
+            self.status,
+            AmendmentStatus::Proposed | AmendmentStatus::ApprovalRequired
+        ) || actor != self.proposer
+            || reason.trim().is_empty()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Amendment {} is not eligible for withdrawal", self.id),
+            ));
+        }
+        self.status = AmendmentStatus::Withdrawn;
+        self.record_disposition(actor, None, reason, disposed_at);
+        self.validate()
+    }
+
+    pub(crate) fn cancel(
+        &mut self,
+        actor: String,
+        reference: String,
+        reason: String,
+        disposed_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if self.classification != AmendmentClassification::Material
+            || self.status != AmendmentStatus::Approved
+            || self.approval_actor.as_deref() != Some(actor.as_str())
+            || reference.trim().is_empty()
+            || reason.trim().is_empty()
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Amendment {} is not eligible for cancellation", self.id),
+            ));
+        }
+        self.status = AmendmentStatus::Cancelled;
+        self.record_disposition(actor, Some(reference), reason, disposed_at);
+        self.validate()
+    }
+
+    fn record_disposition(
+        &mut self,
+        actor: String,
+        reference: Option<String>,
+        reason: String,
+        disposed_at: Timestamp,
+    ) {
+        self.disposition_actor = Some(actor);
+        self.disposition_reference = reference;
+        self.disposition_reason = Some(reason);
+        self.disposed_at = Some(disposed_at);
+    }
+
     pub(crate) fn validate(&self) -> Result<(), DomainError> {
         if change_number(&self.id).is_none()
             || self.reason.trim().is_empty()
@@ -603,27 +737,7 @@ impl Amendment {
                 .as_deref()
                 .is_some_and(|reference| !reference.trim().is_empty())
             && self.approved_at.is_some();
-        let state_valid = match self.status {
-            AmendmentStatus::Proposed => {
-                self.classification == AmendmentClassification::Minor
-                    && !approval_complete
-                    && self.applied_at.is_none()
-            }
-            AmendmentStatus::ApprovalRequired => {
-                self.classification == AmendmentClassification::Material
-                    && !approval_complete
-                    && self.applied_at.is_none()
-            }
-            AmendmentStatus::Approved => {
-                self.classification == AmendmentClassification::Material
-                    && approval_complete
-                    && self.applied_at.is_none()
-            }
-            AmendmentStatus::Applied => {
-                self.applied_at.is_some()
-                    && (self.classification == AmendmentClassification::Minor || approval_complete)
-            }
-        };
+        let state_valid = self.lifecycle_is_valid(approval_complete);
         if state_valid {
             Ok(())
         } else {
@@ -631,6 +745,76 @@ impl Amendment {
                 DomainErrorKind::InvariantViolation,
                 format!("Amendment {} has inconsistent lifecycle fields", self.id),
             ))
+        }
+    }
+
+    fn lifecycle_is_valid(&self, approval_complete: bool) -> bool {
+        let disposition_actor = self
+            .disposition_actor
+            .as_deref()
+            .filter(|actor| !actor.trim().is_empty());
+        let disposition_reference = self
+            .disposition_reference
+            .as_deref()
+            .filter(|reference| !reference.trim().is_empty());
+        let disposition_reason = self
+            .disposition_reason
+            .as_deref()
+            .filter(|reason| !reason.trim().is_empty());
+        let has_no_disposition = self.disposition_actor.is_none()
+            && self.disposition_reference.is_none()
+            && self.disposition_reason.is_none()
+            && self.disposed_at.is_none();
+        match self.status {
+            AmendmentStatus::Proposed => {
+                self.classification == AmendmentClassification::Minor
+                    && !approval_complete
+                    && self.applied_at.is_none()
+                    && has_no_disposition
+            }
+            AmendmentStatus::ApprovalRequired => {
+                self.classification == AmendmentClassification::Material
+                    && !approval_complete
+                    && self.applied_at.is_none()
+                    && has_no_disposition
+            }
+            AmendmentStatus::Approved => {
+                self.classification == AmendmentClassification::Material
+                    && approval_complete
+                    && self.applied_at.is_none()
+                    && has_no_disposition
+            }
+            AmendmentStatus::Rejected => {
+                self.classification == AmendmentClassification::Material
+                    && !approval_complete
+                    && self.applied_at.is_none()
+                    && disposition_actor.is_some()
+                    && disposition_reference.is_some()
+                    && disposition_reason.is_some()
+                    && self.disposed_at.is_some()
+            }
+            AmendmentStatus::Withdrawn => {
+                !approval_complete
+                    && self.applied_at.is_none()
+                    && disposition_actor == Some(self.proposer.as_str())
+                    && self.disposition_reference.is_none()
+                    && disposition_reason.is_some()
+                    && self.disposed_at.is_some()
+            }
+            AmendmentStatus::Cancelled => {
+                self.classification == AmendmentClassification::Material
+                    && approval_complete
+                    && self.applied_at.is_none()
+                    && disposition_actor == self.approval_actor.as_deref()
+                    && disposition_reference.is_some()
+                    && disposition_reason.is_some()
+                    && self.disposed_at.is_some()
+            }
+            AmendmentStatus::Applied => {
+                self.applied_at.is_some()
+                    && (self.classification == AmendmentClassification::Minor || approval_complete)
+                    && has_no_disposition
+            }
         }
     }
 }

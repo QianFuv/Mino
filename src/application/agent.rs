@@ -54,7 +54,10 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("git.inspect", false, false),
     ("plan.amend.apply", true, false),
     ("plan.amend.approve", true, true),
+    ("plan.amend.cancel", true, true),
     ("plan.amend.propose", true, false),
+    ("plan.amend.reject", true, true),
+    ("plan.amend.withdraw", true, false),
     ("plan.apply", true, false),
     ("plan.approve", true, true),
     ("plan.archive", true, true),
@@ -505,7 +508,7 @@ fn pending_amendment_guidance(plan: &Plan) -> Guidance {
     ];
     match (amendment.classification(), amendment.status()) {
         (AmendmentClassification::Material, AmendmentStatus::ApprovalRequired) => Guidance {
-            allowed_actions: action_ids(&["plan.show"]),
+            allowed_actions: action_ids(&["plan.show", "plan.amend.reject", "plan.amend.withdraw"]),
             blocked_actions: [
                 blocked_actions,
                 vec![blocked(
@@ -517,9 +520,14 @@ fn pending_amendment_guidance(plan: &Plan) -> Guidance {
             approval_required: true,
             next_actions: Vec::new(),
         },
-        (AmendmentClassification::Material, AmendmentStatus::Approved)
-        | (AmendmentClassification::Minor, AmendmentStatus::Proposed) => Guidance {
-            allowed_actions: action_ids(&["plan.show", "plan.amend.apply"]),
+        (AmendmentClassification::Material, AmendmentStatus::Approved) => Guidance {
+            allowed_actions: action_ids(&["plan.show", "plan.amend.apply", "plan.amend.cancel"]),
+            blocked_actions,
+            approval_required: false,
+            next_actions: vec![amendment_apply_action(plan, amendment.id())],
+        },
+        (AmendmentClassification::Minor, AmendmentStatus::Proposed) => Guidance {
+            allowed_actions: action_ids(&["plan.show", "plan.amend.apply", "plan.amend.withdraw"]),
             blocked_actions,
             approval_required: false,
             next_actions: vec![amendment_apply_action(plan, amendment.id())],
