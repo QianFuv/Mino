@@ -19,6 +19,8 @@ use super::config::{
     StandardsLock, parse_managed_toml,
 };
 
+const MAX_PLAN_STATE_BYTES: u64 = 8 * 1_024 * 1_024;
+
 /// Severity assigned to a deterministic doctor finding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -664,7 +666,7 @@ fn inspect_projection(
 ) {
     let display_plan_path = filesystem.display_path(plan_path);
     let plan = match filesystem
-        .read(plan_path)
+        .read_bounded(plan_path, MAX_PLAN_STATE_BYTES)
         .map_err(|error| error.to_string())
         .and_then(|bytes| serde_json::from_slice::<Plan>(&bytes).map_err(|error| error.to_string()))
     {

@@ -19,6 +19,8 @@ use crate::{ErrorCategory, MinoError};
 use super::IntegrationStatus;
 
 const TRANSACTION_VERSION: u32 = 1;
+const MAX_INTEGRATION_PHASE_BYTES: u64 = 1_024 * 1_024;
+const MAX_INTEGRATION_ARTIFACT_BYTES: u64 = 16 * 1_024 * 1_024;
 const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const LOCK_RETRY: Duration = Duration::from_millis(10);
 const TRANSACTION_ROOT: &str = ".mino/integration-transactions";
@@ -465,7 +467,12 @@ impl IntegrationWriter {
             )
         })?;
         if self.filesystem.exists(&path).map_err(managed_error)? {
-            if self.filesystem.read(&path).map_err(managed_error)? == bytes {
+            if self
+                .filesystem
+                .read_bounded(&path, MAX_INTEGRATION_PHASE_BYTES)
+                .map_err(managed_error)?
+                == bytes
+            {
                 return Ok(());
             }
             return Err(corrupt_error(format!(
@@ -682,7 +689,9 @@ fn load_transaction(
             corrupt_error(format!("Unknown integration transaction phase file {name}"))
         })?;
         let path = directory.join(name).map_err(managed_error)?;
-        let bytes = filesystem.read(&path).map_err(managed_error)?;
+        let bytes = filesystem
+            .read_bounded(&path, MAX_INTEGRATION_PHASE_BYTES)
+            .map_err(managed_error)?;
         let record: TransactionRecord = serde_json::from_slice(&bytes).map_err(|error| {
             corrupt_error(format!(
                 "Failed to decode integration transaction {}: {error}",
@@ -847,7 +856,10 @@ fn optional_file_bytes(
 ) -> Result<Option<Vec<u8>>, MinoError> {
     match filesystem.entry_kind(path).map_err(managed_error)? {
         None => Ok(None),
-        Some(ManagedEntryKind::File) => filesystem.read(path).map(Some).map_err(managed_error),
+        Some(ManagedEntryKind::File) => filesystem
+            .read_bounded(path, MAX_INTEGRATION_ARTIFACT_BYTES)
+            .map(Some)
+            .map_err(managed_error),
         Some(kind) => Err(corrupt_error(format!(
             "Integration path {} is {kind:?}, not a regular file",
             filesystem.display_path(path).display()

@@ -420,6 +420,24 @@ fn recovery_discards_a_partial_event_tail_before_replaying_the_journal_event() {
 }
 
 #[test]
+fn event_log_rejects_a_record_one_byte_over_the_managed_limit() {
+    let project = TestProject::new("oversized-event-record");
+    let store = PlanStore::new(project.path());
+    create_plan(&store);
+    fs::write(
+        store.paths().event_log(&plan_id()),
+        vec![b'x'; 1_024 * 1_024 + 1],
+    )
+    .expect("oversized event record should be injected");
+
+    let error = store
+        .events(&plan_id())
+        .expect_err("oversized event record must be rejected before parsing");
+    assert_eq!(error.kind(), StoreErrorKind::CorruptState);
+    assert!(error.message().contains("exceeds the 1048576-byte limit"));
+}
+
+#[test]
 fn bounded_lock_contention_fails_without_mutating_state() {
     let project = TestProject::new("lock");
     let lock_options = LockOptions::new(Duration::from_millis(75), Duration::from_millis(5))

@@ -15,6 +15,7 @@ use crate::managed_fs::{ManagedFsError, ManagedFsErrorKind, ManagedPath, Project
 use super::{GitError, GitErrorKind, GitFacts};
 
 const ACTIVE_BINDINGS_VERSION: u32 = 1;
+const MAX_ACTIVE_BINDINGS_BYTES: u64 = 1_024 * 1_024;
 const BINDING_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const BINDING_LOCK_RETRY: Duration = Duration::from_millis(10);
 static NEXT_BINDING_FILE: AtomicU64 = AtomicU64::new(1);
@@ -196,7 +197,9 @@ impl ActiveBindingStore {
         if !filesystem.exists(&path).map_err(managed_git_error)? {
             return Ok(None);
         }
-        let bytes = filesystem.read(&path).map_err(managed_git_error)?;
+        let bytes = filesystem
+            .read_bounded(&path, MAX_ACTIVE_BINDINGS_BYTES)
+            .map_err(managed_git_error)?;
         let file: ActiveBindingsFile = serde_json::from_slice(&bytes).map_err(|error| {
             GitError::new(
                 GitErrorKind::InvalidOutput,

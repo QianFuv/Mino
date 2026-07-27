@@ -26,6 +26,7 @@ use super::{Redactor, RunnerError, RunnerErrorKind};
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CAPTURE_CHUNK_BYTES: usize = 8 * 1_024;
+const MAX_RUN_JOURNAL_BYTES: u64 = 4 * 1_024 * 1_024;
 const TRUNCATION_MARKER: &str = "\n[output truncated by Mino]";
 static NEXT_PENDING_FILE: AtomicU64 = AtomicU64::new(1);
 
@@ -972,7 +973,9 @@ fn read_canonical<T>(filesystem: &ProjectFs, path: &ManagedPath) -> Result<T, Ru
 where
     T: DeserializeOwned + Serialize,
 {
-    let bytes = filesystem.read(path).map_err(managed_error)?;
+    let bytes = filesystem
+        .read_bounded(path, MAX_RUN_JOURNAL_BYTES)
+        .map_err(managed_error)?;
     let value = serde_json::from_slice(&bytes).map_err(|error| {
         corrupt(format!(
             "Failed to decode check journal {}: {error}",
@@ -995,7 +998,9 @@ fn publish_immutable(
     bytes: &[u8],
 ) -> Result<(), RunnerError> {
     if filesystem.exists(path).map_err(managed_error)? {
-        let existing = filesystem.read(path).map_err(managed_error)?;
+        let existing = filesystem
+            .read_bounded(path, MAX_RUN_JOURNAL_BYTES)
+            .map_err(managed_error)?;
         if existing == bytes {
             return Ok(());
         }
@@ -1048,7 +1053,9 @@ fn publish_immutable(
     if let Err(error) = filesystem.rename(&pending, path) {
         let _ = filesystem.remove_file_if_exists(&pending);
         if filesystem.exists(path).map_err(managed_error)? {
-            let existing = filesystem.read(path).map_err(managed_error)?;
+            let existing = filesystem
+                .read_bounded(path, MAX_RUN_JOURNAL_BYTES)
+                .map_err(managed_error)?;
             if existing == bytes {
                 return Ok(());
             }

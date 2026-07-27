@@ -183,6 +183,36 @@ fn run_journal_rejects_a_symlinked_managed_directory() {
 }
 
 #[test]
+fn run_journal_rejects_a_file_one_byte_over_the_managed_limit() {
+    let project = TestProject::new("oversized-journal");
+    let environment = RunEnvironment::empty();
+    let redactor = redactor();
+    let run_lease = lease(
+        91,
+        &fixture_check(),
+        limits(1_000, 1_024),
+        &environment,
+        &redactor,
+    );
+    let journal = CheckRunJournal::new(project.path(), Path::new(".mino/runs"))
+        .expect("journal should be valid");
+    assert!(journal.begin(&run_lease).expect("lease should publish"));
+    let lease_path = project
+        .path()
+        .join(".mino/runs")
+        .join(run_lease.request_id().as_str())
+        .join("lease.json");
+    fs::write(&lease_path, vec![b'x'; 4 * 1_024 * 1_024 + 1])
+        .expect("oversized lease should be injected");
+
+    let error = journal
+        .begin(&run_lease)
+        .expect_err("oversized lease must be rejected before parsing");
+    assert_eq!(error.kind(), RunnerErrorKind::CorruptJournal);
+    assert!(error.message().contains("exceeds the 4194304-byte limit"));
+}
+
+#[test]
 fn runner_fixture_process() {
     let Ok(mode) = std::env::var("MINO_RUNNER_FIXTURE") else {
         return;

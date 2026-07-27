@@ -12,7 +12,7 @@ use crate::store::sha256_digest;
 
 use super::{EvidenceError, EvidenceErrorKind};
 
-const MAX_ARTIFACT_BYTES: u64 = 16 * 1_024 * 1_024;
+pub(super) const MAX_ARTIFACT_BYTES: u64 = 16 * 1_024 * 1_024;
 static NEXT_PENDING_BLOB: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct PreparedArtifact {
@@ -110,7 +110,9 @@ pub(crate) fn publish_immutable(
     bytes: &[u8],
 ) -> Result<bool, EvidenceError> {
     if filesystem.exists(path).map_err(managed_error)? {
-        let existing = filesystem.read(path).map_err(managed_error)?;
+        let existing = filesystem
+            .read_bounded(path, MAX_ARTIFACT_BYTES)
+            .map_err(managed_error)?;
         if existing == bytes {
             return Ok(true);
         }
@@ -163,7 +165,9 @@ pub(crate) fn publish_immutable(
     if let Err(error) = filesystem.rename(&pending, path) {
         let _ = filesystem.remove_file_if_exists(&pending);
         if filesystem.exists(path).map_err(managed_error)? {
-            let existing = filesystem.read(path).map_err(managed_error)?;
+            let existing = filesystem
+                .read_bounded(path, MAX_ARTIFACT_BYTES)
+                .map_err(managed_error)?;
             if existing == bytes {
                 return Ok(true);
             }

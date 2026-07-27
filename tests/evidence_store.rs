@@ -594,6 +594,27 @@ fn index_recovery_restores_only_the_missing_or_partial_tail() {
 }
 
 #[test]
+fn evidence_index_rejects_a_record_one_byte_over_the_managed_limit() {
+    let project = TestProject::new("oversized-index-record", false);
+    let store = EvidenceStore::new(project.path());
+    assert!(
+        store
+            .list(&plan_id())
+            .expect("empty evidence store should initialize")
+            .is_empty()
+    );
+    let index = evidence_directory(project.path()).join("index.jsonl");
+    fs::write(&index, vec![b'x'; 4 * 1_024 * 1_024 + 1])
+        .expect("oversized evidence record should be injected");
+
+    let error = store
+        .list(&plan_id())
+        .expect_err("oversized evidence record must be rejected before parsing");
+    assert_eq!(error.kind(), EvidenceErrorKind::CorruptStore);
+    assert!(error.message().contains("exceeds the 4194304-byte limit"));
+}
+
+#[test]
 fn evidence_cli_add_list_show_and_retry_are_strict() {
     let project = TestProject::new("cli", false);
     fs::write(project.path().join("report.txt"), "report\n").expect("report should be written");

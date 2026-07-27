@@ -21,6 +21,7 @@ use super::catalog::{StandardsPackage, parse_package_documents, validate_package
 
 const CATALOG_VERSION: u32 = 1;
 const MAX_CATALOG_PACKAGES: usize = 128;
+const MAX_STANDARDS_CONFIG_BYTES: u64 = 1_024 * 1_024;
 const SYNC_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const SYNC_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 static NEXT_STAGING_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -446,7 +447,7 @@ pub fn synchronize_all_with_options(
 fn load_catalog_url(layout: &ProjectLayout, filesystem: &ProjectFs) -> Result<String, MinoError> {
     let path = layout.config();
     let bytes = filesystem
-        .read(&ProjectLayout::config_managed())
+        .read_bounded(&ProjectLayout::config_managed(), MAX_STANDARDS_CONFIG_BYTES)
         .map_err(managed_sync_error)?;
     let contents = std::str::from_utf8(&bytes).map_err(|error| {
         sync_error(format!(
@@ -704,7 +705,11 @@ fn verify_cached_file(
     expected: &[u8],
 ) -> Result<(), MinoError> {
     let path = root.join(relative).map_err(managed_sync_error)?;
-    let actual = filesystem.read(&path).map_err(managed_sync_error)?;
+    let maximum_bytes = u64::try_from(expected.len())
+        .map_err(|_| sync_error("Cached standards document size does not fit into u64"))?;
+    let actual = filesystem
+        .read_bounded(&path, maximum_bytes)
+        .map_err(managed_sync_error)?;
     if actual != expected {
         return Err(sync_error(format!(
             "Cached document {} differs from verified downloaded bytes",

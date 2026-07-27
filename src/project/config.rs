@@ -12,6 +12,7 @@ use crate::render::RENDERER_VERSION;
 use crate::{ErrorCategory, MinoError};
 
 static NEXT_INITIALIZATION_FILE: AtomicU64 = AtomicU64::new(1);
+const MAX_CONFIG_OR_LOCK_BYTES: u64 = 1_024 * 1_024;
 
 /// Current project configuration format version.
 pub const PROJECT_CONFIG_VERSION: u32 = 1;
@@ -279,7 +280,9 @@ pub(crate) fn parse_managed_toml<T>(
 where
     T: for<'de> Deserialize<'de>,
 {
-    let bytes = filesystem.read(path).map_err(map_managed_error)?;
+    let bytes = filesystem
+        .read_bounded(path, MAX_CONFIG_OR_LOCK_BYTES)
+        .map_err(map_managed_error)?;
     let contents = std::str::from_utf8(&bytes).map_err(|error| {
         MinoError::new(
             ErrorCategory::IncompleteOrValidation,

@@ -1,19 +1,23 @@
 //! Revision commits, write-ahead recovery, idempotency, and audits.
 
 use std::collections::BTreeSet;
-use std::io::Write;
+use std::io::{BufReader, Write};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{DomainError, Event, EventResult, Plan, PlanId, RequestId, Timestamp};
-use crate::managed_fs::{ManagedEntryKind, ManagedFsError, ManagedPath, ProjectFs};
+use crate::managed_fs::{
+    ManagedEntryKind, ManagedFsError, ManagedPath, ProjectFs, read_bounded_line,
+};
 
 use super::canonical::{canonical_json_bytes, sha256_digest};
 use super::lock::PlanLock;
 use super::{LockOptions, StoreError, StoreErrorKind, StorePaths};
 
 const TRANSACTION_JOURNAL_VERSION: u32 = 1;
+const MAX_PLAN_STATE_BYTES: u64 = 8 * 1_024 * 1_024;
+const MAX_EVENT_RECORD_BYTES: usize = 1_024 * 1_024;
 
 /// Publication boundaries supported by deterministic failure injection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -609,6 +613,7 @@ impl PlanStore {
         } = request;
         let plan_id = plan.id().clone();
         let plan_bytes = canonical_json_bytes(plan)?;
+        require_generated_size(&plan_bytes, MAX_PLAN_STATE_BYTES, "Plan state")?;
         let state_hash = sha256_digest(&plan_bytes);
         let previous_state_hash = if expected_revision == 0 {
             None
@@ -636,6 +641,11 @@ impl PlanStore {
             state_hash: state_hash.clone(),
             snapshot_digest: state_hash.clone(),
         };
+        require_generated_size(
+            &canonical_json_bytes(&event)?,
+            u64::try_from(MAX_EVENT_RECORD_BYTES).unwrap_or(u64::MAX),
+            "Event record",
+        )?;
         let journal = TransactionJournal {
             version: TRANSACTION_JOURNAL_VERSION,
             plan_id: plan_id.clone(),
@@ -675,6 +685,7 @@ impl PlanStore {
             .map_err(managed_store_error)?;
         self.write_new_file(&self.paths.next_plan_managed(&journal.plan_id), plan_bytes)?;
         let journal_bytes = canonical_json_bytes(journal)?;
+        require_generated_size(&journal_bytes, MAX_PLAN_STATE_BYTES, "Transaction journal")?;
         self.write_new_file(
             &self.paths.pending_journal_managed(&journal.plan_id),
             &journal_bytes,
@@ -967,21 +978,38 @@ impl PlanStore {
         if !self.managed_exists(&event_log)? {
             return Ok(());
         }
-        let bytes = self.read_managed(&event_log)?;
-        if bytes.is_empty() || bytes.ends_with(b"\n") {
-            return Ok(());
-        }
-        let valid_length = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |index| index + 1);
         let file = self
             .filesystem()?
-            .open_write_file(&event_log)
+            .open_read_write_file(&event_log)
             .map_err(managed_store_error)?;
-        file.set_len(u64::try_from(valid_length).map_err(|_| {
-            StoreError::new(StoreErrorKind::CorruptState, "Event log length overflowed")
-        })?)?;
+        let original_length = file.metadata()?.len();
+        let mut reader = BufReader::new(&file);
+        let mut line = Vec::new();
+        let mut valid_length = 0_u64;
+        loop {
+            let bytes_read = read_bounded_line(&mut reader, &mut line, MAX_EVENT_RECORD_BYTES)
+                .map_err(|error| {
+                    StoreError::new(
+                        StoreErrorKind::CorruptState,
+                        format!("Failed to read event log for plan {plan_id}: {error}"),
+                    )
+                })?;
+            if bytes_read == 0 || !line.ends_with(b"\n") {
+                break;
+            }
+            valid_length = valid_length
+                .checked_add(u64::try_from(bytes_read).map_err(|_| {
+                    StoreError::new(StoreErrorKind::CorruptState, "Event log length overflowed")
+                })?)
+                .ok_or_else(|| {
+                    StoreError::new(StoreErrorKind::CorruptState, "Event log length overflowed")
+                })?;
+        }
+        drop(reader);
+        if valid_length == original_length {
+            return Ok(());
+        }
+        file.set_len(valid_length)?;
         file.sync_all()?;
         Ok(())
     }
@@ -1022,18 +1050,34 @@ impl PlanStore {
         if !self.managed_exists(&path)? {
             return Ok(Vec::new());
         }
-        let bytes = self.read_managed(&path)?;
-        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-            return Err(StoreError::new(
-                StoreErrorKind::CorruptState,
-                format!("Event log for plan {plan_id} has an incomplete final record"),
-            ));
+        let file = self
+            .filesystem()?
+            .open_read_file(&path)
+            .map_err(managed_store_error)?;
+        let mut reader = BufReader::new(file);
+        let mut line = Vec::new();
+        let mut events = Vec::new();
+        loop {
+            let bytes_read = read_bounded_line(&mut reader, &mut line, MAX_EVENT_RECORD_BYTES)
+                .map_err(|error| {
+                    StoreError::new(
+                        StoreErrorKind::CorruptState,
+                        format!("Failed to read event log for plan {plan_id}: {error}"),
+                    )
+                })?;
+            if bytes_read == 0 {
+                break;
+            }
+            if !line.ends_with(b"\n") {
+                return Err(StoreError::new(
+                    StoreErrorKind::CorruptState,
+                    format!("Event log for plan {plan_id} has an incomplete final record"),
+                ));
+            }
+            if line != b"\n" {
+                events.push(serde_json::from_slice(&line)?);
+            }
         }
-        let events = bytes
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(serde_json::from_slice)
-            .collect::<Result<Vec<Event>, _>>()?;
         validate_event_sequence(plan_id, &events)?;
         Ok(events)
     }
@@ -1128,7 +1172,9 @@ impl PlanStore {
     }
 
     fn read_managed(&self, path: &ManagedPath) -> Result<Vec<u8>, StoreError> {
-        self.filesystem()?.read(path).map_err(managed_store_error)
+        self.filesystem()?
+            .read_bounded(path, MAX_PLAN_STATE_BYTES)
+            .map_err(managed_store_error)
     }
 
     fn managed_exists(&self, path: &ManagedPath) -> Result<bool, StoreError> {
@@ -1232,6 +1278,17 @@ fn managed_store_error(error: ManagedFsError) -> StoreError {
         },
         error.into_message(),
     )
+}
+
+fn require_generated_size(bytes: &[u8], maximum_bytes: u64, label: &str) -> Result<(), StoreError> {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= maximum_bytes {
+        Ok(())
+    } else {
+        Err(StoreError::new(
+            StoreErrorKind::InvalidMutation,
+            format!("{label} exceeds the {maximum_bytes}-byte managed-state limit"),
+        ))
+    }
 }
 
 fn validate_request(actor: &str, command: &[String]) -> Result<(), StoreError> {

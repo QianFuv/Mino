@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,7 +15,7 @@ use crate::domain::{
     Redaction, RequestId, VerificationCheck,
 };
 use crate::managed_fs::{
-    ManagedEntryKind, ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs,
+    ManagedEntryKind, ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs, read_bounded_line,
 };
 use crate::runner::Redactor;
 use crate::store::{PlanStore, StoreError, StoreErrorKind, canonical_json_bytes, sha256_digest};
@@ -25,6 +25,8 @@ use super::policy::{AddEvidenceRequest, EvidenceSource};
 use super::{EvidenceError, EvidenceErrorKind};
 
 const EVIDENCE_STORAGE_VERSION: u32 = 1;
+const MAX_EVIDENCE_RECORD_BYTES: usize = 4 * 1_024 * 1_024;
+const MAX_EVIDENCE_RECORD_FILE_BYTES: u64 = 4 * 1_024 * 1_024;
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -548,7 +550,9 @@ impl EvidenceStore {
                 ));
                 continue;
             }
-            let bytes = filesystem.read(&path).map_err(managed_error)?;
+            let bytes = filesystem
+                .read_bounded(&path, blob::MAX_ARTIFACT_BYTES)
+                .map_err(managed_error)?;
             if sha256_digest(&bytes) != digest {
                 findings.push(finding(
                     "evidence_blob_digest_mismatch",
@@ -824,15 +828,26 @@ fn validate_sequence(plan_id: &PlanId, envelopes: &[StoredEvidence]) -> Result<(
 }
 
 fn canonical_envelope(envelope: &StoredEvidence) -> Result<Vec<u8>, EvidenceError> {
-    canonical_json_bytes(envelope)
-        .map_err(|error| serialization_error("encode evidence record", &error))
+    let bytes = canonical_json_bytes(envelope)
+        .map_err(|error| serialization_error("encode evidence record", &error))?;
+    if bytes.len() > MAX_EVIDENCE_RECORD_BYTES {
+        return Err(EvidenceError::new(
+            EvidenceErrorKind::InvalidRequest,
+            format!(
+                "Evidence record exceeds the {MAX_EVIDENCE_RECORD_BYTES}-byte managed-state limit"
+            ),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn read_canonical<T>(filesystem: &ProjectFs, path: &ManagedPath) -> Result<T, EvidenceError>
 where
     T: for<'de> Deserialize<'de> + Serialize,
 {
-    let bytes = filesystem.read(path).map_err(managed_error)?;
+    let bytes = filesystem
+        .read_bounded(path, MAX_EVIDENCE_RECORD_FILE_BYTES)
+        .map_err(managed_error)?;
     let value = serde_json::from_slice(&bytes).map_err(|error| {
         corrupt(format!(
             "Failed to decode evidence record {}: {error}",
@@ -857,13 +872,28 @@ fn read_index(
     if !filesystem.exists(path).map_err(managed_error)? {
         return Ok(Vec::new());
     }
-    let bytes = filesystem.read(path).map_err(managed_error)?;
+    let file = filesystem.open_read_file(path).map_err(managed_error)?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
     let mut envelopes = Vec::new();
-    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
-        if line.is_empty() {
-            continue;
+    loop {
+        let bytes_read = read_bounded_line(&mut reader, &mut line, MAX_EVIDENCE_RECORD_BYTES)
+            .map_err(|error| {
+                corrupt(format!(
+                    "Failed to read evidence index {}: {error}",
+                    filesystem.display_path(path).display()
+                ))
+            })?;
+        if bytes_read == 0 {
+            break;
         }
-        let envelope: StoredEvidence = serde_json::from_slice(line).map_err(|error| {
+        if !line.ends_with(b"\n") {
+            return Err(corrupt(format!(
+                "Evidence index {} has an incomplete final record",
+                filesystem.display_path(path).display()
+            )));
+        }
+        let envelope: StoredEvidence = serde_json::from_slice(&line).map_err(|error| {
             corrupt(format!(
                 "Failed to decode evidence index {}: {error}",
                 filesystem.display_path(path).display()
@@ -884,24 +914,40 @@ fn truncate_partial_index(filesystem: &ProjectFs, path: &ManagedPath) -> Result<
     if !filesystem.exists(path).map_err(managed_error)? {
         return Ok(());
     }
-    let mut file = filesystem
+    let file = filesystem
         .open_read_write_file(path)
         .map_err(managed_error)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|error| {
-        io_error(
-            "read evidence index",
-            &filesystem.display_path(path),
-            &error,
-        )
-    })?;
-    let complete_length = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |index| index.saturating_add(1));
-    if complete_length != bytes.len() {
-        file.set_len(u64::try_from(complete_length).unwrap_or(u64::MAX))
-            .and_then(|()| file.seek(SeekFrom::Start(0)).map(|_| ()))
+    let original_length = file
+        .metadata()
+        .map_err(|error| {
+            io_error(
+                "inspect evidence index",
+                &filesystem.display_path(path),
+                &error,
+            )
+        })?
+        .len();
+    let mut reader = BufReader::new(&file);
+    let mut line = Vec::new();
+    let mut complete_length = 0_u64;
+    loop {
+        let bytes_read = read_bounded_line(&mut reader, &mut line, MAX_EVIDENCE_RECORD_BYTES)
+            .map_err(|error| {
+                corrupt(format!(
+                    "Failed to read evidence index {}: {error}",
+                    filesystem.display_path(path).display()
+                ))
+            })?;
+        if bytes_read == 0 || !line.ends_with(b"\n") {
+            break;
+        }
+        complete_length = complete_length
+            .checked_add(u64::try_from(bytes_read).unwrap_or(u64::MAX))
+            .ok_or_else(|| corrupt("Evidence index length overflowed"))?;
+    }
+    drop(reader);
+    if complete_length != original_length {
+        file.set_len(complete_length)
             .and_then(|()| file.sync_all())
             .map_err(|error| {
                 io_error(

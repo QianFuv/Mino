@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt::{self, Display, Formatter};
-use std::io::Read;
+use std::io::{BufRead, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -233,19 +233,6 @@ impl ProjectFs {
             .map(|kind| kind == Some(ManagedEntryKind::Directory))
     }
 
-    pub(crate) fn read(&self, path: &ManagedPath) -> Result<Vec<u8>, ManagedFsError> {
-        self.require_file(path)?;
-        let mut file = self
-            .directory
-            .open(path.as_path())
-            .map(cap_std::fs::File::into_std)
-            .map_err(|error| io_error("open managed file", &self.display_path(path), &error))?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|error| io_error("read managed file", &self.display_path(path), &error))?;
-        Ok(bytes)
-    }
-
     pub(crate) fn read_bounded(
         &self,
         path: &ManagedPath,
@@ -260,12 +247,7 @@ impl ProjectFs {
         path: &ManagedPath,
         maximum_bytes: u64,
     ) -> Result<(Vec<u8>, std::fs::Metadata), ManagedFsError> {
-        self.require_file(path)?;
-        let file = self
-            .directory
-            .open(path.as_path())
-            .map(cap_std::fs::File::into_std)
-            .map_err(|error| io_error("open managed file", &self.display_path(path), &error))?;
+        let file = self.open_read_file(path)?;
         let metadata = file.metadata().map_err(|error| {
             io_error(
                 "inspect opened managed file",
@@ -287,6 +269,17 @@ impl ProjectFs {
             ));
         }
         Ok((bytes, metadata))
+    }
+
+    pub(crate) fn open_read_file(
+        &self,
+        path: &ManagedPath,
+    ) -> Result<std::fs::File, ManagedFsError> {
+        self.require_file(path)?;
+        self.directory
+            .open(path.as_path())
+            .map(cap_std::fs::File::into_std)
+            .map_err(|error| io_error("open managed file", &self.display_path(path), &error))
     }
 
     pub(crate) fn create_new_file(
@@ -320,16 +313,6 @@ impl ProjectFs {
         let mut options = OpenOptions::new();
         options.create(true).append(true);
         self.open_with(path, &options, "open managed append file")
-    }
-
-    pub(crate) fn open_write_file(
-        &self,
-        path: &ManagedPath,
-    ) -> Result<std::fs::File, ManagedFsError> {
-        self.require_file(path)?;
-        let mut options = OpenOptions::new();
-        options.write(true);
-        self.open_with(path, &options, "open managed file for writing")
     }
 
     pub(crate) fn open_read_write_file(
@@ -618,6 +601,34 @@ impl ProjectFs {
     }
 }
 
+/// Reads one LF-delimited managed record without growing beyond its byte limit.
+pub(crate) fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    maximum_bytes: usize,
+) -> std::io::Result<usize> {
+    buffer.clear();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(buffer.len());
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index.saturating_add(1));
+        if buffer.len().saturating_add(consumed) > maximum_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Managed record exceeds the {maximum_bytes}-byte limit"),
+            ));
+        }
+        buffer.extend_from_slice(&available[..consumed]);
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(buffer.len());
+        }
+    }
+}
+
 fn metadata_kind(metadata: &cap_std::fs::Metadata) -> ManagedEntryKind {
     if metadata.file_type().is_symlink() {
         ManagedEntryKind::Symlink
@@ -672,10 +683,11 @@ fn sync_open_directory(directory: &Dir) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{BufReader, Cursor};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{ManagedPath, ProjectFs};
+    use super::{ManagedFsErrorKind, ManagedPath, ProjectFs, read_bounded_line};
 
     static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -729,5 +741,49 @@ mod tests {
         filesystem
             .sync_directory(Some(&managed))
             .expect("managed directory should synchronize");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "requires host filesystem support")]
+    fn bounded_reads_accept_the_exact_limit_and_reject_one_byte_over() {
+        let root = TestRoot::new();
+        let filesystem = ProjectFs::open(root.path()).expect("project filesystem should open");
+        let exact = ManagedPath::new("exact.bin").expect("managed path should be valid");
+        let oversized = ManagedPath::new("oversized.bin").expect("managed path should be valid");
+        fs::write(root.path().join(exact.as_path()), b"12345678")
+            .expect("exact fixture should be written");
+        fs::write(root.path().join(oversized.as_path()), b"123456789")
+            .expect("oversized fixture should be written");
+
+        assert_eq!(
+            filesystem
+                .read_bounded(&exact, 8)
+                .expect("exact-limit file should be readable"),
+            b"12345678"
+        );
+        let error = filesystem
+            .read_bounded(&oversized, 8)
+            .expect_err("one-byte-over file must be rejected");
+        assert_eq!(error.kind(), ManagedFsErrorKind::UnsafeComponent);
+        assert!(error.to_string().contains("exceeds the 8-byte limit"));
+    }
+
+    #[test]
+    fn bounded_lines_accept_the_exact_limit_without_allocating_one_byte_over() {
+        let mut exact_reader = BufReader::with_capacity(3, Cursor::new(b"1234567\n"));
+        let mut buffer = Vec::new();
+        assert_eq!(
+            read_bounded_line(&mut exact_reader, &mut buffer, 8)
+                .expect("exact-limit record should be readable"),
+            8
+        );
+        assert_eq!(buffer, b"1234567\n");
+
+        let mut oversized_reader = BufReader::with_capacity(3, Cursor::new(b"12345678\n"));
+        let error = read_bounded_line(&mut oversized_reader, &mut buffer, 8)
+            .expect_err("one-byte-over record must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exceeds the 8-byte limit"));
+        assert!(buffer.len() <= 8);
     }
 }

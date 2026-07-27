@@ -10,6 +10,7 @@ use crate::domain::{
     Plan, StandardConflict, StandardConflictCandidate, StandardConflictDecision,
     StandardSourceKind, StandardsConflictState,
 };
+use crate::managed_fs::{ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs};
 use crate::store::sha256_digest;
 use crate::{ErrorCategory, MinoError};
 
@@ -122,9 +123,10 @@ pub fn detect_standard_conflicts(
     plan: &Plan,
 ) -> Result<DetectedStandardsConflicts, MinoError> {
     let catalog = EmbeddedCatalog::load()?;
+    let filesystem = ProjectFs::open(root).map_err(managed_conflict_error)?;
     let mut candidates = BTreeMap::<String, Vec<StandardConflictCandidate>>::new();
     collect_package_candidates(plan, &catalog, &mut candidates)?;
-    let local_source = collect_local_candidates(root, plan, &mut candidates)?;
+    let local_source = collect_local_candidates(&filesystem, plan, &mut candidates)?;
     let mut conflicts = Vec::new();
     for (rule_id, mut rule_candidates) in candidates {
         rule_candidates.sort_by(candidate_order);
@@ -240,22 +242,25 @@ fn collect_package_candidates(
 }
 
 fn collect_local_candidates(
-    root: &Path,
+    filesystem: &ProjectFs,
     plan: &Plan,
     candidates: &mut BTreeMap<String, Vec<StandardConflictCandidate>>,
 ) -> Result<Option<LocalStandardsSource>, MinoError> {
-    let path = root.join(LOCAL_STANDARDS_PATH);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(MinoError::new(
-                ErrorCategory::EnvironmentUnavailable,
-                format!("Failed to read {}: {error}", path.display()),
-            ));
-        }
-    };
-    if bytes.is_empty() || bytes.len() > MAX_STANDARDS_SOURCE_BYTES {
+    let managed_path = ManagedPath::new(LOCAL_STANDARDS_PATH).map_err(managed_conflict_error)?;
+    if !filesystem
+        .exists(&managed_path)
+        .map_err(managed_conflict_error)?
+    {
+        return Ok(None);
+    }
+    let path = filesystem.display_path(&managed_path);
+    let bytes = filesystem
+        .read_bounded(
+            &managed_path,
+            u64::try_from(MAX_STANDARDS_SOURCE_BYTES).unwrap_or(u64::MAX),
+        )
+        .map_err(managed_conflict_error)?;
+    if bytes.is_empty() {
         return Err(validation_error(format!(
             "{} must be non-empty and no larger than {MAX_STANDARDS_SOURCE_BYTES} bytes",
             path.display()
@@ -285,7 +290,7 @@ fn collect_local_candidates(
                 rule.rule_id
             )));
         }
-        let source_digest = candidate_source_digest(root, plan, &rule)?;
+        let source_digest = candidate_source_digest(filesystem.root(), plan, &rule)?;
         push_candidate(
             candidates,
             &rule.rule_id,
@@ -300,6 +305,16 @@ fn collect_local_candidates(
         bytes: bytes.len(),
         digest: sha256_digest(&bytes),
     }))
+}
+
+fn managed_conflict_error(error: ManagedFsError) -> MinoError {
+    let category = match error.kind() {
+        ManagedFsErrorKind::InvalidPath | ManagedFsErrorKind::UnsafeComponent => {
+            ErrorCategory::DriftDetected
+        }
+        ManagedFsErrorKind::Io => ErrorCategory::EnvironmentUnavailable,
+    };
+    MinoError::new(category, error.into_message())
 }
 
 fn candidate_source_digest(

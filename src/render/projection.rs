@@ -14,6 +14,7 @@ use crate::managed_fs::{
 use crate::store::sha256_digest;
 
 static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
+const MAX_MANAGED_PROJECTION_BYTES: u64 = 16 * 1_024 * 1_024;
 
 /// Relationship between a filesystem projection and expected rendered bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,7 +104,9 @@ pub(crate) fn check_managed_projection(
 ) -> Result<ProjectionCheck, RenderError> {
     match filesystem.entry_kind(path).map_err(managed_render_error)? {
         Some(ManagedEntryKind::File) => {
-            let actual = filesystem.read(path).map_err(managed_render_error)?;
+            let actual = filesystem
+                .read_bounded(path, MAX_MANAGED_PROJECTION_BYTES)
+                .map_err(managed_render_error)?;
             let status = if actual == expected.as_bytes() {
                 ProjectionStatus::Current
             } else {
@@ -170,7 +173,9 @@ pub(crate) fn write_managed_projection(
 ) -> Result<ProjectionWriteOutcome, RenderError> {
     match filesystem.entry_kind(path).map_err(managed_render_error)? {
         Some(ManagedEntryKind::File) => {
-            let actual = filesystem.read(path).map_err(managed_render_error)?;
+            let actual = filesystem
+                .read_bounded(path, MAX_MANAGED_PROJECTION_BYTES)
+                .map_err(managed_render_error)?;
             if actual == rendered.as_bytes() {
                 Ok(ProjectionWriteOutcome::Unchanged)
             } else if prior.is_some_and(|prior| actual == prior.as_bytes()) {
@@ -274,7 +279,9 @@ fn guarded_replace_managed(
     expected: &[u8],
     replacement: &[u8],
 ) -> Result<(), RenderError> {
-    let actual = filesystem.read(path).map_err(managed_render_error)?;
+    let actual = filesystem
+        .read_bounded(path, MAX_MANAGED_PROJECTION_BYTES)
+        .map_err(managed_render_error)?;
     if actual != expected {
         return Err(drift_error(
             &filesystem.display_path(path),
