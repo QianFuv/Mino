@@ -416,6 +416,75 @@ fn render_git_readiness(output: &mut String, plan: &Value) {
             row("Observed At", &scalar(&observation["observed_at"])),
         ],
     );
+    let setup = &state["setup"];
+    output.push_str("\n### Git Setup Decision\n\n");
+    write_table(
+        output,
+        &["Field", "Value"],
+        vec![
+            row("Decision", &scalar(&setup["decision"])),
+            row("Actor", &scalar(&setup["actor"])),
+            row("Reference", &scalar(&setup["reference"])),
+            row("Decided At", &scalar(&setup["decided_at"])),
+        ],
+    );
+    let cleanup = &state["cleanup"];
+    output.push_str("\n### Pre-Plan Cleanup\n\n");
+    write_table(
+        output,
+        &["Field", "Value"],
+        vec![
+            row("Decision", &scalar(&cleanup["decision"])),
+            row("Observed Paths", &joined(&cleanup["observed_paths"])),
+            row("Blockers", &joined(&cleanup["blockers"])),
+            row("Decision Actor", &scalar(&cleanup["decision_actor"])),
+            row(
+                "Decision Reference",
+                &scalar(&cleanup["decision_reference"]),
+            ),
+            row("Decided At", &scalar(&cleanup["decided_at"])),
+        ],
+    );
+    render_cleanup_items(output, cleanup);
+}
+
+fn render_cleanup_items(output: &mut String, cleanup: &Value) {
+    let items = array(&cleanup["items"]);
+    if !items.is_empty() {
+        output.push_str("\n#### Cleanup Items\n\n");
+        write_table(
+            output,
+            &[
+                "Item",
+                "Logical Change",
+                "Files",
+                "Planned Commit Message",
+                "Consent",
+                "Approval Actor",
+                "Approval Reference",
+                "Approved At",
+                "Actual Commit",
+                "Recorded At",
+            ],
+            items
+                .iter()
+                .map(|item| {
+                    vec![
+                        scalar(&item["id"]),
+                        scalar(&item["logical_change"]),
+                        joined(&item["files"]),
+                        scalar(&item["planned_commit_message"]),
+                        scalar(&item["consent_status"]),
+                        scalar(&item["approval_actor"]),
+                        scalar(&item["approval_reference"]),
+                        scalar(&item["approved_at"]),
+                        scalar(&item["actual_commit"]),
+                        scalar(&item["recorded_at"]),
+                    ]
+                })
+                .collect(),
+        );
+    }
 }
 
 fn render_task_order(output: &mut String, plan: &Value) {

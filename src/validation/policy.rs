@@ -3,7 +3,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::domain::{GitRepositoryMode, Plan, PlanStatus, StandardSelection, VerificationCheck};
+use crate::domain::{
+    GitRepositoryMode, GitSetupDecision, Plan, PlanStatus, PrePlanCleanupDecision,
+    StandardSelection, VerificationCheck, is_conventional_commit,
+};
+use crate::git::matches_file_map_path;
 use crate::standards::{
     EmbeddedCatalog, ResolvedCheck, ResolvedCheckStatus, StandardConflictStatus,
     StandardsRecommendation, SystemToolProbe, apply_recommendation, assess_standard_conflicts,
@@ -12,10 +16,6 @@ use crate::standards::{
 use crate::{MinoError, project};
 
 use super::{ValidationFinding, ValidationLayer};
-
-const CONVENTIONAL_COMMIT_TYPES: &[&str] = &[
-    "build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "revert", "style", "test",
-];
 
 pub(crate) fn validate(
     root: &Path,
@@ -103,6 +103,7 @@ fn validate_git(plan: &Plan, findings: &mut Vec<ValidationFinding>) -> Result<()
                     }
                 && git.branch() == observation.branch()
                 && git.base_commit() == observation.head()
+                && git.git_flow_enabled() == state.git_flow_allowed()
                 && (!git.git_flow_enabled()
                     || (observation.is_clean()
                         && observation.branch().is_some()
@@ -124,7 +125,74 @@ fn validate_git(plan: &Plan, findings: &mut Vec<ValidationFinding>) -> Result<()
             "Git readiness summary does not match its typed live observation",
         ));
     }
+    validate_git_decisions(plan, &state, findings);
     Ok(())
+}
+
+fn validate_git_decisions(
+    plan: &Plan,
+    state: &crate::domain::GitReadinessState,
+    findings: &mut Vec<ValidationFinding>,
+) {
+    if !state.setup_is_satisfied() {
+        let (id, message) = match state.setup().decision() {
+            GitSetupDecision::Pending => (
+                "POLICY-GIT-SETUP-PENDING",
+                "A missing repository requires an explicit setup decision",
+            ),
+            _ => (
+                "POLICY-GIT-SETUP-INCOMPLETE",
+                "The recorded setup decision still requires external Git preparation and refresh",
+            ),
+        };
+        findings.push(ValidationFinding::error(
+            id,
+            ValidationLayer::Policy,
+            "extensions.git_readiness_state.setup",
+            message,
+        ));
+    }
+    if !state.cleanup_is_satisfied() {
+        let (id, message) = match state.cleanup().decision() {
+            PrePlanCleanupDecision::Pending => (
+                "POLICY-GIT-CLEANUP-PENDING",
+                "Dirty pre-plan paths require an exact proposal or explicit decline",
+            ),
+            PrePlanCleanupDecision::Approved => (
+                "POLICY-GIT-CLEANUP-INCOMPLETE",
+                "Approved cleanup commits must be recorded in order and followed by a clean refresh",
+            ),
+            _ => return,
+        };
+        findings.push(ValidationFinding::error(
+            id,
+            ValidationLayer::Policy,
+            "extensions.git_readiness_state.cleanup",
+            message,
+        ));
+    }
+    if !state.cleanup().blockers().is_empty() {
+        findings.push(ValidationFinding::error(
+            "POLICY-GIT-CLEANUP-UNSAFE",
+            ValidationLayer::Policy,
+            "extensions.git_readiness_state.cleanup.blockers",
+            "The observed Git state cannot be separated into safe cleanup commits",
+        ));
+    }
+    if state.cleanup().observed_paths().iter().any(|path| {
+        plan.tasks().iter().any(|task| {
+            task.file_map()
+                .iter()
+                .any(|entry| matches_file_map_path(entry.path(), path))
+        })
+    }) {
+        findings.push(ValidationFinding::error(
+            "POLICY-GIT-CLEANUP-FILE-MAP-OVERLAP",
+            ValidationLayer::Policy,
+            "extensions.git_readiness_state.cleanup.observed_paths",
+            "A pre-plan dirty path overlaps the task File Map and must be cleaned before execution",
+        ));
+    }
 }
 
 fn validate_commit_gates(plan: &Plan, findings: &mut Vec<ValidationFinding>) {
@@ -428,35 +496,6 @@ fn all_checks(plan: &Plan) -> BTreeMap<&str, &VerificationCheck> {
         }
     }
     checks
-}
-
-fn is_conventional_commit(message: &str) -> bool {
-    if message.contains(['\r', '\n']) || message.ends_with('.') {
-        return false;
-    }
-    let Some((prefix, description)) = message.split_once(": ") else {
-        return false;
-    };
-    if description.trim().is_empty() {
-        return false;
-    }
-    let (type_, scope) = if let Some((type_, scope)) = prefix.split_once('(') {
-        let Some(scope) = scope.strip_suffix(')') else {
-            return false;
-        };
-        (type_, Some(scope))
-    } else {
-        (prefix, None)
-    };
-    CONVENTIONAL_COMMIT_TYPES.contains(&type_)
-        && scope.is_none_or(|scope| {
-            !scope.is_empty()
-                && scope.bytes().all(|byte| {
-                    byte.is_ascii_lowercase()
-                        || byte.is_ascii_digit()
-                        || matches!(byte, b'-' | b'_')
-                })
-        })
 }
 
 fn scope_covers(scope: &str, path: &str) -> bool {

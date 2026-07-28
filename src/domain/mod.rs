@@ -40,8 +40,12 @@ pub use evidence::{Evidence, EvidenceType, Redaction};
 pub use execution::{
     Checkpoint, CheckpointKind, Deviation, DeviationClassification, DeviationStatus, ExecutionState,
 };
-pub(crate) use git_readiness::GIT_READINESS_EXTENSION_KEY;
-pub use git_readiness::{GitReadinessObservation, GitReadinessState, GitRepositoryMode};
+pub use git_readiness::{
+    CleanupConsentStatus, GitReadinessObservation, GitReadinessState, GitRepositoryMode,
+    GitSetupDecision, GitSetupState, PrePlanCleanupDecision, PrePlanCleanupItem,
+    PrePlanCleanupState,
+};
+pub(crate) use git_readiness::{GIT_READINESS_EXTENSION_KEY, is_conventional_commit};
 pub use id::{CheckId, CriterionId, EvidenceId, PlanId, RequestId, TaskId};
 pub use lineage::{Lineage, PlanArchive};
 pub use plan::{

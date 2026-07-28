@@ -6,7 +6,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use mino::domain::PlanId;
+use mino::domain::{GitSetupDecision, PlanId, PlanStatus, PrePlanCleanupDecision};
 use mino::git::inspect_changes;
 use mino::project::initialize;
 use mino::store::PlanStore;
@@ -193,6 +193,379 @@ fn discovery_and_readiness_probes_enforce_timeout_and_output_limits() {
         timeout_failure["message"],
         "Git inspection or operation is unavailable"
     );
+}
+
+#[test]
+fn missing_repository_setup_decisions_are_auditable_and_recoverable() {
+    let area = TestArea::new("setup-decisions");
+    let continued = initialized_non_git_project(&area.path("continued"));
+    let continued_plan = create_plan(&continued, None, 30);
+    let continued_id = continued_plan.id().to_string();
+    let continued_state = continued_plan
+        .git_readiness_state()
+        .expect("setup state should decode")
+        .expect("setup state should exist");
+    assert_eq!(
+        continued_state.setup().decision(),
+        GitSetupDecision::Pending
+    );
+    let context = json_success(&run_mino(&continued, &["agent", "context"]));
+    assert_eq!(context["approval_required"], true);
+    assert_eq!(context["next_actions"][0]["id"], "git.inspect");
+
+    let continue_arguments = setup_decision_arguments(
+        &continued_id,
+        1,
+        31,
+        "continue-without-git",
+        "chat:continue-without-git",
+    );
+    let continued_result = json_success(&run_mino_owned(&continued, &continue_arguments));
+    assert_eq!(continued_result["revision"], 2);
+    let continued_after = load_plan(&continued, &continued_id);
+    assert_eq!(
+        continued_after
+            .git_readiness_state()
+            .expect("setup state should decode")
+            .expect("setup state should exist")
+            .setup()
+            .decision(),
+        GitSetupDecision::ContinueWithoutGit
+    );
+    assert!(!continued_after.git_readiness().git_flow_enabled());
+    let replay = json_success(&run_mino_owned(&continued, &continue_arguments));
+    assert_eq!(replay["revision"], 2);
+    assert_eq!(replay["replayed"], true);
+
+    let blocked = initialized_non_git_project(&area.path("blocked"));
+    let blocked_plan = create_plan(&blocked, None, 32);
+    let blocked_id = blocked_plan.id().to_string();
+    let blocked_result = json_success(&run_mino_owned(
+        &blocked,
+        &setup_decision_arguments(
+            &blocked_id,
+            1,
+            33,
+            "blocked-until-manual-setup",
+            "chat:block-until-setup",
+        ),
+    ));
+    assert_eq!(blocked_result["status"], "Blocked");
+    assert!(load_plan(&blocked, &blocked_id).is_blocked_for_git_readiness());
+    initialize_git_after_plan_creation(&blocked);
+    let refreshed = json_success(&run_mino_owned(
+        &blocked,
+        &readiness_refresh_arguments(&blocked_id, 2, 34),
+    ));
+    assert_eq!(refreshed["revision"], 3);
+    assert_eq!(refreshed["status"], "Draft");
+    let blocked_after = load_plan(&blocked, &blocked_id);
+    assert!(!blocked_after.is_blocked_for_git_readiness());
+    assert!(blocked_after.git_readiness().git_flow_enabled());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cleanup_proposal_approval_recording_and_refresh_verify_external_commits() {
+    let area = TestArea::new("cleanup-flow");
+    let repository = committed_repository(&area.path("repository"), "cleanup", true);
+    fs::write(
+        repository.join("src/lib.rs"),
+        "pub const VALUE: &str = \"updated\";\n",
+    )
+    .expect("tracked cleanup path should change");
+    fs::write(repository.join("notes.txt"), "pre-plan notes\n")
+        .expect("untracked cleanup path should exist");
+    let plan = create_plan(&repository, None, 40);
+    let plan_id = plan.id().to_string();
+    let state = plan
+        .git_readiness_state()
+        .expect("cleanup state should decode")
+        .expect("cleanup state should exist");
+    assert_eq!(state.cleanup().decision(), PrePlanCleanupDecision::Pending);
+    assert_eq!(
+        state.cleanup().observed_paths(),
+        ["notes.txt", "src/lib.rs"]
+    );
+    let base = git_text(&repository, &["rev-parse", "HEAD"]);
+    let status_before = git_text(&repository, &["status", "--short"]);
+
+    let incomplete_path = area.path("incomplete-cleanup.yaml");
+    fs::write(
+        &incomplete_path,
+        "items:\n  - logical_change: Update source\n    files: [src/lib.rs]\n    planned_commit_message: \"chore(cleanup): update source\"\n",
+    )
+    .expect("incomplete proposal should be written");
+    let incomplete = run_mino_owned(
+        &repository,
+        &cleanup_propose_arguments(&plan_id, 1, 41, &incomplete_path),
+    );
+    json_failure(&incomplete, 2, "incomplete_or_validation");
+    assert_eq!(load_plan(&repository, &plan_id).revision(), 1);
+
+    let invalid_message_path = area.path("invalid-message-cleanup.yaml");
+    fs::write(
+        &invalid_message_path,
+        "items:\n  - logical_change: Invalid message\n    files: [notes.txt, src/lib.rs]\n    planned_commit_message: \"cleanup source\"\n",
+    )
+    .expect("invalid-message proposal should be written");
+    let invalid_message = run_mino_owned(
+        &repository,
+        &cleanup_propose_arguments(&plan_id, 1, 42, &invalid_message_path),
+    );
+    json_failure(&invalid_message, 2, "incomplete_or_validation");
+    assert_eq!(load_plan(&repository, &plan_id).revision(), 1);
+
+    let proposal_path = area.path("cleanup.yaml");
+    fs::write(
+        &proposal_path,
+        "items:\n  - logical_change: Update source\n    files: [src/lib.rs]\n    planned_commit_message: \"chore(cleanup): update source\"\n  - logical_change: Add notes\n    files: [notes.txt]\n    planned_commit_message: \"docs(cleanup): add notes\"\n",
+    )
+    .expect("complete proposal should be written");
+    let proposed = json_success(&run_mino_owned(
+        &repository,
+        &cleanup_propose_arguments(&plan_id, 1, 43, &proposal_path),
+    ));
+    assert_eq!(proposed["revision"], 2);
+    assert_eq!(git_text(&repository, &["rev-parse", "HEAD"]), base);
+    assert_eq!(git_text(&repository, &["status", "--short"]), status_before);
+
+    json_success(&run_mino_owned(
+        &repository,
+        &cleanup_approve_arguments(&plan_id, 2, 44, "C1"),
+    ));
+    let reproposal = run_mino_owned(
+        &repository,
+        &cleanup_propose_arguments(&plan_id, 3, 60, &proposal_path),
+    );
+    json_failure(&reproposal, 2, "incomplete_or_validation");
+    assert_eq!(load_plan(&repository, &plan_id).revision(), 3);
+    json_success(&run_mino_owned(
+        &repository,
+        &cleanup_approve_arguments(&plan_id, 3, 45, "C2"),
+    ));
+    let wrong_order = run_mino_owned(
+        &repository,
+        &cleanup_record_arguments(&plan_id, 4, 46, "C2", &base),
+    );
+    json_failure(&wrong_order, 2, "incomplete_or_validation");
+    assert_eq!(load_plan(&repository, &plan_id).revision(), 4);
+    git(&repository, &["add", "--", "src/lib.rs"]);
+    git_commit(&repository, "chore(cleanup): update source");
+    let first_commit = git_text(&repository, &["rev-parse", "HEAD"]);
+    let context = json_success(&run_mino_owned(
+        &repository,
+        &["agent".to_owned(), "context".to_owned()],
+    ));
+    assert_eq!(context["next_actions"][0]["id"], "git.inspect");
+    assert!(
+        context["allowed_actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().any(|action| action == "git.cleanup.record"))
+    );
+    let premature_refresh =
+        run_mino_owned(&repository, &readiness_refresh_arguments(&plan_id, 4, 61));
+    json_failure(&premature_refresh, 2, "incomplete_or_validation");
+    assert_eq!(load_plan(&repository, &plan_id).revision(), 4);
+    json_success(&run_mino_owned(
+        &repository,
+        &cleanup_record_arguments(&plan_id, 4, 47, "C1", &first_commit),
+    ));
+    git(&repository, &["add", "--", "notes.txt"]);
+    git_commit(&repository, "docs(cleanup): add notes");
+    let second_commit = git_text(&repository, &["rev-parse", "HEAD"]);
+    json_success(&run_mino_owned(
+        &repository,
+        &cleanup_record_arguments(&plan_id, 5, 48, "C2", &second_commit),
+    ));
+    assert!(git_text(&repository, &["status", "--short"]).is_empty());
+
+    let refreshed = json_success(&run_mino_owned(
+        &repository,
+        &readiness_refresh_arguments(&plan_id, 6, 49),
+    ));
+    assert_eq!(refreshed["revision"], 7);
+    let completed = load_plan(&repository, &plan_id);
+    let completed_state = completed
+        .git_readiness_state()
+        .expect("completed cleanup state should decode")
+        .expect("completed cleanup state should exist");
+    assert_eq!(
+        completed_state.cleanup().decision(),
+        PrePlanCleanupDecision::Completed
+    );
+    assert_eq!(
+        completed_state.cleanup().items()[0].actual_commit(),
+        Some(first_commit.as_str())
+    );
+    assert_eq!(
+        completed_state.cleanup().items()[1].actual_commit(),
+        Some(second_commit.as_str())
+    );
+    assert!(completed.git_readiness().git_flow_enabled());
+}
+
+#[test]
+fn unapproved_cleanup_proposal_resets_after_a_clean_same_head_refresh() {
+    let area = TestArea::new("cleanup-reset");
+    let repository = committed_repository(&area.path("repository"), "cleanup-reset", true);
+    fs::write(
+        repository.join("src/lib.rs"),
+        "pub const VALUE: &str = \"changed\";\n",
+    )
+    .expect("cleanup path should change");
+    let plan = create_plan(&repository, None, 70);
+    let plan_id = plan.id().to_string();
+    let proposal_path = area.path("cleanup-reset.yaml");
+    fs::write(
+        &proposal_path,
+        "items:\n  - logical_change: Restore source\n    files: [src/lib.rs]\n    planned_commit_message: \"chore(cleanup): restore source\"\n",
+    )
+    .expect("cleanup proposal should be written");
+    json_success(&run_mino_owned(
+        &repository,
+        &cleanup_propose_arguments(&plan_id, 1, 71, &proposal_path),
+    ));
+    fs::write(
+        repository.join("src/lib.rs"),
+        "pub const VALUE: &str = \"cleanup-reset\";\n",
+    )
+    .expect("cleanup path should return to its base content");
+    assert!(git_text(&repository, &["status", "--short"]).is_empty());
+
+    json_success(&run_mino_owned(
+        &repository,
+        &readiness_refresh_arguments(&plan_id, 2, 72),
+    ));
+    let refreshed = load_plan(&repository, &plan_id);
+    let state = refreshed
+        .git_readiness_state()
+        .expect("refreshed cleanup should decode")
+        .expect("refreshed cleanup should exist");
+    assert_eq!(
+        state.cleanup().decision(),
+        PrePlanCleanupDecision::NotRequired
+    );
+    assert!(state.cleanup().items().is_empty());
+    assert!(refreshed.git_readiness().git_flow_enabled());
+}
+
+#[test]
+fn unsafe_initial_cleanup_state_is_recoverably_blocked() {
+    let area = TestArea::new("cleanup-unsafe");
+    let repository = committed_repository(&area.path("repository"), "cleanup-unsafe", true);
+    git(&repository, &["switch", "-c", "cleanup-conflict"]);
+    fs::write(
+        repository.join("src/lib.rs"),
+        "pub const VALUE: &str = \"branch\";\n",
+    )
+    .expect("branch conflict content should be written");
+    git(&repository, &["add", "--", "src/lib.rs"]);
+    git_commit(&repository, "test(git): change conflict branch");
+    git(&repository, &["switch", "main"]);
+    fs::write(
+        repository.join("src/lib.rs"),
+        "pub const VALUE: &str = \"main\";\n",
+    )
+    .expect("main conflict content should be written");
+    git(&repository, &["add", "--", "src/lib.rs"]);
+    git_commit(&repository, "test(git): change main branch");
+    let mut merge = Command::new("git");
+    merge
+        .args(["merge", "--no-edit", "cleanup-conflict"])
+        .current_dir(&repository);
+    clear_git_environment(&mut merge);
+    let output = merge.output().expect("conflicting merge should run");
+    assert!(!output.status.success());
+
+    let plan = create_plan(&repository, None, 80);
+    assert_eq!(plan.status(), PlanStatus::Blocked);
+    assert!(plan.is_blocked_for_git_readiness());
+    let state = plan
+        .git_readiness_state()
+        .expect("unsafe cleanup state should decode")
+        .expect("unsafe cleanup state should exist");
+    assert!(
+        state
+            .cleanup()
+            .blockers()
+            .iter()
+            .any(|blocker| blocker.starts_with("unmerged:"))
+    );
+    assert!(!plan.git_readiness().git_flow_enabled());
+}
+
+#[test]
+fn declined_cleanup_with_file_map_overlap_blocks_until_a_clean_refresh() {
+    let area = TestArea::new("cleanup-overlap");
+    let repository = committed_repository(&area.path("repository"), "overlap", true);
+    fs::create_dir_all(repository.join("src/application"))
+        .expect("overlap source directory should exist");
+    fs::write(
+        repository.join("src/application/plan.rs"),
+        "pub fn baseline() {}\n",
+    )
+    .expect("overlap baseline should be written");
+    git(&repository, &["add", "--", "src/application/plan.rs"]);
+    git_commit(&repository, "test: add overlap baseline");
+    fs::write(
+        repository.join("src/application/plan.rs"),
+        "pub fn changed() {}\n",
+    )
+    .expect("overlap path should become dirty");
+    let plan = create_plan(&repository, None, 50);
+    let plan_id = plan.id().to_string();
+    let apply = vec![
+        "plan".to_owned(),
+        "apply".to_owned(),
+        "--plan".to_owned(),
+        plan_id.clone(),
+        "--expect-revision".to_owned(),
+        "1".to_owned(),
+        "--request-id".to_owned(),
+        request_id(51),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+        "--file".to_owned(),
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/drafts/complete.yaml")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    let applied = json_success(&run_mino_owned(&repository, &apply));
+    assert_eq!(applied["status"], "Blocked");
+    let declined = json_success(&run_mino_owned(
+        &repository,
+        &cleanup_decline_arguments(&plan_id, 2, 52),
+    ));
+    assert_eq!(declined["status"], "Blocked");
+    let blocked = load_plan(&repository, &plan_id);
+    assert!(blocked.is_blocked_for_git_readiness());
+    assert!(!blocked.git_readiness().git_flow_enabled());
+
+    fs::write(
+        repository.join("src/application/plan.rs"),
+        "pub fn baseline() {}\n",
+    )
+    .expect("overlap source should be restored");
+    assert!(git_text(&repository, &["status", "--short"]).is_empty());
+    let refreshed = json_success(&run_mino_owned(
+        &repository,
+        &readiness_refresh_arguments(&plan_id, 3, 53),
+    ));
+    assert_eq!(refreshed["status"], "Draft");
+    let unblocked = load_plan(&repository, &plan_id);
+    assert!(!unblocked.is_blocked_for_git_readiness());
+    assert_eq!(
+        unblocked
+            .git_readiness_state()
+            .expect("declined cleanup should decode")
+            .expect("declined cleanup should exist")
+            .cleanup()
+            .decision(),
+        PrePlanCleanupDecision::Declined
+    );
+    assert!(!unblocked.git_readiness().git_flow_enabled());
 }
 
 #[test]
@@ -395,6 +768,189 @@ fn create_plan(
     PlanStore::new(root)
         .load_plan(&plan_id)
         .expect("bounded-probe plan should load")
+}
+
+fn load_plan(root: &Path, plan_id: &str) -> mino::domain::Plan {
+    PlanStore::new(root)
+        .load_plan(&PlanId::parse(plan_id).expect("plan ID should parse"))
+        .expect("plan should load")
+}
+
+fn request_id(number: u64) -> String {
+    format!("82000000-0000-0000-0000-{number:012}")
+}
+
+fn run_mino_owned(root: &Path, arguments: &[String]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_mino"))
+        .arg("--root")
+        .arg(root)
+        .args(["--format", "json", "--no-input"])
+        .args(arguments)
+        .stdin(Stdio::null())
+        .output()
+        .expect("Mino binary should run")
+}
+
+fn setup_decision_arguments(
+    plan_id: &str,
+    revision: u64,
+    request_number: u64,
+    decision: &str,
+    approval_reference: &str,
+) -> Vec<String> {
+    vec![
+        "git".to_owned(),
+        "setup".to_owned(),
+        "decide".to_owned(),
+        "--plan".to_owned(),
+        plan_id.to_owned(),
+        "--decision".to_owned(),
+        decision.to_owned(),
+        "--approval-ref".to_owned(),
+        approval_reference.to_owned(),
+        "--expect-revision".to_owned(),
+        revision.to_string(),
+        "--request-id".to_owned(),
+        request_id(request_number),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+    ]
+}
+
+fn readiness_refresh_arguments(plan_id: &str, revision: u64, request_number: u64) -> Vec<String> {
+    vec![
+        "git".to_owned(),
+        "readiness".to_owned(),
+        "refresh".to_owned(),
+        "--plan".to_owned(),
+        plan_id.to_owned(),
+        "--expect-revision".to_owned(),
+        revision.to_string(),
+        "--request-id".to_owned(),
+        request_id(request_number),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+    ]
+}
+
+fn cleanup_propose_arguments(
+    plan_id: &str,
+    revision: u64,
+    request_number: u64,
+    file: &Path,
+) -> Vec<String> {
+    vec![
+        "git".to_owned(),
+        "cleanup".to_owned(),
+        "propose".to_owned(),
+        "--plan".to_owned(),
+        plan_id.to_owned(),
+        "--file".to_owned(),
+        file.to_string_lossy().into_owned(),
+        "--expect-revision".to_owned(),
+        revision.to_string(),
+        "--request-id".to_owned(),
+        request_id(request_number),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+    ]
+}
+
+fn cleanup_approve_arguments(
+    plan_id: &str,
+    revision: u64,
+    request_number: u64,
+    item_id: &str,
+) -> Vec<String> {
+    vec![
+        "git".to_owned(),
+        "cleanup".to_owned(),
+        "approve".to_owned(),
+        "--plan".to_owned(),
+        plan_id.to_owned(),
+        "--item".to_owned(),
+        item_id.to_owned(),
+        "--approval-ref".to_owned(),
+        format!("chat:approve-{item_id}"),
+        "--expect-revision".to_owned(),
+        revision.to_string(),
+        "--request-id".to_owned(),
+        request_id(request_number),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+    ]
+}
+
+fn cleanup_decline_arguments(plan_id: &str, revision: u64, request_number: u64) -> Vec<String> {
+    vec![
+        "git".to_owned(),
+        "cleanup".to_owned(),
+        "approve".to_owned(),
+        "--plan".to_owned(),
+        plan_id.to_owned(),
+        "--decline".to_owned(),
+        "--approval-ref".to_owned(),
+        "chat:decline-cleanup".to_owned(),
+        "--expect-revision".to_owned(),
+        revision.to_string(),
+        "--request-id".to_owned(),
+        request_id(request_number),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+    ]
+}
+
+fn cleanup_record_arguments(
+    plan_id: &str,
+    revision: u64,
+    request_number: u64,
+    item_id: &str,
+    commit: &str,
+) -> Vec<String> {
+    vec![
+        "git".to_owned(),
+        "cleanup".to_owned(),
+        "record".to_owned(),
+        "--plan".to_owned(),
+        plan_id.to_owned(),
+        "--item".to_owned(),
+        item_id.to_owned(),
+        "--commit".to_owned(),
+        commit.to_owned(),
+        "--expect-revision".to_owned(),
+        revision.to_string(),
+        "--request-id".to_owned(),
+        request_id(request_number),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+    ]
+}
+
+fn initialize_git_after_plan_creation(root: &Path) {
+    fs::write(
+        root.join(".gitignore"),
+        "/.mino/\n/docs/plan/\n/request.md\n",
+    )
+    .expect("post-plan Git ignore should be written");
+    git(root, &["init", "--quiet", "--initial-branch", "main"]);
+    git(root, &["add", "."]);
+    git_commit(root, "chore: establish external Git baseline");
+}
+
+fn git_commit(root: &Path, message: &str) {
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=Mino Tests",
+            "-c",
+            "user.email=mino-tests@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            message,
+        ],
+    );
 }
 
 fn run_create_plan(root: &Path, shim_directory: Option<&Path>, request_number: u64) -> Output {

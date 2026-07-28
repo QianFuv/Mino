@@ -27,7 +27,7 @@ use crate::store::{MutationRequest, PlanStore, StoreError, StoreErrorKind, sha25
 use crate::{ErrorCategory, MinoError, NextAction};
 
 use super::AGENT_EXECUTOR_IDENTITY;
-use super::git_readiness::detect_initial_git_readiness;
+use super::git_readiness::{detect_initial_git_readiness, readiness_block_reason};
 
 /// Maximum UTF-8 request or YAML input accepted by authoring adapters.
 pub const MAX_AUTHORING_INPUT_BYTES: usize = 1024 * 1024;
@@ -410,6 +410,19 @@ impl DraftMutation {
         }
     }
 
+    fn affects_file_map(&self) -> bool {
+        matches!(
+            self,
+            Self::Apply(_)
+                | Self::Task(_)
+                | Self::File { .. }
+                | Self::TaskUpdate { .. }
+                | Self::TaskRemove { .. }
+                | Self::FileUpdate { .. }
+                | Self::FileRemove { .. }
+        )
+    }
+
     fn assigned_id(&self, prior: &Plan) -> Result<Option<String>, MinoError> {
         match self {
             Self::Task(_) => Ok(Some(
@@ -600,13 +613,28 @@ impl PlanService {
         request: DraftMutationRequest,
         mutation: &DraftMutation,
     ) -> Result<PlanOperationReport, MinoError> {
-        let changed_fields = mutation.changed_fields();
+        let should_reconcile_readiness = mutation.affects_file_map();
+        let mut changed_fields = mutation.changed_fields();
+        if should_reconcile_readiness {
+            changed_fields.extend([
+                "status".to_owned(),
+                "resume_status".to_owned(),
+                "blocker".to_owned(),
+            ]);
+        }
         let applied_mutation = mutation.clone();
         self.commit_semantic(
             request,
             changed_fields,
             |prior| mutation.assigned_id(prior),
-            move |plan, updated_at| applied_mutation.apply(plan, updated_at),
+            move |plan, updated_at| {
+                applied_mutation.apply(plan, updated_at)?;
+                if should_reconcile_readiness && let Some(state) = plan.git_readiness_state()? {
+                    let block_reason = readiness_block_reason(plan, &state);
+                    plan.reconcile_git_readiness_block(block_reason)?;
+                }
+                Ok(())
+            },
         )
     }
 
@@ -1060,6 +1088,9 @@ impl PlanService {
         plan.record_initial_project_scan(&scan_summary)
             .map_err(|error| domain_input_error(&error))?;
         plan.record_initial_git_readiness(&git_readiness_state)
+            .map_err(|error| domain_input_error(&error))?;
+        let block_reason = readiness_block_reason(&plan, &git_readiness_state);
+        plan.reconcile_git_readiness_block(block_reason)
             .map_err(|error| domain_input_error(&error))?;
         plan.validate_invariants()
             .map_err(|error| domain_input_error(&error))?;

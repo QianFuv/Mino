@@ -33,9 +33,11 @@ impl TestProject {
         fs::write(path.join("src/lib.rs"), "pub fn fixture() -> u8 { 1 }\n")
             .expect("fixture source should be written");
         initialize(&path).expect("temporary project should initialize");
-        Self {
+        let project = Self {
             path: path.canonicalize().expect("project root should resolve"),
-        }
+        };
+        initialize_git(&project);
+        project
     }
 
     fn path(&self) -> &Path {
@@ -443,9 +445,6 @@ fn show_review_and_approval_are_revision_bound_scope_preserving_and_replayable()
     assert_eq!(empty_reference_result.status.code(), Some(4));
     assert_eq!(stored_bytes(&project, &plan_id), show_before);
 
-    let inconsistent = run_mino(&approve_arguments(&project, &plan_id, 3, 33, "approved"));
-    assert_eq!(inconsistent.status.code(), Some(5));
-    assert_eq!(stored_bytes(&project, &plan_id), show_before);
     let approve = approve_arguments(&project, &plan_id, 3, 34, "disabled");
     let approved = parse_success(&run_mino(&approve));
     assert_eq!(approved["message"], "Plan approval recorded.");
@@ -538,7 +537,6 @@ fn projection_drift_blocks_show_review_and_approval_without_state_changes() {
 #[test]
 fn readiness_drift_requires_explicit_refresh_and_invalidates_ready_approval() {
     let project = TestProject::new("git-readiness-refresh");
-    initialize_git(&project);
     let (plan_id, _) = finalize_complete_plan(&project, "Refresh Git readiness", 60);
     let approved = parse_success(&run_mino(&approve_arguments(
         &project, &plan_id, 3, 63, "approved",
@@ -600,7 +598,6 @@ fn readiness_drift_requires_explicit_refresh_and_invalidates_ready_approval() {
 #[test]
 fn head_branch_and_worktree_identity_drift_block_review_without_mutation() {
     let head_project = TestProject::new("git-readiness-head");
-    initialize_git(&head_project);
     let (head_plan_id, _) = finalize_complete_plan(&head_project, "HEAD readiness", 70);
     fs::write(head_project.path().join("head-drift.txt"), "head drift\n")
         .expect("HEAD drift fixture should be written");
@@ -625,7 +622,6 @@ fn head_branch_and_worktree_identity_drift_block_review_without_mutation() {
     assert_eq!(load_plan(&head_project, &head_plan_id).revision(), 3);
 
     let branch_project = TestProject::new("git-readiness-branch");
-    initialize_git(&branch_project);
     let (branch_plan_id, _) = finalize_complete_plan(&branch_project, "Branch readiness", 80);
     git(
         branch_project.path(),
@@ -638,7 +634,6 @@ fn head_branch_and_worktree_identity_drift_block_review_without_mutation() {
     assert_eq!(load_plan(&branch_project, &branch_plan_id).revision(), 3);
 
     let mut worktree_project = TestProject::new("git-readiness-worktree");
-    initialize_git(&worktree_project);
     let (worktree_plan_id, _) = finalize_complete_plan(&worktree_project, "Worktree readiness", 90);
     let original = worktree_project.path.clone();
     let moved = original.with_file_name(format!(

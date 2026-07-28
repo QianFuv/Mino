@@ -61,6 +61,25 @@ tree, so planned task dirt remains eligible while parent, index, scope, and
 checked blob rules still apply. A legacy plan without typed readiness must also
 refresh before a protected transition.
 
+Missing repositories and dirty worktrees require explicit, auditable decisions.
+When context returns `git.setup.decide`, use the exact revisioned argv and one
+of `initialize-approved`, `continue-without-git`, or
+`blocked-until-manual-setup`. The first choice records permission only: Mino
+never runs `git init`. For dirty worktrees, create a strict YAML proposal for
+the returned `git.cleanup.propose` action. Ordered `C<n>` items must have
+disjoint files that exactly cover every observed dirty path and one-line
+Conventional Commit messages. Approve each item only at the returned
+`git.cleanup.approve` boundary, or explicitly decline cleanup.
+
+Create any approved cleanup commit outside Mino under the repository's own
+authorization, then execute the returned `git.cleanup.record` argv with the
+full current-HEAD object ID. Record verifies exact order, parent, message, and
+files; it never stages or commits. After every item is recorded and the live
+tree is clean, execute `git.readiness.refresh` to mark cleanup complete and
+recompute Git Flow eligibility. Unsafe Git state or overlap between a dirty
+path and the task File Map remains recoverably Blocked until external repair
+and refresh.
+
 Use `mino git branch propose --plan <id> --format json --no-input` to obtain the
 only supported branch name and current blockers. The proposal is read-only.
 `mino git branch create --plan <id> --approval-ref <ref> --format json

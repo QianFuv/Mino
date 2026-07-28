@@ -11,8 +11,8 @@ use mino::domain::{
     AmendmentPatch, Approval, CheckId, CriterionId, DeviationClassification, DraftCommitGateInput,
     DraftCriterionInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,
     DraftTaskInput, DraftVerificationInput, EvidenceId, FileChange, GitFlowConsent, GitReadiness,
-    GitReadinessObservation, GitReadinessState, GitRepositoryMode, Plan, PlanDraftSeed, PlanId,
-    StandardSelection, TaskId, Timestamp, VerificationCheck,
+    GitReadinessObservation, GitReadinessState, GitRepositoryMode, GitSetupDecision, Plan,
+    PlanDraftSeed, PlanId, StandardSelection, TaskId, Timestamp, VerificationCheck,
 };
 use mino::git::{ActiveBindingStore, GitAdapter};
 use mino::project::initialize;
@@ -190,7 +190,7 @@ fn configured_draft_with_git(
 }
 
 fn non_git_readiness_state() -> GitReadinessState {
-    GitReadinessState::new(
+    let mut state = GitReadinessState::new(
         GitReadinessObservation::new(
             GitRepositoryMode::NotRepository,
             None,
@@ -203,7 +203,16 @@ fn non_git_readiness_state() -> GitReadinessState {
         )
         .expect("non-Git observation should validate"),
     )
-    .expect("non-Git readiness state should validate")
+    .expect("non-Git readiness state should validate");
+    state
+        .decide_setup(
+            GitSetupDecision::ContinueWithoutGit,
+            "user".to_owned(),
+            "chat:continue-without-git".to_owned(),
+            timestamp(0),
+        )
+        .expect("non-Git setup decision should record");
+    state
 }
 
 fn worktree_readiness_state(project: &TestProject) -> GitReadinessState {
@@ -793,6 +802,28 @@ fn retain_binding_after_git_removal(project: &TestProject, plan_id: &str, revisi
         .expect("Git repository should be removed from the fixture");
 }
 
+fn decide_without_git(project: &TestProject, plan_id: &str, request_number: u64) {
+    let mut arguments = base_arguments(project);
+    arguments.extend([
+        "git".to_owned(),
+        "setup".to_owned(),
+        "decide".to_owned(),
+        "--plan".to_owned(),
+        plan_id.to_owned(),
+        "--decision".to_owned(),
+        "continue-without-git".to_owned(),
+        "--approval-ref".to_owned(),
+        "chat:continue-without-git".to_owned(),
+        "--expect-revision".to_owned(),
+        "1".to_owned(),
+        "--request-id".to_owned(),
+        format!("39000000-0000-0000-0000-{request_number:012}"),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+    ]);
+    parse_success(&run_mino(&arguments));
+}
+
 #[test]
 fn agent_cli_is_direct_strict_and_uses_the_only_active_plan() {
     let project = TestProject::new("cli");
@@ -820,10 +851,14 @@ fn agent_cli_is_direct_strict_and_uses_the_only_active_plan() {
     let plan_id = created["plan_id"]
         .as_str()
         .expect("create should return a plan ID");
-    retain_binding_after_git_removal(&project, plan_id, 1);
+    let pending = parse_success(&run_mino(&agent_arguments(&project, "context")));
+    assert_eq!(pending["next_actions"][0]["id"], "git.inspect");
+    assert_eq!(pending["approval_required"], true);
+    decide_without_git(&project, plan_id, 1);
+    retain_binding_after_git_removal(&project, plan_id, 2);
     let context = parse_success(&run_mino(&agent_arguments(&project, "context")));
     assert_eq!(context["active_plan"]["id"], plan_id);
-    assert_eq!(context["active_plan"]["revision"], 1);
+    assert_eq!(context["active_plan"]["revision"], 2);
     assert_eq!(context["next_actions"][0]["id"], "plan.summary.set");
     let next = parse_success(&run_mino(&agent_arguments(&project, "next")));
     assert_eq!(next["kind"], "mino.agent-next/v1");
@@ -846,6 +881,11 @@ fn agent_cli_is_direct_strict_and_uses_the_only_active_plan() {
             action["id"] == "review.disposition.revise" && action["approval_boundary"] == true
         })
     }));
+    assert!(capabilities["actions"].as_array().is_some_and(|actions| {
+        actions
+            .iter()
+            .any(|action| action["id"] == "git.setup.decide" && action["approval_boundary"] == true)
+    }));
 
     let second = run_mino(&create_arguments(&project, "Second active plan", 2));
     assert_eq!(second.status.code(), Some(5));
@@ -865,6 +905,7 @@ fn canonical_agent_mutations_record_codex_while_direct_cli_defaults_to_user() {
         let plan_id = created["plan_id"]
             .as_str()
             .expect("created plan ID should be a string");
+        decide_without_git(&project, plan_id, 20);
         let context = parse_success(&run_mino(&agent_arguments(&project, "context")));
         let mut arguments = context["next_actions"][0]["argv"]
             .as_array()

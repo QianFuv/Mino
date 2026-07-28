@@ -42,6 +42,25 @@ impl TestProject {
         ));
         fs::create_dir(&path).expect("temporary project should be created");
         initialize(&path).expect("temporary project should initialize");
+        fs::write(path.join(".gitignore"), "/.mino/\n/docs/plan/\n")
+            .expect("variant Git ignore should be written");
+        fs::write(path.join("fixture.txt"), "variant fixture\n")
+            .expect("variant Git fixture should be written");
+        git(&path, &["init", "--quiet", "--initial-branch", "main"]);
+        git(&path, &["add", "."]);
+        git(
+            &path,
+            &[
+                "-c",
+                "user.name=Mino Tests",
+                "-c",
+                "user.email=mino-tests@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "chore: establish variant fixture",
+            ],
+        );
         Self {
             path: path.canonicalize().expect("project root should resolve"),
         }
@@ -50,6 +69,20 @@ impl TestProject {
     fn path(&self) -> &Path {
         &self.path
     }
+}
+
+fn git(root: &Path, arguments: &[&str]) {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .expect("Git should run");
+    assert!(
+        output.status.success(),
+        "git {arguments:?} failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 impl Drop for TestProject {
@@ -99,12 +132,6 @@ fn run_mino(project: &TestProject, arguments: &[&str]) -> Output {
 }
 
 fn retain_binding_after_git_removal(project: &TestProject, plan_id: &PlanId, revision: u64) {
-    let initialized = Command::new("git")
-        .args(["init", "--quiet"])
-        .current_dir(project.path())
-        .output()
-        .expect("Git should initialize the binding fixture");
-    assert!(initialized.status.success());
     let facts = GitAdapter::new(project.path())
         .inspect()
         .expect("Git facts should inspect");
@@ -333,7 +360,7 @@ fn stored_executable_plan(
         .expect("request input should be written");
     fs::write(
         &input_path,
-        "metadata:\n  priority: P1\n  area: agent/context\n  owner: codex\nsummary: Keep lifecycle guidance while alternatives remain optional.\nscope:\n  goal: Preserve the selected plan lifecycle.\n  deliverables:\n    - Lifecycle context\n  in_scope:\n    - Agent guidance\n  out_of_scope:\n    - Plan merging\napproach: Expose alternatives without replacing lifecycle actions.\ninterfaces: Selected lifecycle to optional plan actions.\ntasks:\n  - id: T1\n    title: Preserve selected guidance\n    depends_on: []\n    steps:\n      - Inspect the selected lifecycle\n    files:\n      - path: notes.txt\n        change: Modify\n        reason: Own the lifecycle fixture\n    acceptance_criteria:\n      - id: T1-A1\n        description: Selected guidance remains canonical\n    verification:\n      - id: T1-V1\n        command: [cargo, test]\n        cwd: .\n        expected_exit_code: 0\n        required: true\nverification_plan:\n  - id: GLOBAL-V1\n    command: [cargo, test]\n    cwd: .\n    expected_exit_code: 0\n    required: true\n",
+        "metadata:\n  priority: P1\n  area: agent/context\n  owner: codex\nsummary: Keep lifecycle guidance while alternatives remain optional.\nscope:\n  goal: Preserve the selected plan lifecycle.\n  deliverables:\n    - Lifecycle context\n  in_scope:\n    - Agent guidance\n  out_of_scope:\n    - Plan merging\napproach: Expose alternatives without replacing lifecycle actions.\ninterfaces: Selected lifecycle to optional plan actions.\ntasks:\n  - id: T1\n    title: Preserve selected guidance\n    depends_on: []\n    steps:\n      - Inspect the selected lifecycle\n    files:\n      - path: notes.txt\n        change: Modify\n        reason: Own the lifecycle fixture\n    acceptance_criteria:\n      - id: T1-A1\n        description: Selected guidance remains canonical\n    verification:\n      - id: T1-V1\n        command: [cargo, test]\n        cwd: .\n        expected_exit_code: 0\n        required: true\n    commit_gate:\n      required: true\n      planned_message: \"test(agent): preserve lifecycle guidance\"\n      scope: [notes.txt]\nverification_plan:\n  - id: GLOBAL-V1\n    command: [cargo, test]\n    cwd: .\n    expected_exit_code: 0\n    required: true\n",
     )
     .expect("plan input should be written");
     let create_request = request_id(number).to_string();
@@ -913,6 +940,28 @@ fn cli_exposes_the_complete_fork_diff_archive_and_active_selection_sequence() {
     ));
     assert_eq!(archived["revision"], 2);
     assert_eq!(archived["status"], "Draft");
+
+    let setup = parse_success(&run_mino(
+        &project,
+        &[
+            "git",
+            "setup",
+            "decide",
+            "--plan",
+            &fork_id,
+            "--decision",
+            "continue-without-git",
+            "--approval-ref",
+            "chat:continue-without-git",
+            "--expect-revision",
+            "1",
+            "--request-id",
+            "80000000-0000-0000-0000-000000000359",
+            "--actor",
+            "codex",
+        ],
+    ));
+    assert_eq!(setup["revision"], 2);
 
     let context = parse_success(&run_mino(&project, &["agent", "context"]));
     assert_eq!(context["kind"], "mino.agent-context/v1");

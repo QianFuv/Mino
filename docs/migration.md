@@ -72,6 +72,7 @@ binary、plugin 与项目本地协议是三个相关但独立的版本边界。�
 - **Plan/task baseline**：旧计划不会被合成一个“clean” baseline。新的 plan approval 与 task start 会从当时 workspace 捕获 baseline；需要 baseline 而状态中仍缺失时，操作明确失败，不会退回整个工作树猜测。
 - **Project selection**：缺少 `.mino/plan-selection.json` 时使用只读的 selection revision 0。零个 live plan 返回空，一个 live plan 被虚拟选择；多个 live plan 全部作为 alternatives 返回，必须执行 approval-bound `plan select`。Git binding 不作为迁移 fallback。
 - **Project scan**：缺少 scan extension 的旧计划保持可读；Mino 不伪造摘要。新 create 或 plan-scoped standards apply 会保存 scan digest、计数和截断原因。只有已保存且未接受的截断摘要阻塞 validate/finalize，接受记录不跨 digest 迁移。
+- **Git readiness decision**：只有旧 observation 的计划可读取，但 setup/cleanup 会按 repository mode 和已保存 cleanliness 物化为兼容状态；受保护转换前仍必须运行 live `git readiness refresh`。缺少 repository 会产生 Pending setup，dirty tree 会产生 Pending cleanup，而不是自动禁用 Git Flow。`setup decide` 和 cleanup proposal/approval/record 都只写受审计的计划状态；Mino 不运行 `git init`、`git add` 或 pre-plan cleanup commit。
 - **Deviation 与 Final Outcome**：只有旧 Deviation checkpoint 时，会按历史顺序派生稳定 `D<n>` 与 legacy link；首次处置时持久化。旧 Review 可以通过 `plan outcome set` 补齐 Final Outcome，但不会自动进入 Done。
 - **Actor identity**：既有 event 的 actor 原样保留。新的 Agent context/next/capabilities 宣告 `executor_identity: codex`，规范 revisioned mutation argv 显式传入 `--actor codex`；人工 CLI 省略 actor 时仍记录 `user`。
 
@@ -172,9 +173,10 @@ mino project import legacy \
 5. 运行 `project doctor` 与 `protocol status`，直到没有 blocking finding。
 6. 创建新计划，或导入一份受支持旧计划。
 7. 如果 context 返回多个 alternatives，先审阅 diff，再用 `plan select` 明确选择；不要用 `git bind` 代替。
-8. 人工复核导入 Draft、扫描摘要和 standards 后，再 validate、finalize 和 approve。
-9. 重新运行所有需要 freshness 的检查；不要把旧 Passed evidence 当作升级证明。
-10. 只有在独立审阅后才删除或简化旧文件；Mino 不执行这一步。
+8. 读取 Git readiness：对缺少 repository 的计划显式决定初始化、无 Git 继续或等待人工设置；对 dirty tree 提交完整 cleanup proposal，并逐项取得批准。实际 Git 初始化和 cleanup commits 必须在 Mino 外按仓库授权完成，再用完整 OID record 和 readiness refresh 核验。
+9. 人工复核导入 Draft、扫描摘要和 standards 后，再 validate、finalize 和 approve。
+10. 重新运行所有需要 freshness 的检查；不要把旧 Passed evidence 当作升级证明。
+11. 只有在独立审阅后才删除或简化旧文件；Mino 不执行这一步。
 
 ## 冲突与恢复
 
@@ -183,6 +185,7 @@ mino project import legacy \
 - 缺失区块只产生 proposal；valid-but-stale 区块可更新。duplicate、reversed、partial、non-UTF-8、symlink 或 non-file marker target 都会被拒绝。
 - protocol migration、legacy analysis 和 import parse/digest 错误不会写计划状态。
 - 导入若在 revision 1 创建后中断，可使用完全相同的导入请求补完 authored batch。
+- Pending setup/cleanup 或 unsafe/File Map overlap 会把计划保持为可恢复 Blocked；完成外部 Git 工作后运行 revisioned readiness refresh。不要手工编辑 extension 或 projection，也不要把计划 approval 当作 pre-plan Git mutation 授权。
 - 常规计划加载和 `project doctor` 会恢复 prepared transaction。不要手工删除 `.mino/**` 中的 transaction、snapshot 或 history 文件。
 
 当前远程 Team Catalog package 只支持 sync/cache，不会被 recommend/apply 选入计划。普通完整 CI 仍只配置 Windows；多目标 artifact smoke 不能替代 Linux/macOS 全套验证。这两项是明确的后续边界，不应在迁移时解释为已经具备。

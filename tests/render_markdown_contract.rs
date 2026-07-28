@@ -173,6 +173,45 @@ fn golden_projection_is_complete_byte_stable_and_lf_only() {
     assert!(first.markdown().contains("````json"));
 }
 
+#[test]
+fn cleanup_item_projection_includes_complete_approval_and_commit_audit() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/render/full_plan.json"))
+            .expect("full plan fixture should parse as JSON");
+    value["extensions"]["git_readiness_state"]["cleanup"] = serde_json::json!({
+        "decision": "completed",
+        "observed_paths": [],
+        "blockers": [],
+        "items": [{
+            "id": "C1",
+            "logical_change": "Preserve the cleanup audit",
+            "files": ["notes.txt"],
+            "planned_commit_message": "docs(cleanup): preserve audit",
+            "consent_status": "approved",
+            "approval_actor": "user",
+            "approval_reference": "chat:cleanup-approved",
+            "approved_at": "2026-07-25T12:14:00Z",
+            "actual_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "recorded_at": "2026-07-25T12:15:00Z"
+        }],
+        "decision_actor": null,
+        "decision_reference": null,
+        "decided_at": null
+    });
+    let plan: Plan = serde_json::from_value(value).expect("completed cleanup plan should decode");
+    let markdown = render_plan(&plan)
+        .expect("completed cleanup plan should render")
+        .markdown()
+        .to_owned();
+
+    assert!(markdown.contains("#### Cleanup Items"));
+    assert!(markdown.contains("Approval Actor"));
+    assert!(markdown.contains("chat:cleanup-approved"));
+    assert!(markdown.contains("2026-07-25T12:14:00Z"));
+    assert!(markdown.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    assert!(markdown.contains("2026-07-25T12:15:00Z"));
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn managed_projection_rejects_symlinked_docs_ancestors() {

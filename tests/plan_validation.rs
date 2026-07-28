@@ -6,7 +6,8 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mino::domain::{
-    GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId, RequestId, TaskId, Timestamp,
+    GitFlowConsent, GitReadiness, GitReadinessObservation, GitReadinessState, GitRepositoryMode,
+    GitSetupDecision, Plan, PlanDraftSeed, PlanId, RequestId, TaskId, Timestamp,
 };
 use mino::input::yaml;
 use mino::project::initialize;
@@ -38,6 +39,13 @@ impl TestProject {
         fs::write(path.join("src/lib.rs"), "pub fn fixture() -> u8 { 1 }\n")
             .expect("fixture source should be written");
         initialize(&path).expect("temporary project should initialize");
+        fs::write(
+            path.join(".gitignore"),
+            "/.mino/\n/docs/plan/\n/request-*.md\n",
+        )
+        .expect("Git ignore fixture should be written");
+        git(&path, &["init", "--quiet", "--initial-branch", "main"]);
+        commit_all(&path, "chore: establish validation fixture");
         Self {
             path: path.canonicalize().expect("project root should resolve"),
         }
@@ -46,6 +54,37 @@ impl TestProject {
     fn path(&self) -> &Path {
         &self.path
     }
+}
+
+fn git(root: &Path, arguments: &[&str]) {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .expect("Git should run");
+    assert!(
+        output.status.success(),
+        "git {arguments:?} failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn commit_all(root: &Path, message: &str) {
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=Mino Tests",
+            "-c",
+            "user.email=mino-tests@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            message,
+        ],
+    );
 }
 
 impl Drop for TestProject {
@@ -484,6 +523,7 @@ fn draft_agent_loop_reconciles_third_file_map_language_and_finalizes() {
     fs::create_dir(project.path().join("tools")).expect("Python source directory should exist");
     fs::write(project.path().join("tools/task.py"), "VALUE = 1\n")
         .expect("initial Python source should be written");
+    commit_all(project.path(), "test: switch validation fixture language");
     let plan_id = create_plan(&project, "Draft standards reconciliation", 55);
     apply_fixture(&project, &plan_id, "complete.yaml", 56);
 
@@ -728,5 +768,212 @@ fn policy_validation_requires_decided_git_and_git_flow_commit_gates() {
             .findings
             .iter()
             .any(|finding| finding.id == "POLICY-COMMIT-GATE-MISSING")
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn policy_validation_covers_setup_and_cleanup_decision_lifecycles() {
+    let project = TestProject::new("git-decision-policy");
+    let input = yaml::parse_draft(
+        &fs::read_to_string(fixture_path("complete-without-gate.yaml"))
+            .expect("decision fixture should be readable"),
+    )
+    .expect("decision fixture should parse");
+    let created_at = Timestamp::parse("2026-07-25T16:00:00Z").expect("timestamp should parse");
+    let updated_at = Timestamp::parse("2026-07-25T16:01:00Z").expect("timestamp should parse");
+    let head = "a".repeat(40);
+    let status_digest = format!("sha256:{}", "b".repeat(64));
+    let build_plan = |id: &str, git_readiness: GitReadiness, state: GitReadinessState| -> Plan {
+        let mut plan = Plan::from_draft_seed(
+            PlanDraftSeed {
+                id: PlanId::parse(id).expect("plan ID should parse"),
+                name: id.to_owned(),
+                trigger: "durable".to_owned(),
+                original_request: "Validate Git readiness decisions".to_owned(),
+                branch: state.observation().branch().map(str::to_owned),
+                markdown_path: format!("docs/plan/{id}.md"),
+                git_readiness,
+                standards: Vec::new(),
+                verification_plan: Vec::new(),
+            },
+            created_at.clone(),
+        );
+        plan.record_initial_git_readiness(&state)
+            .expect("readiness state should record");
+        plan.apply_draft_input(input.clone(), updated_at.clone())
+            .expect("decision fixture should apply");
+        plan
+    };
+
+    let missing_observation = GitReadinessObservation::new(
+        GitRepositoryMode::NotRepository,
+        None,
+        None,
+        None,
+        None,
+        format!("sha256:{}", "0".repeat(64)),
+        false,
+        created_at.clone(),
+    )
+    .expect("missing observation should validate");
+    let setup_pending = build_plan(
+        "2026-07-25-setup-pending",
+        GitReadiness::detected(
+            "Missing",
+            "Not Applicable",
+            None,
+            None,
+            "No Git repository",
+            false,
+        ),
+        GitReadinessState::new(missing_observation.clone())
+            .expect("pending setup state should validate"),
+    );
+    let setup_pending_ids = validate_plan(project.path(), &setup_pending)
+        .expect("pending setup should validate")
+        .findings
+        .into_iter()
+        .map(|finding| finding.id)
+        .collect::<Vec<_>>();
+    assert!(setup_pending_ids.contains(&"POLICY-GIT-SETUP-PENDING".to_owned()));
+
+    let mut setup_disabled_state =
+        GitReadinessState::new(missing_observation).expect("setup state should validate");
+    setup_disabled_state
+        .decide_setup(
+            GitSetupDecision::ContinueWithoutGit,
+            "user".to_owned(),
+            "chat:continue-without-git".to_owned(),
+            updated_at.clone(),
+        )
+        .expect("setup decision should record");
+    let setup_disabled = build_plan(
+        "2026-07-25-setup-disabled",
+        GitReadiness::detected(
+            "Missing",
+            "Not Applicable",
+            None,
+            None,
+            "No Git repository",
+            false,
+        ),
+        setup_disabled_state,
+    );
+    assert!(
+        validate_plan(project.path(), &setup_disabled)
+            .expect("disabled setup should validate")
+            .findings
+            .iter()
+            .all(|finding| !finding.id.starts_with("POLICY-GIT-SETUP-"))
+    );
+
+    let dirty_observation = GitReadinessObservation::new(
+        GitRepositoryMode::Worktree,
+        Some("/repository".to_owned()),
+        Some("/repository/.git".to_owned()),
+        Some("main".to_owned()),
+        Some(head.clone()),
+        status_digest.clone(),
+        false,
+        created_at.clone(),
+    )
+    .expect("dirty observation should validate");
+    let cleanup_pending = build_plan(
+        "2026-07-25-cleanup-pending",
+        GitReadiness::detected(
+            "Present",
+            "Dirty",
+            Some("main".to_owned()),
+            Some(head.clone()),
+            "Dirty: Git status contains changes",
+            false,
+        ),
+        GitReadinessState::new(dirty_observation.clone())
+            .expect("pending cleanup state should validate"),
+    );
+    let cleanup_pending_ids = validate_plan(project.path(), &cleanup_pending)
+        .expect("pending cleanup should validate")
+        .findings
+        .into_iter()
+        .map(|finding| finding.id)
+        .collect::<Vec<_>>();
+    assert!(cleanup_pending_ids.contains(&"POLICY-GIT-CLEANUP-PENDING".to_owned()));
+    assert!(cleanup_pending_ids.contains(&"POLICY-GIT-CLEANUP-UNSAFE".to_owned()));
+
+    let mut declined_value =
+        serde_json::to_value(&cleanup_pending).expect("pending cleanup should serialize");
+    declined_value["extensions"]["git_readiness_state"]["cleanup"] = serde_json::json!({
+        "decision": "declined",
+        "observed_paths": ["notes.txt"],
+        "blockers": [],
+        "items": [],
+        "decision_actor": "user",
+        "decision_reference": "chat:cleanup-declined",
+        "decided_at": "2026-07-25T16:02:00Z"
+    });
+    let declined: Plan =
+        serde_json::from_value(declined_value).expect("declined cleanup should decode");
+    assert!(
+        validate_plan(project.path(), &declined)
+            .expect("declined cleanup should validate")
+            .findings
+            .iter()
+            .all(|finding| !finding.id.starts_with("POLICY-GIT-CLEANUP-"))
+    );
+
+    let clean_observation = GitReadinessObservation::new(
+        GitRepositoryMode::Worktree,
+        Some("/repository".to_owned()),
+        Some("/repository/.git".to_owned()),
+        Some("main".to_owned()),
+        Some(head.clone()),
+        status_digest,
+        true,
+        created_at.clone(),
+    )
+    .expect("clean observation should validate");
+    let cleanup_not_required = build_plan(
+        "2026-07-25-cleanup-completed",
+        GitReadiness::detected(
+            "Present",
+            "Clean",
+            Some("main".to_owned()),
+            Some(head),
+            "Clean: Git status contains no entries",
+            true,
+        ),
+        GitReadinessState::new(clean_observation).expect("clean state should validate"),
+    );
+    let mut completed_value =
+        serde_json::to_value(&cleanup_not_required).expect("clean plan should serialize");
+    completed_value["extensions"]["git_readiness_state"]["cleanup"] = serde_json::json!({
+        "decision": "completed",
+        "observed_paths": [],
+        "blockers": [],
+        "items": [{
+            "id": "C1",
+            "logical_change": "Preserve notes",
+            "files": ["notes.txt"],
+            "planned_commit_message": "docs(cleanup): preserve notes",
+            "consent_status": "approved",
+            "approval_actor": "user",
+            "approval_reference": "chat:cleanup-approved",
+            "approved_at": "2026-07-25T16:02:00Z",
+            "actual_commit": "cccccccccccccccccccccccccccccccccccccccc",
+            "recorded_at": "2026-07-25T16:03:00Z"
+        }],
+        "decision_actor": null,
+        "decision_reference": null,
+        "decided_at": null
+    });
+    let completed: Plan =
+        serde_json::from_value(completed_value).expect("completed cleanup should decode");
+    assert!(
+        validate_plan(project.path(), &completed)
+            .expect("completed cleanup should validate")
+            .findings
+            .iter()
+            .all(|finding| !finding.id.starts_with("POLICY-GIT-CLEANUP-"))
     );
 }

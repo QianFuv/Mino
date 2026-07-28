@@ -228,6 +228,10 @@ schedule spec 把当前 `--plan`、`--expect-revision` 和 `--check` 绑定到�
 |---|---|---|
 | `mino git inspect` | 无 | 返回 repository、common directory、worktree、Git directory、index、HEAD、upstream、porcelain v2 和绑定事实。 |
 | `mino git readiness refresh` | plan | 以 revision/request ID 记录当前 repository mode、worktree/common-dir、branch、完整 HEAD、规范 status digest、clean flag 和采样时间；仅支持 Draft/Ready。 |
+| `mino git setup decide` | plan，审批边界 | 为缺少仓库的 Draft/Ready 计划记录 `initialize-approved`、`continue-without-git` 或 `blocked-until-manual-setup`；不运行 `git init`。 |
+| `mino git cleanup propose` | plan | 从严格 YAML 记录有序 `C<n>` 项；所有文件必须互不重复并恰好覆盖已观察的 dirty paths，消息必须是单行 Conventional Commit。 |
+| `mino git cleanup approve` | plan，审批边界 | 用 approval reference 逐项批准当前提案，或用 `--decline` 明确禁用 Git Flow；不暂存或提交文件。 |
+| `mino git cleanup record` | plan | 只验证并记录调用方已创建、位于当前 HEAD 的完整 commit OID；parent、顺序、消息和文件必须与已批准项目完全一致。 |
 | `mino git bind` | 仅 `.mino/active.json` | 把一个非 Done 计划绑定到当前 canonical worktree 与分支，或绑定精确 detached HEAD。 |
 | `mino git branch propose` | 无 | 派生 `mino/<plan-id>`，交由 Git 校验，并报告 clean/base/source/ref blockers。 |
 | `mino git branch create` | 本地分支、journal、binding | 要求 `--approval-ref`；可选 `--branch` 必须与提案完全一致。重新核对工作树和 base 后创建并切换。 |
@@ -241,7 +245,11 @@ schedule spec 把当前 `--plan`、`--expect-revision` 和 `--check` 绑定到�
 
 绑定状态只能是 `missing`、`current`、`foreign_worktree`、`stale_branch`、`stale_head` 或 `not_repository`。bind 只替换当前工作树 entry，不修改 HEAD、branch、ref、index、commit 或 `.mino/plan-selection.json`。foreign/stale 状态阻止需要当前 Git 身份的操作，但不会隐藏或切换 selected plan；项目方案始终由 project selection 独立决定。
 
-计划创建与 fork 会把 live Git observation 保存到 versioned `extensions.git_readiness_state`。`plan finalize`、`plan review`、`plan approve`、`exec start` 和 `git branch create` 在写入前重新采样 repository identity、branch、HEAD 与 status；Git Flow 开启时还要求正常 worktree 和 clean baseline。任何漂移都以 exit 8 返回规范 `git.readiness.refresh` action，不会静默更新计划。Ready refresh 保持 Ready，但清除旧 plan approval、Git Flow consent 与 workspace baseline；相同 request ID 的精确重试重放已提交 revision，不重新观察 Git。`git commit` 与 `record-manual` 只复用 repository/worktree/common-dir/branch identity，因此任务自身的计划内 dirty files 合法，parent、index、scope 和 checked blob 仍由提交门禁独立验证。缺少 typed extension 的旧计划也必须先显式 refresh。
+计划创建与 fork 会把 live Git observation、setup decision 和 pre-plan cleanup state 保存到 versioned `extensions.git_readiness_state`。缺少仓库时 setup 初始为 `Pending`，dirty tree 时 cleanup 初始为 `Pending`，clean worktree 则记录 `NotRequired`；这些状态不会被静默折叠为 Git Flow disabled。Agent context 只返回当前可执行的 decide/propose/approve/record/refresh action。
+
+setup 的 `initialize-approved` 只保存外部授权，实际初始化仍由调用方完成；`continue-without-git` 显式禁用 Git Flow；`blocked-until-manual-setup` 让计划进入可恢复 Blocked。cleanup proposal 在首项批准前必须完整覆盖同一 live dirty-path 集合。`record` 不运行 `git add`、`git commit` 或任何其他 Git mutation；所有项目按序记录且 live tree 已 clean 后，必须执行 readiness refresh，才会将 cleanup 标记 `Completed` 并重新计算 Git Flow eligibility。unsafe Git state 或 pre-plan path 与任务 File Map 重叠时，计划保持可恢复 Blocked。
+
+`plan finalize`、`plan review`、`plan approve`、`exec start` 和 `git branch create` 在写入前重新采样 repository identity、branch、HEAD 与 status；Git Flow 开启时还要求正常 worktree 和 clean baseline。任何漂移都以 exit 8 返回规范 `git.readiness.refresh` action，不会静默更新计划。Ready refresh 保持 Ready，但清除旧 plan approval、Git Flow consent 与 workspace baseline；相同 request ID 的精确重试重放已提交 revision，不重新观察 Git。`git commit` 与 `record-manual` 只复用 repository/worktree/common-dir/branch identity，因此任务自身的计划内 dirty files 合法，parent、index、scope 和 checked blob 仍由提交门禁独立验证。缺少 typed extension 的旧计划也必须先显式 refresh。
 
 branch create 是独立审批边界，计划批准和 Git Flow consent 不能替代它。Mino 先写 `.mino/git/branches/<plan-id>/intent.json`，再以禁用 hooks 的精确 `git switch -c` 操作 base HEAD，确认 post-state 后才写 binding 和 `completion.json`。精确重试能够区分未变化的失败、已创建待协调的分支和已完成操作。
 
@@ -353,6 +361,8 @@ Clap 参数错误也返回 2，但因为尚未进入 Mino dispatch，可能只�
 - Check：`Pending`、`Running`、`Passed`、`Failed`、`Blocked`、`Stale`；其中 `Stale` 表示先前 Passed evidence 的 workspace fingerprint 已不匹配。
 - Criterion：`Pending`、`Passed`、`Failed`、`Accepted Exception`。
 - Git Flow consent：`Pending`、`Approved`、`Disabled`。
+- Git setup decision：`NotRequired`、`Pending`、`InitializeApproved`、`ContinueWithoutGit`、`BlockedUntilManualSetup`。
+- Pre-plan cleanup decision：`NotRequired`、`Pending`、`Approved`、`Declined`、`Completed`；item consent 为 `Pending` 或 `Approved`。
 - Commit gate：`Pending`、`Committed`、`Skipped`、`Not Required`、`Blocked`。
 - Amendment classification：`Minor`、`Material`。
 - Amendment state：`Proposed`、`Approval Required`、`Approved`、`Applied`、`Rejected`、`Withdrawn`、`Cancelled`。

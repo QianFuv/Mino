@@ -174,6 +174,8 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
             "gate",
             "hook",
             "readiness",
+            "setup",
+            "cleanup",
             "help",
         ],
     ),
@@ -185,6 +187,11 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
         &["propose", "status", "install", "run", "help"],
     ),
     (&["git", "readiness", "--help"], &["refresh", "help"]),
+    (&["git", "setup", "--help"], &["decide", "help"]),
+    (
+        &["git", "cleanup", "--help"],
+        &["propose", "approve", "record", "help"],
+    ),
     (
         &["review", "--help"],
         &[
@@ -226,6 +233,9 @@ const LEAF_COMMANDS: &[&str] = &[
     "git bind",
     "git branch create",
     "git branch propose",
+    "git cleanup approve",
+    "git cleanup propose",
+    "git cleanup record",
     "git commit",
     "git commit record-manual",
     "git gate skip",
@@ -235,6 +245,7 @@ const LEAF_COMMANDS: &[&str] = &[
     "git hook status",
     "git inspect",
     "git readiness refresh",
+    "git setup decide",
     "plan apply",
     "plan amend apply",
     "plan amend approve",
@@ -361,6 +372,7 @@ fn recursive_help_inventory_is_exact_and_includes_review_group() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
     let command_contract = read("docs/command-contract.md");
     for command in LEAF_COMMANDS {
@@ -446,9 +458,11 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
         [
             "exec.deviation.reject",
             "git.branch.create",
+            "git.cleanup.approve",
             "git.commit.record-manual",
             "git.gate.skip",
             "git.hook.install",
+            "git.setup.decide",
             "plan.amend.approve",
             "plan.amend.cancel",
             "plan.amend.reject",

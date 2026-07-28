@@ -2,7 +2,7 @@
 managed_by: mino
 plan_id: 2026-07-25-render-contract
 revision: 8
-state_hash: sha256:4c63e67e64c8749549ecd22a83dbebdb87b118a90dac3db472fe4f549c70eec5
+state_hash: sha256:c4d0d0bfcfbc036e87c160f8cc4c5eba9ca37bb0de8a0342ab3a19c07e1fc781
 renderer_version: 2
 manual_editing: prohibited
 ---
@@ -127,6 +127,26 @@ Plan \+ state hash -\> UTF-8 Markdown<br>Existing bytes \+ prior rendering -\> g
 | Status Digest | sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 |
 | Clean | true |
 | Observed At | 2026-07-25T12:00:00Z |
+
+### Git Setup Decision
+
+| Field | Value |
+|---|---|
+| Decision | not\_required |
+| Actor | N/A |
+| Reference | N/A |
+| Decided At | N/A |
+
+### Pre-Plan Cleanup
+
+| Field | Value |
+|---|---|
+| Decision | not\_required |
+| Observed Paths | None |
+| Blockers | None |
+| Decision Actor | N/A |
+| Decision Reference | N/A |
+| Decided At | N/A |
 
 ## Implementation Task Order
 

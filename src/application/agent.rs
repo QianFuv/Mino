@@ -9,8 +9,9 @@ use crate::application::plan::{
 };
 use crate::domain::{
     AmendmentClassification, AmendmentStatus, CURRENT_PROTOCOL_REVISION, CURRENT_PROTOCOL_VERSION,
-    CheckId, CheckStatus, MaterialReviewDisposition, Plan, PlanId, PlanStatus,
-    ReviewClassification, ReviewStatus, TaskId, TaskStatus,
+    CheckId, CheckStatus, CleanupConsentStatus, GitSetupDecision, MaterialReviewDisposition, Plan,
+    PlanId, PlanStatus, PrePlanCleanupDecision, ReviewClassification, ReviewStatus, TaskId,
+    TaskStatus,
 };
 use crate::git::{
     ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitAvailability, GitHeadState,
@@ -55,6 +56,9 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("git.bind", false, false),
     ("git.branch.create", false, true),
     ("git.branch.propose", false, false),
+    ("git.cleanup.approve", true, true),
+    ("git.cleanup.propose", true, false),
+    ("git.cleanup.record", true, false),
     ("git.commit", false, false),
     ("git.commit.record-manual", true, true),
     ("git.gate.skip", true, true),
@@ -64,6 +68,7 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("git.hook.status", false, false),
     ("git.inspect", false, false),
     ("git.readiness.refresh", true, false),
+    ("git.setup.decide", true, true),
     ("plan.alternatives", false, false),
     ("plan.amend.apply", true, false),
     ("plan.amend.approve", true, true),
@@ -574,6 +579,9 @@ fn guidance(
     if plan.has_pending_amendment() {
         return Ok(pending_amendment_guidance(plan));
     }
+    if let Some(guidance) = git_decision_guidance(root, plan)? {
+        return Ok(guidance);
+    }
     match plan.status() {
         PlanStatus::Draft => draft_guidance(root, plan),
         PlanStatus::Ready => ready_guidance(root, plan, git),
@@ -780,6 +788,113 @@ fn review_guidance(plan: &Plan) -> Guidance {
         ],
         approval_required: false,
         next_actions,
+    }
+}
+
+fn git_decision_guidance(root: &Path, plan: &Plan) -> Result<Option<Guidance>, MinoError> {
+    let Some(state) = plan.git_readiness_state().map_err(|error| {
+        MinoError::new(
+            ErrorCategory::DriftDetected,
+            format!("Git readiness decision state is malformed: {error}"),
+        )
+    })?
+    else {
+        return Ok(None);
+    };
+    if state.cleanup().decision() == PrePlanCleanupDecision::Approved
+        && state.cleanup().items().iter().any(|item| {
+            item.consent_status() == CleanupConsentStatus::Approved
+                && item.actual_commit().is_none()
+        })
+    {
+        return Ok(Some(readiness_decision_guidance(
+            &["git.cleanup.record", "git.inspect"],
+            "Approved cleanup commits must be created externally and recorded in order",
+            false,
+            vec![git_inspect_action(plan)],
+        )));
+    }
+    let mismatches = readiness_mismatches(root, plan, GitReadinessRequirement::CleanBaseline)?;
+    if !mismatches.is_empty() {
+        return Ok(Some(readiness_refresh_guidance(plan, &mismatches)));
+    }
+    if !state.setup_is_satisfied() {
+        let is_pending = state.setup().decision() == GitSetupDecision::Pending;
+        return Ok(Some(readiness_decision_guidance(
+            &["git.inspect", "git.readiness.refresh", "git.setup.decide"],
+            if is_pending {
+                "Git setup requires an explicit user decision"
+            } else {
+                "Git setup must be completed outside Mino and refreshed"
+            },
+            is_pending,
+            vec![git_inspect_action(plan)],
+        )));
+    }
+    match state.cleanup().decision() {
+        PrePlanCleanupDecision::Pending if state.cleanup().items().is_empty() => {
+            Ok(Some(readiness_decision_guidance(
+                &["git.cleanup.approve", "git.cleanup.propose", "git.inspect"],
+                "Dirty pre-plan paths require a complete proposal or explicit decline",
+                true,
+                vec![git_inspect_action(plan)],
+            )))
+        }
+        PrePlanCleanupDecision::Pending => Ok(Some(readiness_decision_guidance(
+            &["git.cleanup.approve", "git.inspect"],
+            "Every proposed cleanup item requires explicit approval",
+            true,
+            vec![git_inspect_action(plan)],
+        ))),
+        PrePlanCleanupDecision::Approved => Ok(Some(readiness_decision_guidance(
+            &["git.inspect", "git.readiness.refresh"],
+            "Recorded cleanup commits require a clean readiness refresh",
+            false,
+            vec![refresh_action(plan)],
+        ))),
+        _ if plan.is_blocked_for_git_readiness() => Ok(Some(readiness_decision_guidance(
+            &["git.inspect", "git.readiness.refresh"],
+            "The Git readiness blocker must be resolved outside Mino and refreshed",
+            false,
+            vec![git_inspect_action(plan)],
+        ))),
+        _ => Ok(None),
+    }
+}
+
+fn readiness_decision_guidance(
+    actions: &[&str],
+    reason: &str,
+    approval_required: bool,
+    next_actions: Vec<NextAction>,
+) -> Guidance {
+    Guidance {
+        allowed_actions: action_ids(actions),
+        blocked_actions: vec![
+            blocked("plan.finalize", reason),
+            blocked("plan.review", reason),
+            blocked("plan.approve", reason),
+            blocked("exec.start", reason),
+            blocked("git.branch.create", reason),
+        ],
+        approval_required,
+        next_actions,
+    }
+}
+
+fn git_inspect_action(plan: &Plan) -> NextAction {
+    NextAction {
+        id: "git.inspect".to_owned(),
+        argv: vec![
+            "mino".to_owned(),
+            "git".to_owned(),
+            "inspect".to_owned(),
+            "--plan".to_owned(),
+            plan.id().to_string(),
+            "--format".to_owned(),
+            "json".to_owned(),
+            "--no-input".to_owned(),
+        ],
     }
 }
 

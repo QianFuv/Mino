@@ -23,6 +23,7 @@ use super::{
 use super::{GIT_READINESS_EXTENSION_KEY, WORKSPACE_EXTENSION_KEY};
 
 const PROJECT_SCAN_EXTENSION_KEY: &str = "project_scan";
+const GIT_READINESS_BLOCKER_PREFIX: &str = "Git readiness: ";
 
 #[derive(Default)]
 struct AmendmentImpactAccumulator {
@@ -663,6 +664,14 @@ impl GitReadiness {
     #[must_use]
     pub const fn git_flow_consent(&self) -> GitFlowConsent {
         self.git_flow_consent
+    }
+
+    pub(crate) fn set_git_flow_enabled(&mut self, is_enabled: bool) {
+        self.git_flow_enabled = is_enabled;
+        if !is_enabled {
+            self.git_flow_consent = GitFlowConsent::Pending;
+            self.approved_at = None;
+        }
     }
 }
 
@@ -1317,14 +1326,14 @@ impl Plan {
             .get(GIT_READINESS_EXTENSION_KEY)
             .cloned()
             .map(|value| {
-                let state =
+                let mut state =
                     serde_json::from_value::<GitReadinessState>(value).map_err(|error| {
                         DomainError::new(
                             DomainErrorKind::InvariantViolation,
                             format!("Git readiness extension is malformed: {error}"),
                         )
                     })?;
-                state.validate()?;
+                state.materialize_legacy()?;
                 Ok(state)
             })
             .transpose()
@@ -1356,26 +1365,95 @@ impl Plan {
     pub(crate) fn refresh_git_readiness(
         &mut self,
         state: &GitReadinessState,
-        git_readiness: GitReadiness,
+        mut git_readiness: GitReadiness,
         branch: Option<String>,
+        block_reason: Option<String>,
         updated_at: Timestamp,
     ) -> Result<(), DomainError> {
-        if !matches!(self.status, PlanStatus::Draft | PlanStatus::Ready) {
+        let base_status = self
+            .git_readiness_base_status()
+            .ok_or_else(|| self.invalid_transition("refresh Git readiness"))?;
+        if !matches!(base_status, PlanStatus::Draft | PlanStatus::Ready) {
             return Err(self.invalid_transition("refresh Git readiness"));
         }
         state.validate()?;
         let mut candidate = self.clone();
+        git_readiness.set_git_flow_enabled(state.git_flow_allowed());
         candidate.git_readiness = git_readiness;
         candidate.metadata.branch = branch;
         candidate.store_git_readiness_state(state)?;
-        if candidate.status == PlanStatus::Ready {
+        if base_status == PlanStatus::Ready {
             candidate.invalidate_plan_approval();
             candidate.store_workspace_state(&WorkspaceProtocolState::default())?;
         }
+        candidate.apply_git_readiness_block(block_reason)?;
         candidate.record_revision(candidate.next_revision()?, updated_at);
         candidate.validate_invariants()?;
         *self = candidate;
         Ok(())
+    }
+
+    pub(crate) fn update_git_readiness_state(
+        &mut self,
+        state: &GitReadinessState,
+        block_reason: Option<String>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        let base_status = self
+            .git_readiness_base_status()
+            .ok_or_else(|| self.invalid_transition("update Git readiness decisions"))?;
+        if !matches!(base_status, PlanStatus::Draft | PlanStatus::Ready) {
+            return Err(self.invalid_transition("update Git readiness decisions"));
+        }
+        let current = self.git_readiness_state()?.ok_or_else(|| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Git readiness decisions require a typed readiness extension",
+            )
+        })?;
+        if current.observation() != state.observation() {
+            return Err(DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                "Git readiness decision updates cannot replace the live observation",
+            ));
+        }
+        state.validate()?;
+        let mut candidate = self.clone();
+        candidate.store_git_readiness_state(state)?;
+        candidate
+            .git_readiness
+            .set_git_flow_enabled(state.git_flow_allowed());
+        if base_status == PlanStatus::Ready {
+            candidate.invalidate_plan_approval();
+            candidate.store_workspace_state(&WorkspaceProtocolState::default())?;
+        }
+        candidate.apply_git_readiness_block(block_reason)?;
+        candidate.record_revision(candidate.next_revision()?, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    pub(crate) fn reconcile_git_readiness_block(
+        &mut self,
+        block_reason: Option<String>,
+    ) -> Result<(), DomainError> {
+        self.apply_git_readiness_block(block_reason)?;
+        self.validate_invariants()
+    }
+
+    /// Returns whether a setup or cleanup decision owns the current Blocked state.
+    #[must_use]
+    pub fn is_blocked_for_git_readiness(&self) -> bool {
+        self.status == PlanStatus::Blocked
+            && matches!(
+                self.resume_status,
+                Some(PlanStatus::Draft | PlanStatus::Ready)
+            )
+            && self
+                .blocker
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with(GIT_READINESS_BLOCKER_PREFIX))
     }
 
     /// Returns tasks in stored order.
@@ -4678,6 +4756,55 @@ impl Plan {
         Ok(())
     }
 
+    fn git_readiness_base_status(&self) -> Option<PlanStatus> {
+        if self.is_blocked_for_git_readiness() {
+            self.resume_status
+        } else {
+            Some(self.status)
+        }
+    }
+
+    fn is_draft_authoring_state(&self) -> bool {
+        self.status == PlanStatus::Draft
+            || self.is_blocked_for_git_readiness() && self.resume_status == Some(PlanStatus::Draft)
+    }
+
+    fn apply_git_readiness_block(
+        &mut self,
+        block_reason: Option<String>,
+    ) -> Result<(), DomainError> {
+        match block_reason {
+            Some(reason) => {
+                if reason.trim().is_empty() {
+                    return Err(DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "Git readiness blocker reason cannot be empty",
+                    ));
+                }
+                if !self.is_blocked_for_git_readiness() {
+                    if !matches!(self.status, PlanStatus::Draft | PlanStatus::Ready) {
+                        return Err(self.invalid_transition("block for Git readiness"));
+                    }
+                    self.resume_status = Some(self.status);
+                    self.status = PlanStatus::Blocked;
+                }
+                self.blocker = Some(format!("{GIT_READINESS_BLOCKER_PREFIX}{reason}"));
+            }
+            None if self.is_blocked_for_git_readiness() => {
+                self.status = self.resume_status.ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        "Git readiness block has no resume status",
+                    )
+                })?;
+                self.resume_status = None;
+                self.blocker = None;
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
     fn store_project_scan_summary(
         &mut self,
         summary: &ProjectScanSummary,
@@ -4823,7 +4950,7 @@ impl Plan {
                 "Plan revision must be positive",
             ));
         }
-        if self.status != PlanStatus::Draft && self.tasks.is_empty() {
+        if !self.is_draft_authoring_state() && self.tasks.is_empty() {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
                 "A non-Draft plan requires at least one task",
@@ -4859,7 +4986,7 @@ impl Plan {
             .collect::<BTreeMap<_, _>>();
         for task in &self.tasks {
             task.validate_invariants()?;
-            if self.status != PlanStatus::Draft {
+            if !self.is_draft_authoring_state() {
                 let task_position = positions[task.id()];
                 for dependency in task.dependencies() {
                     let dependency_position = positions.get(dependency).ok_or_else(|| {
@@ -4914,6 +5041,20 @@ impl Plan {
                 return Err(DomainError::new(
                     DomainErrorKind::InvariantViolation,
                     "Draft plans may contain only Draft or Ready tasks",
+                ));
+            }
+            PlanStatus::Blocked
+                if self.resume_status == Some(PlanStatus::Draft)
+                    && self.tasks.iter().any(|task| {
+                        matches!(
+                            task.status(),
+                            TaskStatus::InProgress | TaskStatus::Blocked | TaskStatus::Done
+                        )
+                    }) =>
+            {
+                return Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "A plan blocked from Draft may contain only Draft or Ready tasks",
                 ));
             }
             PlanStatus::Ready
@@ -5013,6 +5154,7 @@ impl Plan {
                         "A plan blocked from Review requires completed tasks and material feedback",
                     ));
                 }
+                Some(PlanStatus::Draft) if self.is_blocked_for_git_readiness() => {}
                 Some(PlanStatus::Draft | PlanStatus::Blocked | PlanStatus::Done) => {
                     return Err(DomainError::new(
                         DomainErrorKind::InvariantViolation,
@@ -5105,7 +5247,7 @@ impl Plan {
             .map(VerificationCheck::id)
             .collect::<Vec<_>>();
         let unique_task_check_ids = task_check_ids.iter().copied().collect::<BTreeSet<_>>();
-        if self.status != PlanStatus::Draft
+        if !self.is_draft_authoring_state()
             && (unique_task_check_ids.len() != task_check_ids.len()
                 || global_check_ids
                     .iter()
@@ -5116,7 +5258,7 @@ impl Plan {
                 "Task and global verification identifiers must be unique across the plan",
             ));
         }
-        if self.status != PlanStatus::Draft && self.global_verification.is_empty() {
+        if !self.is_draft_authoring_state() && self.global_verification.is_empty() {
             return Err(DomainError::new(
                 DomainErrorKind::InvariantViolation,
                 "A non-Draft plan requires global verification",

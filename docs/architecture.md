@@ -166,7 +166,11 @@ stateDiagram-v2
 - 没有未解决偏差；
 - 相对于 task-start baseline 的当前任务增量符合 File Map。
 
-计划的 `extensions.git_readiness_state` 是 versioned typed state，拥有 repository mode、canonical worktree/common directory、branch、完整 HEAD、规范 status digest、clean flag 与 observation timestamp。create/fork 捕获初始 observation；finalize、review、approve、exec start 和 branch create 都只读重采样并比较，发现漂移时返回显式 revisioned refresh action。refresh 是唯一更新该 observation 的路径；Ready refresh 会撤销旧 plan approval、Git Flow consent 与 workspace baseline。commit preflight 只比较 repository identity 和 branch，允许实现任务产生 dirt，同时继续由 commit gate 核对 parent、index、scope 和文件对象身份。
+计划的 `extensions.git_readiness_state` 是 versioned typed state，统一拥有 repository mode、canonical worktree/common directory、branch、完整 HEAD、规范 status digest、clean flag、observation timestamp，以及 setup 和 pre-plan cleanup 决策。create/fork 捕获初始 observation：缺少 repository 形成 Pending setup，dirty tree 形成 Pending cleanup，clean worktree 形成 NotRequired；Git Flow eligibility 由该完整状态确定，不通过一个静默布尔值替代未完成决定。
+
+setup 的终态选择和每项 cleanup approval 都保存 actor、decision reference 与 timestamp。cleanup proposal 使用稳定有序的 `C<n>`，其互斥文件集合必须恰好覆盖观察到的 dirty paths；record 只核对外部已创建 commit 的 current HEAD、parent、完整 OID、单行 Conventional Commit message、exact files 与顺序，不运行 Git mutation。所有项目记录完毕且 live tree clean 后，refresh 才把 cleanup 转为 Completed。unsafe/unmerged/submodule 状态或 pre-plan path 与任务 File Map 重叠会使 Draft/Ready 进入带原恢复状态的可恢复 Blocked；完成外部修复和 refresh 后解除。
+
+finalize、review、approve、exec start 和 branch create 都只读重采样并比较，发现漂移时返回显式 revisioned refresh action。refresh 是唯一更新 observation 的路径；Ready refresh 会撤销旧 plan approval、Git Flow consent 与 workspace baseline。commit preflight 只比较 repository identity 和 branch，允许实现任务产生 dirt，同时继续由 commit gate 核对 parent、index、scope 和文件对象身份。
 
 计划批准时捕获 `PlanBaseline`，每次 `exec start` 捕获对应 `TaskBaseline`。两者在 Git 与非 Git 项目中都保存 path、存在性、对象类型、长度、可执行位和内容摘要；Git 模式另保存 HEAD、index tree 与 status。任务完成计算 `current workspace - task-start baseline`，因此批准前的未变脏文件和前一未提交任务的变化不会被错误归给当前任务，而当前任务对同一路径的进一步修改仍会被识别。
 
@@ -236,6 +240,8 @@ Git 模式下，每个 regular-file snapshot 还保存按当前 attributes/index
 ## 工作树与 Git 边界
 
 `mino git inspect` 通过唯一的生产 Git command adapter 执行窄范围命令，解析 NUL 分隔的 porcelain v2，并显式报告普通、unborn、detached、bare、linked worktree 和非仓库状态。项目发现、计划 readiness、File Map 检查、分支、提交与 hooks 共用该入口；其他生产模块不直接构造 Git 子进程。adapter 清空环境后恢复跨平台基础 allowlist，并按普通操作或短 probe profile 施加 stdin、timeout、合并输出与进程树边界。
+
+`git setup decide`、`git cleanup propose/approve/record` 只改变 plan aggregate 和受管 projection。它们没有调用 Git mutation adapter 的路径；repository 初始化、staging 和 cleanup commits 必须由受 Mino 之外授权的调用方完成，再由 readiness refresh 或 cleanup record 核验结果。
 
 `mino git bind` 以 canonical common directory 和 worktree root 为键保存 Git 授权身份。分支绑定允许该分支向前移动；detached binding 要求完全相同的 HEAD。切换分支或 HEAD 后会变为 `stale_branch` 或 `stale_head`，其他工作树的绑定为 `foreign_worktree`。这些状态会阻止需要当前 Git 身份的操作，但不会改变 `.mino/plan-selection.json` 中的 selected plan。
 

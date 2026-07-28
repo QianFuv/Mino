@@ -1230,6 +1230,15 @@ fn truncated_scan_requires_digest_bound_acceptance_before_authoring_can_advance(
             .contains("## Project Scan")
     );
 
+    let mut setup = mutation_arguments(&project, &["git", "setup", "decide"], &plan_id, 1, 62);
+    setup.extend([
+        "--decision".to_owned(),
+        "continue-without-git".to_owned(),
+        "--approval-ref".to_owned(),
+        "chat:continue-without-git".to_owned(),
+    ]);
+    assert_eq!(parse_success(&run_mino(&setup))["revision"], 2);
+
     let mut context_arguments = base_arguments(&project);
     context_arguments.extend(["agent".to_owned(), "context".to_owned()]);
     let context = parse_success(&run_mino(&context_arguments));
@@ -1258,7 +1267,7 @@ fn truncated_scan_requires_digest_bound_acceptance_before_authoring_can_advance(
             .any(|finding| finding["id"] == "POLICY-SCAN-INCOMPLETE")
     }));
 
-    let mut acceptance = mutation_arguments(&project, &["plan", "scan", "accept"], &plan_id, 1, 61);
+    let mut acceptance = mutation_arguments(&project, &["plan", "scan", "accept"], &plan_id, 2, 61);
     acceptance.extend([
         "--decision-ref".to_owned(),
         "chat:accept-partial-scan".to_owned(),
@@ -1266,11 +1275,11 @@ fn truncated_scan_requires_digest_bound_acceptance_before_authoring_can_advance(
         "The bounded scan is sufficient for this plan".to_owned(),
     ]);
     let accepted = parse_success(&run_mino(&acceptance));
-    assert_eq!(accepted["revision"], 2);
+    assert_eq!(accepted["revision"], 3);
     assert_eq!(accepted["missing"][0], "summary");
     assert_eq!(accepted["next_actions"][0]["id"], "plan.summary.set");
     let replayed = parse_success(&run_mino(&acceptance));
-    assert_eq!(replayed["revision"], 2);
+    assert_eq!(replayed["revision"], 3);
     assert_eq!(replayed["replayed"], true);
 
     let accepted_plan = load_plan(&project, &plan_id);

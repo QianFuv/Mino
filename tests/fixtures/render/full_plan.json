@@ -261,6 +261,21 @@
         "status_digest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
         "is_clean": true,
         "observed_at": "2026-07-25T12:00:00Z"
+      },
+      "setup": {
+        "decision": "not_required",
+        "actor": null,
+        "reference": null,
+        "decided_at": null
+      },
+      "cleanup": {
+        "decision": "not_required",
+        "observed_paths": [],
+        "blockers": [],
+        "items": [],
+        "decision_actor": null,
+        "decision_reference": null,
+        "decided_at": null
       }
     },
     "vendor.example/renderer": {

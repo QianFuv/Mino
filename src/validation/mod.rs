@@ -106,6 +106,27 @@ fn derive_next_actions(plan: &Plan, findings: &[ValidationFinding]) -> Vec<NextA
     {
         return vec![crate::application::git_readiness::refresh_action(plan)];
     }
+    if findings.iter().any(|finding| {
+        finding.id.starts_with("POLICY-GIT-SETUP-") || finding.id.starts_with("POLICY-GIT-CLEANUP-")
+    }) {
+        let should_refresh = plan
+            .git_readiness_state()
+            .ok()
+            .flatten()
+            .is_some_and(|state| {
+                state.cleanup().decision() == crate::domain::PrePlanCleanupDecision::Approved
+                    && state
+                        .cleanup()
+                        .items()
+                        .iter()
+                        .all(|item| item.actual_commit().is_some())
+            });
+        return if should_refresh {
+            vec![crate::application::git_readiness::refresh_action(plan)]
+        } else {
+            vec![git_inspect_action(plan)]
+        };
+    }
     if let Some(action) = conflict_next_action(plan, findings) {
         return vec![action];
     }
@@ -119,6 +140,22 @@ fn derive_next_actions(plan: &Plan, findings: &[ValidationFinding]) -> Vec<NextA
         actions.push(plan_apply_action(plan));
     }
     actions
+}
+
+fn git_inspect_action(plan: &Plan) -> NextAction {
+    NextAction {
+        id: "git.inspect".to_owned(),
+        argv: vec![
+            "mino".to_owned(),
+            "git".to_owned(),
+            "inspect".to_owned(),
+            "--plan".to_owned(),
+            plan.id().to_string(),
+            "--format".to_owned(),
+            "json".to_owned(),
+            "--no-input".to_owned(),
+        ],
+    }
 }
 
 fn requires_standards_reconciliation(finding: &ValidationFinding) -> bool {

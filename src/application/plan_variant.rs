@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::application::git_readiness::detect_initial_git_readiness;
+use crate::application::git_readiness::{detect_initial_git_readiness, readiness_block_reason};
 use crate::application::plan::{
     PlanMutationRequest, PlanOperationReport, PlanService, map_render_error, map_store_error,
     operation_report, plan_id_for, projection_managed_path,
@@ -119,6 +119,9 @@ impl PlanVariantService {
             )
             .map_err(|error| domain_error(&error))?;
             fork.record_initial_git_readiness(&git_readiness_state)
+                .map_err(|error| domain_error(&error))?;
+            let block_reason = readiness_block_reason(&fork, &git_readiness_state);
+            fork.reconcile_git_readiness_block(block_reason)
                 .map_err(|error| domain_error(&error))?;
             fork
         };
