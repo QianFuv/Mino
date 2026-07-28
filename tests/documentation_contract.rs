@@ -26,11 +26,22 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     (
         &["project", "--help"],
         &[
-            "init", "show", "doctor", "scan", "migrate", "import", "help",
+            "init",
+            "show",
+            "doctor",
+            "scan",
+            "migrate",
+            "import",
+            "authority",
+            "help",
         ],
     ),
     (&["project", "migrate", "--help"], &["legacy", "help"]),
     (&["project", "import", "--help"], &["legacy", "help"]),
+    (
+        &["project", "authority", "--help"],
+        &["status", "propose", "decide", "apply", "help"],
+    ),
     (
         &["plan", "--help"],
         &[
@@ -296,6 +307,10 @@ const LEAF_COMMANDS: &[&str] = &[
     "plan verification add",
     "plan verification remove",
     "plan verification update",
+    "project authority apply",
+    "project authority decide",
+    "project authority propose",
+    "project authority status",
     "project doctor",
     "project import legacy",
     "project init",
@@ -470,6 +485,8 @@ fn every_leaf_command_is_documented_once_and_matches_agent_capabilities() {
             "plan.archive",
             "plan.scan.accept",
             "plan.select",
+            "project.authority.apply",
+            "project.authority.decide",
             "review.accept",
             "review.disposition",
             "review.disposition.revise",
@@ -499,6 +516,8 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
         "mino.git-hook-proposal/v1",
         "mino.git-hook-install/v1",
         "mino.git-hook-runtime/v1",
+        "mino.planning-authority/v1",
+        "mino.planning-authority-proposal/v1",
     ] {
         assert!(commands.contains(schema), "missing schema {schema}");
     }
@@ -528,6 +547,7 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
         ".mino/config.toml",
         ".mino/protocol.lock",
         ".mino/standards.lock",
+        ".mino/authority.json",
         ".mino/active.json",
         ".mino/git/branches/",
         ".mino/git/commits/",

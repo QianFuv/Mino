@@ -143,7 +143,7 @@ fn canonical_source_matches_cli_protocol_capabilities_standards_and_skill() {
     assert_eq!(report.capabilities_kind, "mino.agent-capabilities/v1");
     assert_eq!(
         report.capabilities_digest,
-        "sha256:adc0851b959be39c78fe255dc35f0c25a64b7dec015756affbc7b0ab3dc78c95"
+        "sha256:e01ca9b4355b7e5cbf076dc9edb808b7c15c8afde37481a515593a83061313e5"
     );
     assert_eq!(
         report.standards,
@@ -167,11 +167,11 @@ fn canonical_source_matches_cli_protocol_capabilities_standards_and_skill() {
     );
     assert_eq!(
         report.skill_digest,
-        "sha256:b6fccb7fbd49c5de66f30ab089c72b2cb8c89f2887ab7ca3e187eed70b855b7f"
+        "sha256:37b7b63f12ecb7c0823c221b64f2104c93824161c01217dcb7f4dd4032f1ee03"
     );
     assert_eq!(
         report.source_digest,
-        "sha256:a1de05fab6156790d37e2d8592ead4e90e85acacc2f9d7b7304d0cc251b12ab2"
+        "sha256:6c5a5812a3e01c8eb9268970b78b84f43ae1fbaf3090d22d9b471cc46069073b"
     );
 }
 

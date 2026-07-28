@@ -8,6 +8,7 @@ Mino 把“升级运行协议”“分析旧工作流文件”和“导入旧计
 | 执行已注册的协议状态转换 | `mino protocol migrate` | 仅存在 transform 时修改计划 |
 | 了解旧 AGENTS、模板或执行指南如何映射 | `mino project migrate legacy` | 否 |
 | 把一份旧 Markdown 计划变成新的 Draft | `mino project import legacy` | 创建独立计划 |
+| 检查或解决 AGENTS 中的 Durable planning 双权威 | `mino project authority status/propose/decide/apply` | status/propose 只读；decide/apply 显式写入 |
 
 旧文件中的“已批准”“已完成”“检查通过”等声明都不构成 Mino 信任。迁移只保留可验证的 authored intent，所有运行状态必须重新走当前协议。
 
@@ -73,6 +74,7 @@ binary、plugin 与项目本地协议是三个相关但独立的版本边界。�
 - **Project selection**：缺少 `.mino/plan-selection.json` 时使用只读的 selection revision 0。零个 live plan 返回空，一个 live plan 被虚拟选择；多个 live plan 全部作为 alternatives 返回，必须执行 approval-bound `plan select`。Git binding 不作为迁移 fallback。
 - **Project scan**：缺少 scan extension 的旧计划保持可读；Mino 不伪造摘要。新 create 或 plan-scoped standards apply 会保存 scan digest、计数和截断原因。只有已保存且未接受的截断摘要阻塞 validate/finalize，接受记录不跨 digest 迁移。
 - **Git readiness decision**：只有旧 observation 的计划可读取，但 setup/cleanup 会按 repository mode 和已保存 cleanliness 物化为兼容状态；受保护转换前仍必须运行 live `git readiness refresh`。缺少 repository 会产生 Pending setup，dirty tree 会产生 Pending cleanup，而不是自动禁用 Git Flow。`setup decide` 和 cleanup proposal/approval/record 都只写受审计的计划状态；Mino 不运行 `git init`、`git add` 或 pre-plan cleanup commit。
+- **Planning authority**：存在普通 `AGENTS.md` 时初始化会创建 `.mino/authority.json`，绑定完整 source digest 与 fenced examples 以外的 active legacy clauses。缺少旧规则时不会阻塞；legacy 与 Mino workflow 同时 active 时必须显式 coexist、decline 或 guarded supersede。旧 decision 不跨任何 source byte 变化迁移。
 - **Deviation 与 Final Outcome**：只有旧 Deviation checkpoint 时，会按历史顺序派生稳定 `D<n>` 与 legacy link；首次处置时持久化。旧 Review 可以通过 `plan outcome set` 补齐 Final Outcome，但不会自动进入 Done。
 - **Actor identity**：既有 event 的 actor 原样保留。新的 Agent context/next/capabilities 宣告 `executor_identity: codex`，规范 revisioned mutation argv 显式传入 `--actor codex`；人工 CLI 省略 actor 时仍记录 `user`。
 
@@ -100,6 +102,25 @@ mino project migrate legacy \
 - 固定的 `applied: false` 和空 `deleted_sources`。
 
 分析不会编辑、重命名或删除任何旧文件。
+
+## Durable planning authority 冲突
+
+先读取只读状态和精确 rewrite proposal：
+
+```text
+mino project authority status --format json --no-input
+mino project authority propose --format json --no-input
+```
+
+scanner 忽略 fenced Markdown examples，只检测 active Formal Plan Trigger、Pinned Gist/External Resource、Plan Review Gate 和 Plan Execution clauses。`status` 返回 authority revision、完整 `AGENTS.md` source digest、clause lines、Mino block 状态、decision、staleness 与 block reason；`propose` 返回完整 replacement digest 和唯一 section 的行范围，但不写任何内容。
+
+有三种显式终局：
+
+- `coexistence-approved`：保留 legacy text，但把它定义为非执行参考；Mino 独占 Durable workflow。
+- `declined`：保留文本并阻止新的 Mino Durable plan。
+- `superseded`：使用 `project authority apply --apply-rewrite`，仅把检测到的 `Planning Documents` section 替换为 Mino supersession 声明。
+
+decide/apply 都要求 status/proposal 返回的 exact revision、source digest、唯一 request UUID、actor 和 approval reference；apply 还要求 exact replacement digest。apply 会先持久化 rewrite intent，再复用 recoverable integration transaction，最后才记录 superseded。精确重试可恢复任一中断点；pending intent 的 status 会从持久 audit 重建完整 recovery action，不要求猜测旧 revision 或摘要。terminal decision 绑定的 source 改变时，status 返回 canonical `project.init` refresh；刷新只把 detection 绑定到新摘要并回到 pending，不继承旧 approval。若 source bytes、对象类型或 proposal digest 改变，或者目标为 symlink、非普通文件、超过 1 MiB、并发被修改，操作拒绝覆盖并保留现场。rewrite 不触碰 section 之外的 Coding Standards、Git、MCP、语言规则或其他用户内容。
 
 ## 旧计划导入
 
@@ -170,7 +191,7 @@ mino project import legacy \
 2. 运行 legacy analysis，逐条处理 ambiguous 和 unsupported finding。
 3. 不带 apply flags 运行 `project init`，先审阅 Skill 与受管区块 proposal。
 4. 接受 proposal 后，再显式应用 AGENTS 和 `.gitignore` 区块。
-5. 运行 `project doctor` 与 `protocol status`，直到没有 blocking finding。
+5. 运行 `project doctor` 与 `protocol status`；如返回 `legacy_planning_authority_conflict`，先审阅 authority status/proposal 并显式 decide 或 apply，直到没有 blocking finding。
 6. 创建新计划，或导入一份受支持旧计划。
 7. 如果 context 返回多个 alternatives，先审阅 diff，再用 `plan select` 明确选择；不要用 `git bind` 代替。
 8. 读取 Git readiness：对缺少 repository 的计划显式决定初始化、无 Git 继续或等待人工设置；对 dirty tree 提交完整 cleanup proposal，并逐项取得批准。实际 Git 初始化和 cleanup commits 必须在 Mino 外按仓库授权完成，再用完整 OID record 和 readiness refresh 核验。
@@ -186,6 +207,7 @@ mino project import legacy \
 - protocol migration、legacy analysis 和 import parse/digest 错误不会写计划状态。
 - 导入若在 revision 1 创建后中断，可使用完全相同的导入请求补完 authored batch。
 - Pending setup/cleanup 或 unsafe/File Map overlap 会把计划保持为可恢复 Blocked；完成外部 Git 工作后运行 revisioned readiness refresh。不要手工编辑 extension 或 projection，也不要把计划 approval 当作 pre-plan Git mutation 授权。
+- Pending/stale planning authority、pending rewrite 或 declined decision 会阻止 Durable create。不要手工编辑 `.mino/authority.json` 或 transaction；用相同 digest-bound apply request 恢复中断，source 改变后重新检查并作新决定。
 - 常规计划加载和 `project doctor` 会恢复 prepared transaction。不要手工删除 `.mino/**` 中的 transaction、snapshot 或 history 文件。
 
 当前远程 Team Catalog package 只支持 sync/cache，不会被 recommend/apply 选入计划。普通完整 CI 仍只配置 Windows；多目标 artifact smoke 不能替代 Linux/macOS 全套验证。这两项是明确的后续边界，不应在迁移时解释为已经具备。

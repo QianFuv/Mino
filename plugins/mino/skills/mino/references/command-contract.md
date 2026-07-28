@@ -80,6 +80,33 @@ recompute Git Flow eligibility. Unsafe Git state or overlap between a dirty
 path and the task File Map remains recoverably Blocked until external repair
 and refresh.
 
+## Durable planning authority
+
+When doctor or Agent context returns `project.authority.status`, inspect that
+read-only status before creating a durable plan. Mino scans only active
+Formal Plan Trigger, Pinned Gist/External Resource, Plan Review Gate, and Plan
+Execution clauses outside fenced examples. A pending or stale conflict between
+those clauses and the Mino workflow block blocks durable creation.
+
+Use `mino project authority propose --format json --no-input` to obtain the
+exact source digest, authority revision, replacement digest, and section range
+without writing. At the explicit approval boundary, either record
+`coexistence-approved` or `declined` with `project authority decide`, or run
+`project authority apply --apply-rewrite` with the exact proposal digests.
+Coexistence makes Mino the sole durable-workflow owner while the legacy text is
+inert reference; declined prevents Mino durable creation. Apply replaces only
+one detected Planning Documents section and records superseded only after the
+guarded transaction publishes successfully.
+
+Never edit `.mino/authority.json` or recovery files. Any AGENTS byte change
+makes a prior decision stale; execute the returned `project.init` refresh to
+bind a new pending detection without inheriting the old approval. A changed
+digest, symbolic link, non-file,
+oversized source, concurrent edit, or unprovable recovery state must be
+preserved and re-inspected instead of overwritten. An exact interrupted apply
+request may be retried through the complete recovery action returned by status;
+that action reuses the persisted approval instead of inventing a new one.
+
 Use `mino git branch propose --plan <id> --format json --no-input` to obtain the
 only supported branch name and current blockers. The proposal is read-only.
 `mino git branch create --plan <id> --approval-ref <ref> --format json

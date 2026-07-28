@@ -39,10 +39,18 @@ Agent schema 公开稳定的 `executor_identity: "codex"`。Mino 返回的 revis
 | `mino project scan` | 无 | 生成尊重根/嵌套 `.gitignore`、repository/global exclude 和资源预算的工作区与语言证据。 |
 | `mino project migrate legacy` | 无 | 分析旧 AGENTS、模板和执行文档，返回映射建议，不改源文件。 |
 | `mino project import legacy` | 新 Draft | 读取一个旧计划，把受支持的 authored fields 写入独立 Draft，并报告全部忽略项和警告。 |
+| `mino project authority status` | 无 | 返回 active legacy planning clauses、完整 `AGENTS.md` 摘要、当前 decision、staleness 和 Durable create gate。 |
+| `mino project authority propose` | 无 | 对一个确定的 `Planning Documents` section 计算完整 replacement bytes 与 SHA-256，不写文件。 |
+| `mino project authority decide` | `.mino/authority.json`，审批边界 | 以 revision、source digest、request ID 和 approval reference 记录 `coexistence-approved` 或 `declined`。 |
+| `mino project authority apply` | `AGENTS.md`、`.mino/authority.json`，审批边界 | 需要 `--apply-rewrite` 与 proposal digest；通过可恢复事务仅替换 legacy planning section，成功后记录 `superseded`。 |
 | `mino protocol status` | 无 | 校验内嵌资源摘要及项目 protocol lock 兼容性。 |
 | `mino protocol migrate` | 存在注册 transform 时修改计划 | 要求目标、revision 和 request ID；当前版本只实现 already-current no-op。 |
 
 `project init --apply-agents-block` 与 `--apply-gitignore-block` 只发起各自 marker-owned 区域的新修改。已存在的 `.mino/integration-transactions/**` 会先按摘要恢复，无需重复 apply flag；无法证明安全的残留会阻止 init 并保留现场。`project doctor` 只报告 pending/corrupt transaction，写入范围仍为“无”。旧计划导入要求项目没有活动计划和同名计划；成功结果仍为 `complete: false`，并明确给出 `draft_review_required: true`、`source_preserved: true`、`historical_execution_trusted: false`。历史 lifecycle、approval、check、commit 和 evidence 结果不会进入新聚合。
+
+初始化会为现有普通 `AGENTS.md` 创建 canonical `.mino/authority.json`。Markdown scanner 忽略 fenced examples，只把 active Formal Plan Trigger、Pinned Gist/External Resource、Plan Review Gate 和 Plan Execution clauses 视为 legacy Durable authority。legacy clauses 与 Mino workflow block 同时 active 且 decision 为 pending 或 stale 时，`project doctor` 返回 blocking `legacy_planning_authority_conflict`，`plan create --trigger durable|formal` 返回相同原因与 `project.authority.status` action。
+
+`coexistence-approved` 表示 Mino 独占 Durable workflow，保留的 legacy planning text 仅为非执行参考；`declined` 阻止新的 Mino Durable plan。`superseded` 只能由成功的 guarded apply 产生。任何 `AGENTS.md` byte 变化都会使既有 terminal decision stale，并返回只刷新 authority detection 的 canonical `project.init` action；刷新后 decision 回到 pending，不继承旧授权。apply 只接受 proposal 的 exact source/replacement digest 和 authority revision；symlink、非普通文件、超限、并发编辑或无法证明的 transaction state 都 fail closed，不覆盖现场。rewrite 精确保留 Planning Documents section 以外的 Coding Standards、Git、MCP、语言规则和用户字节。已持久化 approval-bound rewrite intent 时，status 会返回由该 audit 重建的精确 `project.authority.apply` recovery action；它恢复原请求，不创建新的授权。
 
 `project scan` 的 `files_scanned` 统计进入证据模型的普通非生成文件，`bytes_read` 统计源码与 CI 证据实际读取的内容字节。`truncated` 为 true 时，`truncation_reasons` 是以下稳定代码的排序集合：`depth_limit`、`file_limit`、`per_file_byte_limit`、`total_byte_limit`。截断结果仍保持确定性，但只代表预算内的部分仓库证据。
 
@@ -336,6 +344,8 @@ Material disposition 是追加式 history。`review disposition revise` 只接�
 | `mino.git-hook-proposal/v1` | hash-bound hook proposal |
 | `mino.git-hook-install/v1` | approval-bound hook install result |
 | `mino.git-hook-runtime/v1` | 只读 hook runtime observation |
+| `mino.planning-authority/v1` | `project authority status` 与 `.mino/authority.json` |
+| `mino.planning-authority-proposal/v1` | digest-bound `project authority propose` payload |
 
 计划聚合另有数值字段 `schema_version: 1`；protocol lock 分别绑定 protocol 和 renderer version。
 

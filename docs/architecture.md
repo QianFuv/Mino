@@ -65,6 +65,8 @@ Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超
 │   ├── protocol.lock                    协议、schema 与渲染器锁
 │   ├── standards.local.toml             可选的本地标准来源声明
 │   ├── standards.lock                   已选择标准与目录 generation
+│   ├── authority.json                   AGENTS planning authority decision 与摘要
+│   ├── authority.lock                   authority mutation 写入锁
 │   ├── plan-selection.json              项目级 selected plan 与 alternatives
 │   ├── plan-selection.lock              方案选择写入锁
 │   ├── active.json                      按工作树保存的 Git 身份绑定
@@ -107,6 +109,7 @@ Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超
 | `.mino/protocol.lock` | 协议锁；禁止手工改写以伪造兼容状态。 |
 | `.mino/standards.local.toml` | 用户审阅的可选输入；Mino 读取但不生成。 |
 | `.mino/standards.lock` | 标准选择锁；显式同步可以原子替换。 |
+| `.mino/authority.json` | 绑定完整 `AGENTS.md` 摘要的 Durable planning authority detection、decision 与审计；只通过 `project authority decide/apply` 修改。 |
 | `.mino/plan-selection.json` | 项目级方案选择；由 create/fork/archive 维护候选，只通过 `mino plan select` 改变显式选择。 |
 | `.mino/active.json` | Git 工作树身份绑定；只通过 `mino git bind` 修改，不负责选择活动方案。 |
 | `.mino/integration-transactions/` | Skill 与 marker-owned 文件替换的规范恢复记录；只由 `project init` 恢复。 |
@@ -122,13 +125,15 @@ Git 明确报告非仓库时继续查找文件系统标记；Git 不可用、超
 
 集成文件替换在目标父目录保存摘要绑定的 temporary/backup，并在 `.mino/integration-transactions/<target-hash>/` 追加不可变的 `prepared -> backed_up -> published -> cleaned` phase record。每个 phase 都绑定 target、backup、temporary、原摘要和替换摘要。`project init` 在任何集成分类前持锁恢复：prepared 可以回滚到原文件，backed_up 可以恢复原文件或继续发布，published 只清理摘要匹配的残留，cleaned 只移除事务记录。任何未知路径、非连续 phase、非规范 JSON 或摘要外字节都会保留并报错。`project doctor` 只读报告 pending/corrupt，不执行恢复。
 
+`AGENTS.md` 仍由用户拥有。Mino 对完整普通文件做 1 MiB bounded read，以 fenced-aware scanner 检测 active legacy Durable planning clauses，再把 source digest、clause lines、decision、actor/reference/time 和成功 rewrite digest 保存到 `.mino/authority.json`。pending/stale dual authority 与 declined decision 都阻止新的 Durable plan；coexistence-approved 让 Mino 拥有 Durable workflow 而不改源文件；superseded 只在 digest-bound guarded transaction 已发布精确 replacement 后成立。source byte 改变会使 terminal decision stale；canonical `project.init` refresh 增加 authority revision、重新绑定 detection 并回到 pending，不继承旧 approval。rewrite 复用 integration transaction recovery，仅替换一个确定的 `Planning Documents` section；任何 source drift、symlink、非普通文件或异常 journal 都保留现场并 fail closed。
+
 ### 受管读取预算
 
 受管状态不再提供无界整文件读取入口。固定大小文件在解析前按类型拒绝超限字节；追加日志逐条流式读取，不先分配整个日志：
 
 | 状态类型 | 上限 |
 |---|---:|
-| config、protocol/standards lock、plan selection、active binding、branch journal、integration phase、standards source/cache document | 1 MiB |
+| config、protocol/standards lock、planning authority、AGENTS authority source、plan selection、active binding、branch journal、integration phase、standards source/cache document | 1 MiB |
 | 当前计划、snapshot、计划事务 | 8 MiB |
 | 单条 plan event（含 LF） | 1 MiB |
 | run lease/result、commit journal、monitor summary、单条 evidence record/index entry | 4 MiB |

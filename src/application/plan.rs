@@ -28,6 +28,7 @@ use crate::{ErrorCategory, MinoError, NextAction};
 
 use super::AGENT_EXECUTOR_IDENTITY;
 use super::git_readiness::{detect_initial_git_readiness, readiness_block_reason};
+use crate::project::require_durable_planning_authority;
 
 /// Maximum UTF-8 request or YAML input accepted by authoring adapters.
 pub const MAX_AUTHORING_INPUT_BYTES: usize = 1024 * 1024;
@@ -532,6 +533,14 @@ impl PlanService {
         let state_path = self.store.paths().current_plan(&plan_id);
         if preflight_projection.exists() && !state_path.exists() {
             return Err(plan_collision_error(&plan_id));
+        }
+        if !state_path.exists()
+            && matches!(
+                request.trigger.to_ascii_lowercase().as_str(),
+                "durable" | "formal"
+            )
+        {
+            require_durable_planning_authority(&self.root)?;
         }
         if !state_path.exists() {
             let selection = self.plan_selection()?;

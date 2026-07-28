@@ -1,5 +1,6 @@
 //! Project discovery, initialization, inspection, and diagnosis services.
 
+mod authority;
 mod config;
 mod doctor;
 mod import;
@@ -17,6 +18,11 @@ use crate::managed_fs::{ManagedPath, ProjectFs};
 use crate::protocol::ProtocolRegistry;
 use crate::{ErrorCategory, MinoError};
 
+pub use authority::{
+    PlanningAuthorityApplyRequest, PlanningAuthorityDecision, PlanningAuthorityDecisionRequest,
+    PlanningAuthorityMutationReport, PlanningAuthorityProposal, PlanningAuthorityService,
+    PlanningAuthorityStatus,
+};
 pub use config::{
     CatalogConfig, LockedStandard, ProjectConfig, ProjectLayout, ProtocolLock, StandardsLock,
 };
@@ -27,7 +33,8 @@ pub use import::{
 };
 pub use migrate::{
     LegacyDocumentKind, LegacyFinding, LegacyInput, LegacyMapping, LegacyMappingDisposition,
-    LegacyMigrationReport, LegacyProposedChange, LegacySourceSummary, analyze_legacy,
+    LegacyMigrationReport, LegacyPlanningClause, LegacyPlanningClauseKind, LegacyProposedChange,
+    LegacySourceSummary, analyze_legacy,
 };
 pub use root::{ProjectRoot, RootSource, discover, discover_for_init};
 pub use scan::{
@@ -38,6 +45,8 @@ pub use selection::{
     PlanSelectionRequest, PlanSelectionWriteReport, ProjectPlanSelection, ProjectPlanSelectionStore,
 };
 
+use authority::ensure_authority_state;
+pub(crate) use authority::{authority_status_action, require_durable_planning_authority};
 use config::{create_file, map_managed_error, parse_managed_toml, serialize_toml};
 
 /// Result of idempotently initializing project-owned Mino state.
@@ -149,6 +158,13 @@ pub fn initialize_with_options(
         &mut initialization_findings,
     )?;
     let integrations = integrate_project(layout.root(), integration_options)?;
+    if let Some(authority) = ensure_authority_state(layout.root())? {
+        if authority.created {
+            created_files.push(authority.path);
+        } else {
+            existing_files.push(authority.path);
+        }
+    }
     let mut doctor = diagnose(&layout)?;
     doctor.findings.extend(initialization_findings);
     doctor

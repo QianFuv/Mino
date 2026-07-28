@@ -4,12 +4,65 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::store::sha256_digest;
 use crate::{ErrorCategory, MinoError};
 
 const MAX_LEGACY_DOCUMENT_BYTES: usize = 1024 * 1024;
+
+/// Legacy durable-planning clauses that conflict with Mino workflow ownership.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyPlanningClauseKind {
+    /// Rules that require a task-specific formal plan or template.
+    FormalPlanTrigger,
+    /// Rules that retrieve pinned external planning resources or Gists.
+    PinnedExternalResource,
+    /// Rules that require a separate plan review gate.
+    PlanReviewGate,
+    /// Rules that retrieve or execute a separate plan execution guide.
+    PlanExecution,
+}
+
+/// One active legacy durable-planning clause outside fenced examples.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyPlanningClause {
+    /// Stable clause classification.
+    pub kind: LegacyPlanningClauseKind,
+    /// One-based source line containing the first active occurrence.
+    pub line: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LegacyPlanningSection {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) start_line: usize,
+    pub(crate) end_line: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct LegacyPlanningDetection {
+    pub(crate) clauses: Vec<LegacyPlanningClause>,
+    pub(crate) sections: Vec<LegacyPlanningSection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MarkdownLine {
+    line: usize,
+    start: usize,
+    text: String,
+    is_fenced: bool,
+    heading: Option<MarkdownHeading>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MarkdownHeading {
+    level: usize,
+    title: String,
+}
 
 /// Supported legacy planning document roles.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -243,17 +296,147 @@ fn analyze_document(
 }
 
 fn markdown_headings(text: &str) -> Vec<(usize, String)> {
-    text.lines()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let trimmed = line.trim_start();
-            let marker_count = trimmed.bytes().take_while(|byte| *byte == b'#').count();
-            (marker_count > 0
-                && marker_count <= 6
-                && trimmed.as_bytes().get(marker_count) == Some(&b' '))
-            .then(|| (index + 1, trimmed[marker_count + 1..].trim().to_owned()))
-        })
+    scan_markdown_lines(text)
+        .into_iter()
+        .filter_map(|line| line.heading.map(|heading| (line.line, heading.title)))
         .collect()
+}
+
+pub(crate) fn detect_legacy_planning_authority(text: &str) -> LegacyPlanningDetection {
+    let lines = scan_markdown_lines(text);
+    let heading_indexes = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| line.heading.as_ref().map(|heading| (index, heading)))
+        .collect::<Vec<_>>();
+    let mut sections = Vec::new();
+    for (position, (line_index, heading)) in heading_indexes.iter().enumerate() {
+        if !heading.title.eq_ignore_ascii_case("Planning Documents") {
+            continue;
+        }
+        let end_index = heading_indexes
+            .iter()
+            .skip(position + 1)
+            .find(|(_, candidate)| candidate.level <= heading.level)
+            .map_or(lines.len(), |(index, _)| *index);
+        let end = lines.get(end_index).map_or(text.len(), |line| line.start);
+        let end_line = lines
+            .get(end_index.saturating_sub(1))
+            .map_or(lines[*line_index].line, |line| line.line);
+        sections.push(LegacyPlanningSection {
+            start: lines[*line_index].start,
+            end,
+            start_line: lines[*line_index].line,
+            end_line,
+        });
+    }
+    let mut clauses = Vec::new();
+    let mut seen = BTreeSet::new();
+    for line in lines.iter().filter(|line| {
+        !line.is_fenced
+            && sections
+                .iter()
+                .any(|section| line.start >= section.start && line.start < section.end)
+    }) {
+        let normalized = line.text.to_ascii_lowercase();
+        for kind in clause_kinds(&normalized) {
+            if seen.insert(kind) {
+                clauses.push(LegacyPlanningClause {
+                    kind,
+                    line: line.line,
+                });
+            }
+        }
+    }
+    if sections.is_empty() {
+        for line in lines.iter().filter(|line| !line.is_fenced) {
+            let Some(heading) = &line.heading else {
+                continue;
+            };
+            for kind in clause_kinds(&heading.title.to_ascii_lowercase()) {
+                if seen.insert(kind) {
+                    clauses.push(LegacyPlanningClause {
+                        kind,
+                        line: line.line,
+                    });
+                }
+            }
+        }
+    }
+    LegacyPlanningDetection { clauses, sections }
+}
+
+fn scan_markdown_lines(text: &str) -> Vec<MarkdownLine> {
+    let mut lines = Vec::new();
+    let mut offset = 0;
+    let mut active_fence: Option<(u8, usize)> = None;
+    for (index, segment) in text.split_inclusive('\n').enumerate() {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let trimmed = line.trim_start();
+        let fence = fence_marker(trimmed);
+        let was_fenced = active_fence.is_some();
+        if let Some((marker, count)) = fence {
+            match active_fence {
+                None => active_fence = Some((marker, count)),
+                Some((active_marker, active_count))
+                    if marker == active_marker
+                        && count >= active_count
+                        && trimmed[count..].trim().is_empty() =>
+                {
+                    active_fence = None;
+                }
+                Some(_) => {}
+            }
+        }
+        let is_fenced = was_fenced || fence.is_some();
+        let heading = (!is_fenced).then(|| parse_heading(trimmed)).flatten();
+        lines.push(MarkdownLine {
+            line: index + 1,
+            start: offset,
+            text: line.to_owned(),
+            is_fenced,
+            heading,
+        });
+        offset += segment.len();
+    }
+    lines
+}
+
+fn fence_marker(value: &str) -> Option<(u8, usize)> {
+    let marker = *value.as_bytes().first()?;
+    if !matches!(marker, b'`' | b'~') {
+        return None;
+    }
+    let count = value.bytes().take_while(|byte| *byte == marker).count();
+    (count >= 3).then_some((marker, count))
+}
+
+fn parse_heading(value: &str) -> Option<MarkdownHeading> {
+    let level = value.bytes().take_while(|byte| *byte == b'#').count();
+    (level > 0 && level <= 6 && value.as_bytes().get(level) == Some(&b' ')).then(|| {
+        MarkdownHeading {
+            level,
+            title: value[level + 1..].trim().to_owned(),
+        }
+    })
+}
+
+fn clause_kinds(value: &str) -> Vec<LegacyPlanningClauseKind> {
+    let mut kinds = Vec::new();
+    if value.contains("formal plan trigger") {
+        kinds.push(LegacyPlanningClauseKind::FormalPlanTrigger);
+    }
+    if value.contains("pinned external resource") || value.contains("pinned gist") {
+        kinds.push(LegacyPlanningClauseKind::PinnedExternalResource);
+    }
+    if value.contains("plan review gate") {
+        kinds.push(LegacyPlanningClauseKind::PlanReviewGate);
+    }
+    if value.contains("plan execution") {
+        kinds.push(LegacyPlanningClauseKind::PlanExecution);
+    }
+    kinds
 }
 
 fn classify_heading(
@@ -356,11 +539,23 @@ fn proposal(kind: LegacyDocumentKind, path: &Path, text: &str) -> LegacyProposed
 }
 
 fn agents_diff(path: &Path, text: &str) -> String {
-    let line_count = text.lines().count();
+    let detection = detect_legacy_planning_authority(text);
+    if detection.clauses.is_empty() {
+        return "No active legacy durable-planning clauses were detected; preserve the source unchanged."
+            .to_owned();
+    }
+    if detection.sections.len() != 1 {
+        return "Active legacy planning clauses do not have one deterministic Planning Documents section; manual authority resolution is required."
+            .to_owned();
+    }
+    let section = &detection.sections[0];
+    let line_ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
     format!(
-        "--- {}\n+++ {} (proposed)\n@@ -{line_count},0 +{},5 @@\n+<!-- BEGIN MINO MANAGED -->\n+Use `mino agent context --format json --no-input` for protocol state.\n+Follow only returned canonical `next_actions` and stop when approval is required.\n+Do not edit `.mino/` state or managed plan Markdown directly.\n+<!-- END MINO MANAGED -->\n",
+        "--- {}\n+++ {} (proposed)\n@@ -{},{} @@\n{}",
         path.display(),
         path.display(),
-        line_count.saturating_add(1)
+        section.start_line,
+        section.end_line.saturating_sub(section.start_line) + 1,
+        crate::integration::planning_supersession(line_ending)
     )
 }

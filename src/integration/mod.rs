@@ -16,6 +16,28 @@ pub use transaction::IntegrationFailurePoint;
 use transaction::IntegrationWriter;
 pub(crate) use transaction::inspect_transactions;
 
+pub(crate) fn agents_workflow_is_active(text: &str) -> bool {
+    agents_block::is_workflow_active(text)
+}
+
+pub(crate) fn planning_supersession(line_ending: &str) -> String {
+    agents_block::planning_supersession(line_ending)
+}
+
+pub(crate) fn recover_repository_transactions(root: &Path) -> Result<(), MinoError> {
+    IntegrationWriter::open(root, None).map(|_| ())
+}
+
+pub(crate) fn guarded_agents_rewrite(
+    root: &Path,
+    expected: &[u8],
+    replacement: &[u8],
+    failure_point: Option<IntegrationFailurePoint>,
+) -> Result<IntegrationStatus, MinoError> {
+    let writer = IntegrationWriter::open(root, failure_point)?;
+    writer.guarded_write(&root.join("AGENTS.md"), Some(expected), replacement)
+}
+
 /// Repository integration surfaces managed or inspected by Mino.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]

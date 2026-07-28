@@ -8,17 +8,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
+#[cfg(unix)]
+use std::os::unix::fs::symlink as symlink_file;
 #[cfg(windows)]
-use std::os::windows::fs::symlink_dir;
+use std::os::windows::fs::{symlink_dir, symlink_file};
 
+use mino::application::plan::{CreatePlanRequest, PlanService};
 use mino::domain::{Plan, PlanId, RequestId, Timestamp};
 use mino::integration::{
     IntegrationFailurePoint, IntegrationOptions, integrate_project_with_failure,
 };
 use mino::project::{
-    FindingSeverity, PlanSelectionRequest, ProjectConfig, ProjectLayout, ProjectPlanSelectionStore,
-    ProtocolLock, RootSource, StandardsLock, discover, doctor, initialize, initialize_with_options,
-    show,
+    FindingSeverity, PlanSelectionRequest, PlanningAuthorityApplyRequest,
+    PlanningAuthorityDecision, PlanningAuthorityDecisionRequest, PlanningAuthorityService,
+    ProjectConfig, ProjectLayout, ProjectPlanSelectionStore, ProtocolLock, RootSource,
+    StandardsLock, discover, doctor, initialize, initialize_with_options, show,
 };
 use mino::render::{render_plan, write_projection};
 use mino::store::PlanStore;
@@ -100,6 +104,76 @@ fn apply_integrations(root: &Path) {
         },
     )
     .expect("repository integrations should apply");
+}
+
+fn authority_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integration/agents-user.md")
+}
+
+fn prepare_authority_project(label: &str) -> TestProject {
+    let project = TestProject::new(label);
+    fs::copy(authority_fixture(), project.path().join("AGENTS.md"))
+        .expect("authority AGENTS fixture should be copied");
+    apply_integrations(project.path());
+    project
+}
+
+fn authority_request_id(number: u64) -> RequestId {
+    RequestId::parse(format!("91000000-0000-0000-0000-{number:012}"))
+        .expect("authority request ID should parse")
+}
+
+fn create_durable_plan(
+    project: &TestProject,
+    name: &str,
+    number: u64,
+) -> Result<mino::application::plan::PlanOperationReport, mino::MinoError> {
+    PlanService::discover(project.path())?.create(CreatePlanRequest {
+        name: name.to_owned(),
+        trigger: "durable".to_owned(),
+        original_request: "Exercise the planning authority gate.".to_owned(),
+        request_id: authority_request_id(number),
+        actor: "codex".to_owned(),
+        command: command(&["mino", "plan", "create"]),
+        created_at: timestamp(),
+    })
+}
+
+fn authority_decision_request(
+    status: &mino::project::PlanningAuthorityStatus,
+    decision: PlanningAuthorityDecision,
+    number: u64,
+) -> PlanningAuthorityDecisionRequest {
+    PlanningAuthorityDecisionRequest {
+        expected_revision: status.authority_revision,
+        expected_source_digest: status
+            .source_digest
+            .clone()
+            .expect("authority source digest should exist"),
+        decision,
+        request_id: authority_request_id(number),
+        actor: "codex".to_owned(),
+        approval_reference: format!("chat:authority-{number}"),
+        command: command(&["mino", "project", "authority", "decide"]),
+        decided_at: timestamp(),
+    }
+}
+
+fn authority_apply_request(
+    proposal: &mino::project::PlanningAuthorityProposal,
+    number: u64,
+) -> PlanningAuthorityApplyRequest {
+    PlanningAuthorityApplyRequest {
+        expected_revision: proposal.authority_revision,
+        expected_source_digest: proposal.source_digest.clone(),
+        expected_replacement_digest: proposal.replacement_digest.clone(),
+        is_confirmed: true,
+        request_id: authority_request_id(number),
+        actor: "codex".to_owned(),
+        approval_reference: format!("chat:authority-apply-{number}"),
+        command: command(&["mino", "project", "authority", "apply"]),
+        decided_at: timestamp(),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -592,4 +666,448 @@ fn project_cli_returns_stable_agent_json_for_init_show_and_doctor() {
             .config
             .is_some()
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn authority_decisions_deterministically_gate_durable_planning() {
+    let coexistence_project = prepare_authority_project("authority-coexistence");
+    let service = PlanningAuthorityService::discover(coexistence_project.path())
+        .expect("authority service should discover");
+    let pending = service.status().expect("pending authority should inspect");
+    assert_eq!(pending.decision, PlanningAuthorityDecision::Pending);
+    assert_eq!(
+        pending.block_reason.as_deref(),
+        Some("legacy_planning_authority_conflict")
+    );
+    assert!(
+        finding_codes(
+            &doctor(coexistence_project.path())
+                .expect("doctor should inspect pending authority")
+                .findings
+        )
+        .contains(&"legacy_planning_authority_conflict")
+    );
+    let context = mino::application::agent::build_agent_context(coexistence_project.path(), None)
+        .expect("Agent context should expose the authority gate");
+    assert!(context.approval_required);
+    assert_eq!(context.next_actions[0].id, "project.authority.status");
+    assert!(
+        context
+            .blocked_actions
+            .iter()
+            .any(|action| action.action == "plan.create")
+    );
+    let blocked = create_durable_plan(&coexistence_project, "pending authority", 1)
+        .expect_err("pending authority must block durable creation");
+    assert_eq!(blocked.category(), mino::ErrorCategory::PolicyViolation);
+    assert_eq!(blocked.missing(), ["legacy_planning_authority_conflict"]);
+    assert_eq!(blocked.next_actions()[0].id, "project.authority.status");
+
+    let coexistence_request =
+        authority_decision_request(&pending, PlanningAuthorityDecision::CoexistenceApproved, 2);
+    let approved = service
+        .decide(coexistence_request.clone())
+        .expect("coexistence should be recorded");
+    assert!(!approved.replayed);
+    assert!(!approved.status.blocks_durable_planning);
+    assert_eq!(approved.status.decided_by.as_deref(), Some("codex"));
+    assert_eq!(
+        approved.status.decision_reference.as_deref(),
+        Some("chat:authority-2")
+    );
+    let mut decision_retry = coexistence_request;
+    decision_retry.decided_at =
+        Timestamp::parse("2026-07-25T14:01:00Z").expect("retry timestamp should parse");
+    assert!(
+        service
+            .decide(decision_retry)
+            .expect("CLI-style retry should replay")
+            .replayed
+    );
+    create_durable_plan(&coexistence_project, "approved coexistence", 3)
+        .expect("coexistence should permit durable creation");
+
+    fs::write(
+        coexistence_project.path().join("AGENTS.md"),
+        format!(
+            "{}\nRepository-local change.\n",
+            fs::read_to_string(coexistence_project.path().join("AGENTS.md"))
+                .expect("AGENTS should read")
+        ),
+    )
+    .expect("source drift should be injected");
+    let stale = service.status().expect("stale decision should inspect");
+    assert!(stale.decision_is_stale);
+    assert_eq!(
+        stale.block_reason.as_deref(),
+        Some("planning_authority_decision_stale")
+    );
+    assert_eq!(
+        stale
+            .state_refresh_action
+            .as_ref()
+            .expect("stale state should expose a canonical refresh")
+            .id,
+        "project.init"
+    );
+    initialize(coexistence_project.path()).expect("init should refresh stale authority state");
+    let refreshed = service
+        .status()
+        .expect("refreshed authority should inspect");
+    assert_eq!(refreshed.decision, PlanningAuthorityDecision::Pending);
+    assert!(!refreshed.decision_is_stale);
+    assert_eq!(
+        refreshed.block_reason.as_deref(),
+        Some("legacy_planning_authority_conflict")
+    );
+
+    let declined_project = prepare_authority_project("authority-declined");
+    let declined_service = PlanningAuthorityService::discover(declined_project.path())
+        .expect("authority service should discover");
+    let pending = declined_service
+        .status()
+        .expect("pending authority should inspect");
+    let declined = declined_service
+        .decide(authority_decision_request(
+            &pending,
+            PlanningAuthorityDecision::Declined,
+            4,
+        ))
+        .expect("decline should be recorded");
+    assert_eq!(
+        declined.status.block_reason.as_deref(),
+        Some("mino_durable_planning_declined")
+    );
+    assert!(
+        finding_codes(
+            &doctor(declined_project.path())
+                .expect("doctor should inspect declined authority")
+                .findings
+        )
+        .contains(&"mino_durable_planning_declined")
+    );
+    create_durable_plan(&declined_project, "declined authority", 5)
+        .expect_err("declined authority must block durable creation");
+}
+
+#[test]
+fn authority_status_and_proposal_cli_are_stable_and_read_only() {
+    let project = prepare_authority_project("authority-cli-read-only");
+    let agents_path = project.path().join("AGENTS.md");
+    let authority_path = project.path().join(".mino/authority.json");
+    let agents_before = fs::read(&agents_path).expect("AGENTS should read");
+    let authority_before = fs::read(&authority_path).expect("authority state should read");
+    let root = project
+        .path()
+        .to_str()
+        .expect("project path should be UTF-8");
+
+    let status = run_mino(&[
+        "--root",
+        root,
+        "--format",
+        "json",
+        "--no-input",
+        "project",
+        "authority",
+        "status",
+    ]);
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).expect("status should return JSON");
+    assert_eq!(status["kind"], "mino.result/v1");
+    assert_eq!(status["authority_kind"], "mino.planning-authority/v1");
+    assert_eq!(status["decision"], "pending");
+    assert_eq!(status["complete"], false);
+    assert_eq!(status["block_reason"], "legacy_planning_authority_conflict");
+
+    let proposal = run_mino(&[
+        "--root",
+        root,
+        "--format",
+        "json",
+        "--no-input",
+        "project",
+        "authority",
+        "propose",
+    ]);
+    assert!(proposal.status.success());
+    let proposal: Value =
+        serde_json::from_slice(&proposal.stdout).expect("proposal should return JSON");
+    assert_eq!(proposal["kind"], "mino.result/v1");
+    assert_eq!(
+        proposal["proposal_kind"],
+        "mino.planning-authority-proposal/v1"
+    );
+    assert!(proposal["source_digest"].as_str().is_some());
+    assert!(proposal["replacement_digest"].as_str().is_some());
+    assert_eq!(
+        fs::read(agents_path).expect("AGENTS should remain"),
+        agents_before
+    );
+    assert_eq!(
+        fs::read(authority_path).expect("authority state should remain"),
+        authority_before
+    );
+}
+
+#[test]
+fn fenced_mino_markers_do_not_create_a_planning_authority_conflict() {
+    let project = TestProject::new("authority-fenced-mino");
+    fs::write(
+        project.path().join("AGENTS.md"),
+        "## Planning Documents\n\n- **Formal Plan Trigger**: Use the legacy template.\n\n```markdown\n<!-- mino:workflow:start -->\nFenced example only.\n<!-- mino:workflow:end -->\n```\n",
+    )
+    .expect("fenced authority fixture should be written");
+    initialize(project.path()).expect("fenced authority project should initialize");
+    let status = PlanningAuthorityService::discover(project.path())
+        .expect("authority service should discover")
+        .status()
+        .expect("authority status should inspect");
+    assert!(status.legacy_planning_rules_detected);
+    assert!(!status.mino_workflow_active);
+    assert!(!status.blocks_durable_planning);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn authority_rewrite_recovers_every_interruption_and_preserves_other_sections() {
+    let failure_points = [
+        IntegrationFailurePoint::BeforeBackup,
+        IntegrationFailurePoint::AfterBackup,
+        IntegrationFailurePoint::BeforePublish,
+        IntegrationFailurePoint::AfterPublish,
+        IntegrationFailurePoint::BeforeBackupRemoval,
+    ];
+    for (index, failure_point) in failure_points.into_iter().enumerate() {
+        let project = prepare_authority_project(&format!("authority-recovery-{index}"));
+        let agents_path = project.path().join("AGENTS.md");
+        let before = fs::read_to_string(&agents_path).expect("AGENTS should read");
+        let service = PlanningAuthorityService::discover(project.path())
+            .expect("authority service should discover");
+        let proposal = service.propose().expect("rewrite should be proposed");
+        let request = authority_apply_request(&proposal, 100 + index as u64);
+        let interrupted = service
+            .apply_with_failure(&request, failure_point)
+            .expect_err("rewrite should stop at the injected boundary");
+        assert_eq!(
+            interrupted.category(),
+            mino::ErrorCategory::EnvironmentUnavailable
+        );
+        let pending = service.status().expect("pending rewrite should inspect");
+        assert!(pending.rewrite_pending);
+        assert_eq!(
+            pending.block_reason.as_deref(),
+            Some("planning_authority_rewrite_pending")
+        );
+        let recovery_action = pending
+            .recovery_action
+            .as_ref()
+            .expect("pending rewrite should expose its exact approved retry");
+        assert_eq!(recovery_action.id, "project.authority.apply");
+        assert!(
+            recovery_action
+                .argv
+                .windows(2)
+                .any(|parts| parts == ["--approval-ref", request.approval_reference.as_str()])
+        );
+        if index == 0 {
+            let context = mino::application::agent::build_agent_context(project.path(), None)
+                .expect("Agent context should expose the persisted rewrite retry");
+            assert!(!context.approval_required);
+            assert_eq!(context.next_actions[0].id, "project.authority.apply");
+            let competing = service
+                .decide(authority_decision_request(
+                    &pending,
+                    PlanningAuthorityDecision::CoexistenceApproved,
+                    150,
+                ))
+                .expect_err("pending rewrite must block a competing decision");
+            assert_eq!(competing.category(), mino::ErrorCategory::PolicyViolation);
+            assert_eq!(competing.next_actions()[0].id, "project.authority.apply");
+            service
+                .propose()
+                .expect_err("pending rewrite must block a replacement proposal");
+        }
+
+        let mut retry = request.clone();
+        retry.decided_at =
+            Timestamp::parse("2026-07-25T14:01:00Z").expect("retry timestamp should parse");
+        let recovered = service
+            .apply(&retry)
+            .expect("exact retry should recover and finalize");
+        assert!(!recovered.replayed);
+        assert_eq!(
+            recovered.status.decision,
+            PlanningAuthorityDecision::Superseded
+        );
+        assert!(!recovered.status.blocks_durable_planning);
+        assert!(!recovered.status.legacy_planning_rules_detected);
+        assert_eq!(
+            recovered.status.applied_rewrite_digest.as_deref(),
+            Some(proposal.replacement_digest.as_str())
+        );
+        retry.decided_at =
+            Timestamp::parse("2026-07-25T14:02:00Z").expect("second retry timestamp should parse");
+        let replayed = service
+            .apply(&retry)
+            .expect("completed exact retry should replay");
+        assert!(replayed.replayed);
+
+        let after = fs::read_to_string(&agents_path).expect("rewritten AGENTS should read");
+        assert!(after.contains("For durable plans, Mino supersedes the legacy template"));
+        assert!(!after.contains("Fetch and instantiate the legacy planning template"));
+        for preserved in [
+            "Keep this repository-specific rule exactly as written.",
+            "Keep this coding rule byte-identical.",
+            "Keep this Git rule byte-identical.",
+            "Keep this MCP rule byte-identical.",
+            "<!-- mino:workflow:start -->",
+            "<!-- mino:workflow:end -->",
+        ] {
+            assert!(before.contains(preserved));
+            assert!(after.contains(preserved));
+        }
+        let transaction_root = project.path().join(".mino/integration-transactions");
+        assert!(
+            !transaction_root.exists()
+                || fs::read_dir(transaction_root)
+                    .expect("transaction root should read")
+                    .next()
+                    .is_none()
+        );
+        let authority: Value = serde_json::from_slice(
+            &fs::read(project.path().join(".mino/authority.json"))
+                .expect("authority state should read"),
+        )
+        .expect("authority state should be JSON");
+        assert_eq!(authority["decision"], "superseded");
+        assert_eq!(authority["decided_by"], "codex");
+        assert_eq!(
+            authority["applied_rewrite_digest"],
+            proposal.replacement_digest
+        );
+        if index == 0 {
+            fs::write(&agents_path, format!("{after}\nPost-rewrite change.\n"))
+                .expect("post-rewrite drift should be injected");
+            let stale = service.status().expect("stale supersession should inspect");
+            assert!(stale.decision_is_stale);
+            assert_eq!(
+                stale.block_reason.as_deref(),
+                Some("planning_authority_decision_stale")
+            );
+            assert_eq!(
+                stale
+                    .state_refresh_action
+                    .as_ref()
+                    .expect("stale supersession should expose a refresh")
+                    .id,
+                "project.init"
+            );
+            initialize(project.path()).expect("init should refresh stale supersession state");
+            let refreshed = service
+                .status()
+                .expect("refreshed authority should inspect");
+            assert_eq!(refreshed.decision, PlanningAuthorityDecision::Pending);
+            assert!(!refreshed.blocks_durable_planning);
+        }
+    }
+}
+
+#[test]
+fn authority_rewrite_targets_fail_closed_on_drift_and_unsafe_entries() {
+    let drift_project = prepare_authority_project("authority-source-drift");
+    let drift_service = PlanningAuthorityService::discover(drift_project.path())
+        .expect("authority service should discover");
+    let proposal = drift_service.propose().expect("rewrite should be proposed");
+    let agents_path = drift_project.path().join("AGENTS.md");
+    let changed = format!(
+        "{}\nConcurrent repository edit.\n",
+        fs::read_to_string(&agents_path).expect("AGENTS should read")
+    );
+    fs::write(&agents_path, &changed).expect("source drift should be injected");
+    let digest_error = drift_service
+        .apply(&authority_apply_request(&proposal, 200))
+        .expect_err("changed source digest must fail closed");
+    assert_eq!(digest_error.category(), mino::ErrorCategory::DriftDetected);
+    assert_eq!(
+        fs::read_to_string(&agents_path).expect("changed source should remain"),
+        changed
+    );
+
+    let concurrent_project = prepare_authority_project("authority-concurrent-edit");
+    let concurrent_service = PlanningAuthorityService::discover(concurrent_project.path())
+        .expect("authority service should discover");
+    let proposal = concurrent_service
+        .propose()
+        .expect("rewrite should be proposed");
+    let request = authority_apply_request(&proposal, 201);
+    concurrent_service
+        .apply_with_failure(&request, IntegrationFailurePoint::BeforeBackup)
+        .expect_err("rewrite should leave a prepared transaction");
+    let concurrent_path = concurrent_project.path().join("AGENTS.md");
+    fs::write(&concurrent_path, "externally replaced\n")
+        .expect("concurrent source edit should be injected");
+    let concurrent_error = concurrent_service
+        .apply(&request)
+        .expect_err("concurrent edit must block recovery");
+    assert_eq!(
+        concurrent_error.category(),
+        mino::ErrorCategory::DriftDetected
+    );
+    assert_eq!(
+        fs::read_to_string(concurrent_path).expect("external edit should remain"),
+        "externally replaced\n"
+    );
+
+    let oversized_project = prepare_authority_project("authority-oversized");
+    fs::write(
+        oversized_project.path().join("AGENTS.md"),
+        vec![b'x'; 1024 * 1024 + 1],
+    )
+    .expect("oversized source should be injected");
+    let oversized = PlanningAuthorityService::discover(oversized_project.path())
+        .expect("authority service should discover")
+        .status()
+        .expect_err("oversized source must fail closed");
+    assert_eq!(oversized.category(), mino::ErrorCategory::DriftDetected);
+
+    let directory_project = prepare_authority_project("authority-directory");
+    let directory_path = directory_project.path().join("AGENTS.md");
+    fs::remove_file(&directory_path).expect("AGENTS should be removed");
+    fs::create_dir(&directory_path).expect("directory target should be injected");
+    PlanningAuthorityService::discover(directory_project.path())
+        .expect("authority service should discover")
+        .status()
+        .expect_err("directory target must fail closed");
+
+    #[cfg(unix)]
+    {
+        let special_project = prepare_authority_project("authority-special-file");
+        let special_path = special_project.path().join("AGENTS.md");
+        fs::remove_file(&special_path).expect("AGENTS should be removed");
+        let _listener = std::os::unix::net::UnixListener::bind(&special_path)
+            .expect("socket target should be injected");
+        PlanningAuthorityService::discover(special_project.path())
+            .expect("authority service should discover")
+            .status()
+            .expect_err("special-file target must fail closed");
+    }
+
+    let symlink_project = prepare_authority_project("authority-symlink");
+    let symlink_path = symlink_project.path().join("AGENTS.md");
+    let external = symlink_project.path().join("external-agents.md");
+    fs::write(&external, "external instructions\n").expect("external target should be written");
+    fs::remove_file(&symlink_path).expect("AGENTS should be removed");
+    if symlink_file(&external, &symlink_path).is_ok() {
+        let symlink_error = PlanningAuthorityService::discover(symlink_project.path())
+            .expect("authority service should discover")
+            .status()
+            .expect_err("symlink target must fail closed");
+        assert_eq!(symlink_error.category(), mino::ErrorCategory::DriftDetected);
+        assert_eq!(
+            fs::read_to_string(external).expect("external target should remain"),
+            "external instructions\n"
+        );
+    }
 }

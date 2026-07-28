@@ -76,6 +76,12 @@ impl ProjectLayout {
         self.mino_directory().join("plan-selection.json")
     }
 
+    /// Returns the planning-authority decision path.
+    #[must_use]
+    pub fn authority(&self) -> PathBuf {
+        self.mino_directory().join("authority.json")
+    }
+
     /// Returns the plan-state directory.
     #[must_use]
     pub fn plans_directory(&self) -> PathBuf {
@@ -128,6 +134,10 @@ impl ProjectLayout {
 
     pub(crate) fn plan_selection_managed() -> ManagedPath {
         managed_path(".mino/plan-selection.json")
+    }
+
+    pub(crate) fn authority_managed() -> ManagedPath {
+        managed_path(".mino/authority.json")
     }
 
     pub(crate) fn plans_directory_managed() -> ManagedPath {

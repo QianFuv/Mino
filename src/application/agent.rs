@@ -16,7 +16,7 @@ use crate::domain::{
 use crate::git::{
     ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitAvailability, GitHeadState,
 };
-use crate::project::ProjectPlanSelection;
+use crate::project::{PlanningAuthorityService, ProjectPlanSelection, authority_status_action};
 use crate::validation::{ValidationReport, validate_plan};
 use crate::{ErrorCategory, MinoError, NextAction};
 
@@ -119,6 +119,10 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("plan.verification.add", true, false),
     ("plan.verification.remove", true, false),
     ("plan.verification.update", true, false),
+    ("project.authority.apply", true, true),
+    ("project.authority.decide", true, true),
+    ("project.authority.propose", false, false),
+    ("project.authority.status", false, false),
     ("project.doctor", false, false),
     ("project.import.legacy", true, false),
     ("project.init", false, false),
@@ -410,45 +414,7 @@ fn build_agent_context_with_selection(
         .filter(|selection| !selection.is_empty())
         .cloned();
     let Some(plan) = active_plan else {
-        if serialized_selection.is_some() {
-            return Ok(AgentContext {
-                kind: AGENT_CONTEXT_KIND,
-                executor_identity: AGENT_EXECUTOR_IDENTITY,
-                project,
-                git,
-                active_plan: None,
-                plan_selection: serialized_selection,
-                allowed_actions: action_ids(&[
-                    "plan.alternatives",
-                    "plan.select",
-                    "plan.diff",
-                    "plan.show",
-                    "plan.archive",
-                ]),
-                blocked_actions: vec![blocked(
-                    "plan.create",
-                    "Live alternatives require an explicit project plan selection",
-                )],
-                standards: Vec::new(),
-                scan_incomplete: false,
-                approval_required: true,
-                next_actions: vec![alternatives_action()],
-            });
-        }
-        return Ok(AgentContext {
-            kind: AGENT_CONTEXT_KIND,
-            executor_identity: AGENT_EXECUTOR_IDENTITY,
-            project,
-            git,
-            active_plan: None,
-            plan_selection: None,
-            allowed_actions: vec!["plan.create".to_owned(), "project.import.legacy".to_owned()],
-            blocked_actions: Vec::new(),
-            standards: Vec::new(),
-            scan_incomplete: false,
-            approval_required: false,
-            next_actions: Vec::new(),
-        });
+        return inactive_plan_context(root, project, git, serialized_selection);
     };
     let active_plan = AgentActivePlan {
         id: plan.id().clone(),
@@ -497,6 +463,88 @@ fn build_agent_context_with_selection(
         scan_incomplete,
         approval_required: guidance.approval_required,
         next_actions: guidance.next_actions,
+    })
+}
+
+fn inactive_plan_context(
+    root: &Path,
+    project: AgentProject,
+    git: Option<AgentGitContext>,
+    plan_selection: Option<ProjectPlanSelection>,
+) -> Result<AgentContext, MinoError> {
+    if plan_selection.is_some() {
+        return Ok(AgentContext {
+            kind: AGENT_CONTEXT_KIND,
+            executor_identity: AGENT_EXECUTOR_IDENTITY,
+            project,
+            git,
+            active_plan: None,
+            plan_selection,
+            allowed_actions: action_ids(&[
+                "plan.alternatives",
+                "plan.select",
+                "plan.diff",
+                "plan.show",
+                "plan.archive",
+            ]),
+            blocked_actions: vec![blocked(
+                "plan.create",
+                "Live alternatives require an explicit project plan selection",
+            )],
+            standards: Vec::new(),
+            scan_incomplete: false,
+            approval_required: true,
+            next_actions: vec![alternatives_action()],
+        });
+    }
+    let authority = PlanningAuthorityService::new(root).status()?;
+    if authority.blocks_durable_planning {
+        let reason = authority
+            .block_reason
+            .as_deref()
+            .unwrap_or("Planning authority is unresolved");
+        let automatic_action = authority
+            .recovery_action
+            .clone()
+            .or_else(|| authority.state_refresh_action.clone());
+        let approval_required = automatic_action.is_none();
+        let next_actions =
+            automatic_action.map_or_else(|| vec![authority_status_action()], |action| vec![action]);
+        return Ok(AgentContext {
+            kind: AGENT_CONTEXT_KIND,
+            executor_identity: AGENT_EXECUTOR_IDENTITY,
+            project,
+            git,
+            active_plan: None,
+            plan_selection: None,
+            allowed_actions: action_ids(&[
+                "project.authority.apply",
+                "project.authority.decide",
+                "project.authority.propose",
+                "project.authority.status",
+                "project.init",
+                "project.import.legacy",
+            ]),
+            blocked_actions: vec![blocked("plan.create", reason)],
+            standards: Vec::new(),
+            scan_incomplete: false,
+            approval_required,
+            next_actions,
+        });
+    }
+    Ok(AgentContext {
+        kind: AGENT_CONTEXT_KIND,
+        executor_identity: AGENT_EXECUTOR_IDENTITY,
+        project,
+        git,
+        active_plan: None,
+        plan_selection: None,
+        allowed_actions: vec!["plan.create".to_owned(), "project.import.legacy".to_owned()],
+        blocked_actions: Vec::new(),
+        standards: Vec::new(),
+        scan_incomplete: false,
+        approval_required: false,
+        next_actions: Vec::new(),
     })
 }
 

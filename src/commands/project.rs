@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::application::plan::{
@@ -11,7 +11,10 @@ use crate::application::plan::{
 use crate::commands::CommandResponse;
 use crate::domain::{PlanStatus, RequestId, Timestamp};
 use crate::integration::IntegrationOptions;
-use crate::project::{self, DoctorFinding, LegacyDocumentKind, LegacyInput};
+use crate::project::{
+    self, DoctorFinding, LegacyDocumentKind, LegacyInput, PlanningAuthorityApplyRequest,
+    PlanningAuthorityDecision, PlanningAuthorityDecisionRequest, PlanningAuthorityService,
+};
 use crate::store::sha256_digest;
 use crate::{ErrorCategory, MinoError, NextAction};
 
@@ -29,6 +32,8 @@ pub(crate) enum ProjectAction {
     Migrate(MigrateArguments),
     /// Import legacy plan authoring into a separate current Draft.
     Import(ImportArguments),
+    /// Inspect or explicitly resolve durable-planning authority.
+    Authority(AuthorityArguments),
 }
 
 #[derive(Clone, Copy, Debug, Args)]
@@ -63,6 +68,86 @@ pub(crate) struct ImportArguments {
 enum ImportAction {
     /// Conservatively import one legacy managed Markdown plan.
     Legacy(LegacyPlanImportArguments),
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct AuthorityArguments {
+    #[command(subcommand)]
+    action: AuthorityAction,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum AuthorityAction {
+    /// Inspect current legacy clauses, decision state, and durable-plan gate.
+    Status,
+    /// Build the exact Planning Documents replacement without writing.
+    Propose,
+    /// Record coexistence or decline against exact source bytes.
+    Decide(AuthorityDecideArguments),
+    /// Apply the exact digest-bound supersession rewrite.
+    Apply(AuthorityApplyArguments),
+}
+
+#[derive(Clone, Debug, Args)]
+struct AuthorityDecideArguments {
+    /// Explicit authority outcome.
+    #[arg(long, value_enum)]
+    decision: AuthorityDecisionArgument,
+    /// Exact current AGENTS.md digest returned by status.
+    #[arg(long)]
+    source_digest: String,
+    /// Required authority revision.
+    #[arg(long)]
+    expect_revision: u64,
+    /// Idempotency UUID for this exact decision.
+    #[arg(long)]
+    request_id: String,
+    /// Auditable external approval reference.
+    #[arg(long)]
+    approval_ref: String,
+    /// Actor recorded in authority state.
+    #[arg(long, default_value = "user")]
+    actor: String,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AuthorityDecisionArgument {
+    CoexistenceApproved,
+    Declined,
+}
+
+impl From<AuthorityDecisionArgument> for PlanningAuthorityDecision {
+    fn from(value: AuthorityDecisionArgument) -> Self {
+        match value {
+            AuthorityDecisionArgument::CoexistenceApproved => Self::CoexistenceApproved,
+            AuthorityDecisionArgument::Declined => Self::Declined,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Args)]
+struct AuthorityApplyArguments {
+    /// Explicitly confirm replacement of the detected Planning Documents section.
+    #[arg(long)]
+    apply_rewrite: bool,
+    /// Exact current AGENTS.md digest returned by proposal.
+    #[arg(long)]
+    source_digest: String,
+    /// Exact complete replacement digest returned by proposal.
+    #[arg(long)]
+    replacement_digest: String,
+    /// Required authority revision.
+    #[arg(long)]
+    expect_revision: u64,
+    /// Idempotency UUID for this exact apply.
+    #[arg(long)]
+    request_id: String,
+    /// Auditable external approval reference.
+    #[arg(long)]
+    approval_ref: String,
+    /// Actor recorded in authority state.
+    #[arg(long, default_value = "user")]
+    actor: String,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -171,6 +256,140 @@ pub(crate) fn execute(start: &Path, action: ProjectAction) -> Result<CommandResp
         ProjectAction::Import(arguments) => match arguments.action {
             ImportAction::Legacy(arguments) => import_legacy_plan(start, arguments),
         },
+        ProjectAction::Authority(arguments) => execute_authority(start, arguments.action),
+    }
+}
+
+fn execute_authority(start: &Path, action: AuthorityAction) -> Result<CommandResponse, MinoError> {
+    let service = PlanningAuthorityService::discover(start)?;
+    match action {
+        AuthorityAction::Status => {
+            let status = service.status()?;
+            let missing = status.block_reason.iter().cloned().collect();
+            let next_actions = status
+                .recovery_action
+                .clone()
+                .or_else(|| status.state_refresh_action.clone())
+                .into_iter()
+                .collect();
+            response(
+                "Planning authority inspected without mutation.",
+                !status.blocks_durable_planning,
+                status,
+                missing,
+                next_actions,
+            )
+        }
+        AuthorityAction::Propose => response(
+            "Planning authority rewrite proposed without mutation.",
+            false,
+            service.propose()?,
+            vec!["planning_authority_decision".to_owned()],
+            Vec::new(),
+        ),
+        AuthorityAction::Decide(arguments) => authority_decide(&service, arguments),
+        AuthorityAction::Apply(arguments) => authority_apply(&service, arguments),
+    }
+}
+
+fn authority_decide(
+    service: &PlanningAuthorityService,
+    arguments: AuthorityDecideArguments,
+) -> Result<CommandResponse, MinoError> {
+    let request_id = RequestId::parse(&arguments.request_id)
+        .map_err(|error| validation_error(error.to_string()))?;
+    let decision: PlanningAuthorityDecision = arguments.decision.into();
+    let command = vec![
+        "mino".to_owned(),
+        "project".to_owned(),
+        "authority".to_owned(),
+        "decide".to_owned(),
+        "--decision".to_owned(),
+        authority_decision_name(decision).to_owned(),
+        "--source-digest".to_owned(),
+        arguments.source_digest.clone(),
+        "--expect-revision".to_owned(),
+        arguments.expect_revision.to_string(),
+        "--request-id".to_owned(),
+        request_id.to_string(),
+        "--approval-ref".to_owned(),
+        arguments.approval_ref.clone(),
+        "--actor".to_owned(),
+        arguments.actor.clone(),
+    ];
+    let report = service.decide(PlanningAuthorityDecisionRequest {
+        expected_revision: arguments.expect_revision,
+        expected_source_digest: arguments.source_digest,
+        decision,
+        request_id,
+        actor: arguments.actor,
+        approval_reference: arguments.approval_ref,
+        command,
+        decided_at: Timestamp::now_utc(),
+    })?;
+    let complete = !report.status.blocks_durable_planning;
+    let missing = report.status.block_reason.iter().cloned().collect();
+    response(
+        "Planning authority decision recorded.",
+        complete,
+        report,
+        missing,
+        Vec::new(),
+    )
+}
+
+fn authority_apply(
+    service: &PlanningAuthorityService,
+    arguments: AuthorityApplyArguments,
+) -> Result<CommandResponse, MinoError> {
+    let request_id = RequestId::parse(&arguments.request_id)
+        .map_err(|error| validation_error(error.to_string()))?;
+    let command = vec![
+        "mino".to_owned(),
+        "project".to_owned(),
+        "authority".to_owned(),
+        "apply".to_owned(),
+        "--apply-rewrite".to_owned(),
+        "--source-digest".to_owned(),
+        arguments.source_digest.clone(),
+        "--replacement-digest".to_owned(),
+        arguments.replacement_digest.clone(),
+        "--expect-revision".to_owned(),
+        arguments.expect_revision.to_string(),
+        "--request-id".to_owned(),
+        request_id.to_string(),
+        "--approval-ref".to_owned(),
+        arguments.approval_ref.clone(),
+        "--actor".to_owned(),
+        arguments.actor.clone(),
+    ];
+    let report = service.apply(&PlanningAuthorityApplyRequest {
+        expected_revision: arguments.expect_revision,
+        expected_source_digest: arguments.source_digest,
+        expected_replacement_digest: arguments.replacement_digest,
+        is_confirmed: arguments.apply_rewrite,
+        request_id,
+        actor: arguments.actor,
+        approval_reference: arguments.approval_ref,
+        command,
+        decided_at: Timestamp::now_utc(),
+    })?;
+    response(
+        "Legacy Planning Documents section superseded through a guarded rewrite.",
+        true,
+        report,
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+fn authority_decision_name(decision: PlanningAuthorityDecision) -> &'static str {
+    match decision {
+        PlanningAuthorityDecision::CoexistenceApproved => "coexistence-approved",
+        PlanningAuthorityDecision::Declined => "declined",
+        PlanningAuthorityDecision::Pending | PlanningAuthorityDecision::Superseded => {
+            unreachable!("CLI accepts only explicit decide outcomes")
+        }
     }
 }
 
@@ -351,6 +570,15 @@ fn finding_codes(findings: &[DoctorFinding]) -> Vec<String> {
 }
 
 fn integration_next_actions(findings: &[DoctorFinding]) -> Vec<NextAction> {
+    if has_finding(
+        findings,
+        &[
+            "legacy_planning_authority_conflict",
+            "mino_durable_planning_declined",
+        ],
+    ) {
+        return vec![project::authority_status_action()];
+    }
     let should_install_skill = has_finding(findings, &["mino_skill_missing", "mino_skill_drift"]);
     let should_apply_agents =
         has_finding(findings, &["agents_block_missing", "agents_block_drift"]);

@@ -13,11 +13,11 @@ use crate::store::PlanStore;
 use crate::{ErrorCategory, MinoError};
 use serde::Serialize;
 
-use super::ProjectPlanSelectionStore;
 use super::config::{
     PROTOCOL_LOCK_VERSION, ProjectConfig, ProjectLayout, ProtocolLock, STANDARDS_LOCK_VERSION,
     StandardsLock, parse_managed_toml,
 };
+use super::{PlanningAuthorityService, ProjectPlanSelectionStore};
 
 const MAX_PLAN_STATE_BYTES: u64 = 8 * 1_024 * 1_024;
 
@@ -125,6 +125,7 @@ pub fn diagnose(layout: &ProjectLayout) -> Result<DoctorReport, MinoError> {
         inspect_plan_selection(layout, &filesystem, &mut findings);
     }
     inspect_integrations(layout, &mut findings)?;
+    inspect_planning_authority(layout, &mut findings);
     findings.sort_by(|left, right| {
         left.code
             .cmp(&right.code)
@@ -134,6 +135,35 @@ pub fn diagnose(layout: &ProjectLayout) -> Result<DoctorReport, MinoError> {
         root: layout.root().to_path_buf(),
         findings,
     })
+}
+
+fn inspect_planning_authority(layout: &ProjectLayout, findings: &mut Vec<DoctorFinding>) {
+    match PlanningAuthorityService::new(layout.root()).status() {
+        Ok(status) if status.blocks_durable_planning => {
+            let is_declined =
+                status.block_reason.as_deref() == Some("mino_durable_planning_declined");
+            findings.push(DoctorFinding::new(
+                if is_declined {
+                    "mino_durable_planning_declined"
+                } else {
+                    "legacy_planning_authority_conflict"
+                },
+                FindingSeverity::Error,
+                status.block_reason.map_or_else(
+                    || "Durable planning authority is unresolved".to_owned(),
+                    |reason| format!("Durable planning authority is blocked: {reason}"),
+                ),
+                Some(layout.agents_file()),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => findings.push(DoctorFinding::new(
+            "planning_authority_unreadable",
+            FindingSeverity::Error,
+            error.to_string(),
+            Some(layout.authority()),
+        )),
+    }
 }
 
 fn inspect_plan_selection(

@@ -276,6 +276,25 @@ fn current_protocol_status_plan_validation_and_noop_migration_are_stable() {
         "codex".to_owned(),
     ]);
     parse_success(&run_mino(&apply_arguments));
+    let mut setup_arguments = base_arguments(&project);
+    setup_arguments.extend([
+        "git".to_owned(),
+        "setup".to_owned(),
+        "decide".to_owned(),
+        "--plan".to_owned(),
+        plan_id.clone(),
+        "--decision".to_owned(),
+        "continue-without-git".to_owned(),
+        "--approval-ref".to_owned(),
+        "test:protocol-compatibility".to_owned(),
+        "--expect-revision".to_owned(),
+        "2".to_owned(),
+        "--request-id".to_owned(),
+        request_id(3),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+    ]);
+    parse_success(&run_mino(&setup_arguments));
     let mut validate_arguments = base_arguments(&project);
     validate_arguments.extend([
         "plan".to_owned(),
@@ -286,12 +305,12 @@ fn current_protocol_status_plan_validation_and_noop_migration_are_stable() {
     assert_eq!(parse_success(&run_mino(&validate_arguments))["valid"], true);
 
     let before = plan_files(&project, &plan_id);
-    let migrate = migrate_arguments(&project, &plan_id, 2, 3, CURRENT_PROTOCOL_VERSION);
+    let migrate = migrate_arguments(&project, &plan_id, 3, 4, CURRENT_PROTOCOL_VERSION);
     let first = parse_success(&run_mino(&migrate));
     let second = parse_success(&run_mino(&migrate));
     assert_eq!(first, second);
     assert_eq!(first["disposition"], "already_current");
-    assert_eq!(first["revision"], 2);
+    assert_eq!(first["revision"], 3);
     assert_eq!(plan_files(&project, &plan_id), before);
 }
 
@@ -363,14 +382,22 @@ fn legacy_analysis_maps_every_heading_and_preserves_exact_sources() {
     let second = analyze_legacy(&inputs).expect("repeated analysis should succeed");
     assert_eq!(first, second);
     assert_eq!(first.sources.len(), 3);
-    assert_eq!(first.mappings.len(), 15);
+    assert_eq!(first.mappings.len(), 16);
     assert!(!first.applied);
     assert!(first.deleted_sources.is_empty());
     assert_eq!(first.proposed_changes.len(), 3);
     assert!(
         first.proposed_changes[0]
             .proposal
-            .contains("<!-- BEGIN MINO MANAGED -->")
+            .contains("Mino supersedes the legacy template and execution workflow")
+    );
+    assert_eq!(
+        first
+            .mappings
+            .iter()
+            .filter(|mapping| mapping.heading == "Planning Documents")
+            .count(),
+        1
     );
     let codes = first
         .findings
