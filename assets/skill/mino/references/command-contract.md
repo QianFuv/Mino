@@ -222,6 +222,12 @@ the directional Added/Removed/Changed/Moved entries from `mino.plan-diff/v1`.
 There is no plan merge command. A plan fork is not a Git branch and does not
 authorize `git branch create`.
 
+When a selected plan has live alternatives, Agent context keeps the selected
+plan's lifecycle `next_actions` and `approval_required` value. Alternatives add
+`plan.alternatives`, `plan.select`, `plan.diff`, and `plan.archive` as optional
+allowed actions. They become blocking only when multiple live candidates exist
+without a selected plan.
+
 After the user explicitly selects an alternative, deactivate an unselected plan
 without deletion using:
 

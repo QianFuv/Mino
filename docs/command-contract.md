@@ -124,7 +124,7 @@ Material apply 会清除计划批准与 Git consent，重置任务、检查和 c
 
 fork 只读取经过审计的不可变 source snapshot。新计划保留原始需求、范围、决策、标准、任务、检查和提交意图，但清除 lifecycle、审批、amendment、review、evidence、result、execution extension、Git readiness、final outcome 与 archive state。`plan diff` 只比较 authored values；Mino 不提供 plan merge。fork 后原 selected plan 保持不变，新 Draft 进入 alternatives；选中另一个方案前不能归档当前 selected plan。
 
-普通 `plan create` 和 `project import legacy` 在 Git 与非 Git 项目中都拒绝已有 live candidate。显式 `plan fork` 可以为比较创建并存候选；`agent context`/`agent next` 返回 `plan_selection`、候选操作和审批边界，不再因多个方案失败。旧项目没有 selection 文件且只有一个 live plan 时会虚拟选择它；有多个 live plan 时保持 revision 0 且要求显式 `plan select`。Git binding 只描述 worktree identity，不参与项目方案选择。
+普通 `plan create` 和 `project import legacy` 在 Git 与非 Git 项目中都拒绝已有 live candidate。显式 `plan fork` 可以为比较创建并存候选；`agent context`/`agent next` 返回 `plan_selection`、候选操作和审批边界，不再因多个方案失败。已有 selected plan 时，alternatives 只增加 `plan.alternatives`、`plan.select`、`plan.diff` 和 `plan.archive` 可选操作，不替换 selected plan 生命周期的 `next_actions`，也不单独触发 `approval_required`；只有多个 live candidate 且没有 selected plan 时才阻塞并要求显式 `plan select`。旧项目没有 selection 文件且只有一个 live plan 时会虚拟选择它；有多个 live plan 时保持 revision 0。Git binding 只描述 worktree identity，不参与项目方案选择。
 
 ### 标准检测、目录与冲突
 

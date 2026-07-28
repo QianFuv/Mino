@@ -463,7 +463,6 @@ fn build_agent_context_with_selection(
         .as_ref()
         .is_some_and(|selection| !selection.alternatives.is_empty());
     let mut allowed_actions = guidance.allowed_actions;
-    let mut next_actions = guidance.next_actions;
     if has_alternatives {
         for action in [
             "plan.alternatives",
@@ -475,7 +474,6 @@ fn build_agent_context_with_selection(
                 allowed_actions.push(action.to_owned());
             }
         }
-        next_actions = vec![alternatives_action()];
     }
     Ok(AgentContext {
         kind: AGENT_CONTEXT_KIND,
@@ -488,8 +486,8 @@ fn build_agent_context_with_selection(
         blocked_actions: guidance.blocked_actions,
         standards,
         scan_incomplete,
-        approval_required: guidance.approval_required || has_alternatives,
-        next_actions,
+        approval_required: guidance.approval_required,
+        next_actions: guidance.next_actions,
     })
 }
 

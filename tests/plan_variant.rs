@@ -320,6 +320,124 @@ fn stored_draft(project: &TestProject, id: &str, name: &str, number: u64) -> Pla
     plan
 }
 
+#[allow(clippy::too_many_lines)]
+fn stored_executable_plan(
+    project: &TestProject,
+    name: &str,
+    number: u64,
+    should_start: bool,
+) -> Plan {
+    let request_path = project.path().join(format!(".mino/request-{number}.md"));
+    let input_path = project.path().join(format!(".mino/plan-{number}.yaml"));
+    fs::write(&request_path, format!("Execute {name}.\n"))
+        .expect("request input should be written");
+    fs::write(
+        &input_path,
+        "metadata:\n  priority: P1\n  area: agent/context\n  owner: codex\nsummary: Keep lifecycle guidance while alternatives remain optional.\nscope:\n  goal: Preserve the selected plan lifecycle.\n  deliverables:\n    - Lifecycle context\n  in_scope:\n    - Agent guidance\n  out_of_scope:\n    - Plan merging\napproach: Expose alternatives without replacing lifecycle actions.\ninterfaces: Selected lifecycle to optional plan actions.\ntasks:\n  - id: T1\n    title: Preserve selected guidance\n    depends_on: []\n    steps:\n      - Inspect the selected lifecycle\n    files:\n      - path: notes.txt\n        change: Modify\n        reason: Own the lifecycle fixture\n    acceptance_criteria:\n      - id: T1-A1\n        description: Selected guidance remains canonical\n    verification:\n      - id: T1-V1\n        command: [cargo, test]\n        cwd: .\n        expected_exit_code: 0\n        required: true\nverification_plan:\n  - id: GLOBAL-V1\n    command: [cargo, test]\n    cwd: .\n    expected_exit_code: 0\n    required: true\n",
+    )
+    .expect("plan input should be written");
+    let create_request = request_id(number).to_string();
+    let request_path = request_path.to_string_lossy();
+    let created = parse_success(&run_mino(
+        project,
+        &[
+            "plan",
+            "create",
+            "--name",
+            name,
+            "--trigger",
+            "durable",
+            "--request-file",
+            &request_path,
+            "--request-id",
+            &create_request,
+            "--actor",
+            "codex",
+        ],
+    ));
+    let plan_id = created["plan_id"]
+        .as_str()
+        .expect("created plan ID should serialize");
+    let apply_request = request_id(number + 1).to_string();
+    let input_path = input_path.to_string_lossy();
+    parse_success(&run_mino(
+        project,
+        &[
+            "plan",
+            "apply",
+            "--plan",
+            plan_id,
+            "--file",
+            &input_path,
+            "--expect-revision",
+            "1",
+            "--request-id",
+            &apply_request,
+            "--actor",
+            "codex",
+        ],
+    ));
+    let finalize_request = request_id(number + 2).to_string();
+    parse_success(&run_mino(
+        project,
+        &[
+            "plan",
+            "finalize",
+            "--plan",
+            plan_id,
+            "--expect-revision",
+            "2",
+            "--request-id",
+            &finalize_request,
+            "--actor",
+            "codex",
+        ],
+    ));
+    let approve_request = request_id(number + 3).to_string();
+    parse_success(&run_mino(
+        project,
+        &[
+            "plan",
+            "approve",
+            "--plan",
+            plan_id,
+            "--expect-revision",
+            "3",
+            "--request-id",
+            &approve_request,
+            "--actor",
+            "codex",
+            "--approval-ref",
+            "chat:lifecycle-approved",
+            "--git-flow-consent",
+            "disabled",
+        ],
+    ));
+    if should_start {
+        let start_request = request_id(number + 4).to_string();
+        parse_success(&run_mino(
+            project,
+            &[
+                "exec",
+                "start",
+                "--plan",
+                plan_id,
+                "--task",
+                "T1",
+                "--expect-revision",
+                "4",
+                "--request-id",
+                &start_request,
+                "--actor",
+                "codex",
+            ],
+        ));
+    }
+    PlanStore::new(project.path())
+        .load_plan(&PlanId::parse(plan_id).expect("created plan ID should parse"))
+        .expect("current plan should load")
+}
+
 fn write_current_projection(root: &Path, plan: &Plan, prior: Option<&Plan>) {
     let rendered = render_plan(plan).expect("plan should render");
     let prior = prior.map(|plan| render_plan(plan).expect("prior plan should render"));
@@ -715,10 +833,15 @@ fn cli_exposes_the_complete_fork_diff_archive_and_active_selection_sequence() {
         comparison_context["plan_selection"]["alternatives"],
         serde_json::json!([fork_id])
     );
-    assert_eq!(comparison_context["approval_required"], true);
+    assert_eq!(comparison_context["approval_required"], false);
     assert_eq!(
         comparison_context["next_actions"][0]["id"],
-        "plan.alternatives"
+        "plan.summary.set"
+    );
+    assert!(
+        comparison_context["allowed_actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().any(|action| action == "plan.alternatives"))
     );
 
     let selected_archive = parse_failure(
@@ -794,6 +917,8 @@ fn cli_exposes_the_complete_fork_diff_archive_and_active_selection_sequence() {
     let context = parse_success(&run_mino(&project, &["agent", "context"]));
     assert_eq!(context["kind"], "mino.agent-context/v1");
     assert_eq!(context["active_plan"]["id"], fork_id);
+    assert_eq!(context["approval_required"], false);
+    assert_eq!(context["next_actions"][0]["id"], "plan.summary.set");
     let shown = parse_success(&run_mino(&project, &["plan", "show", "--plan", &source_id]));
     assert_eq!(
         shown["archive"]["approval_reference"],
@@ -879,6 +1004,73 @@ fn legacy_multiple_candidates_remain_visible_until_explicit_selection() {
         selected_context["plan_selection"]["alternatives"],
         serde_json::json!([first.id()])
     );
+    assert_eq!(selected_context["approval_required"], false);
+    assert_eq!(
+        selected_context["next_actions"][0]["id"],
+        "plan.summary.set"
+    );
+    assert!(
+        selected_context["allowed_actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().any(|action| action == "plan.alternatives"))
+    );
+}
+
+#[test]
+fn selected_ready_and_in_progress_plans_keep_their_lifecycle_guidance() {
+    for (label, number, should_start, status, next_action) in [
+        ("selected-ready", 500, false, "Ready", "exec.start"),
+        (
+            "selected-in-progress",
+            600,
+            true,
+            "In Progress",
+            "exec.check.run",
+        ),
+    ] {
+        let project = TestProject::new(label);
+        let source = stored_executable_plan(&project, label, number, should_start);
+        let forked = PlanVariantService::discover(project.path())
+            .expect("variant service should discover")
+            .fork(ForkPlanRequest {
+                source_plan_id: source.id().clone(),
+                from_revision: source.revision(),
+                name: format!("{label} alternative"),
+                reason: "Keep the selected lifecycle canonical".to_owned(),
+                request_id: request_id(number + 10),
+                actor: "codex".to_owned(),
+                command: command(&["mino", "plan", "fork"]),
+                forked_at: timestamp(20),
+            })
+            .expect("alternative should fork");
+        assert_eq!(
+            forked.plan_selection.selected_plan.as_ref(),
+            Some(source.id())
+        );
+
+        let context = parse_success(&run_mino(&project, &["agent", "context"]));
+        assert_eq!(context["active_plan"]["id"], source.id().as_str());
+        assert_eq!(context["active_plan"]["status"], status);
+        assert_eq!(context["approval_required"], false);
+        assert_eq!(context["next_actions"][0]["id"], next_action);
+        let actions = context["allowed_actions"]
+            .as_array()
+            .expect("allowed actions should serialize");
+        for optional_action in [
+            "plan.alternatives",
+            "plan.select",
+            "plan.diff",
+            "plan.archive",
+        ] {
+            assert!(actions.iter().any(|action| action == optional_action));
+        }
+        assert_eq!(
+            context["plan_selection"]["alternatives"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+    }
 }
 
 #[test]
