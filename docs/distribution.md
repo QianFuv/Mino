@@ -65,6 +65,16 @@ Windows 使用 `target/release/mino.exe` 与 `x86_64-pc-windows-msvc`。
 
 `.github/workflows/release-artifacts.yml` 为每个 target 分配原生 runner，执行 locked dependency fetch、source contract test、release build、artifact assembly 和 isolated smoke。workflow 只有 repository read permission，不含 upload、release、publish、secret 或 marketplace step。
 
+## Release lifecycle 证据层级
+
+二进制生命周期日志使用三个互不混淆的 profile：
+
+- `release-installed`：普通三平台 CI 通过 `cargo install --profile release --locked --offline` 得到的独立安装 binary；
+- `release-artifact`：五目标 workflow 在验证 manifest 与 `SHA256SUMS` 后，从最终 ZIP 解压的 `mino/bin/mino[.exe]`；
+- `test-harness-artifact`：Rust integration test 用 `CARGO_BIN_EXE_mino` 临时组装的包，只证明打包路径；即使 test harness 以 release 编译，也不冒充外部安装或最终发布产物。
+
+`e2e_v0_1` 会规范化并输出 external binary 的绝对路径、声明 profile 与 SHA-256，在每次执行之间复核同一路径和摘要。`release-artifact` 还必须通过 `MINO_E2E_EXPECTED_DIGEST` 携带 manifest 中的 exact executable digest；profile 缺失、未知、摘要不匹配或运行间 binary 改变都会在生命周期证明前失败。
+
 ## 产物结构与可复现性
 
 每个 target 目录恰好包含三个文件：
@@ -100,6 +110,8 @@ manifest schema 为 `mino.plugin-artifact-manifest/v1`。
 5. 运行隔离 smoke probes。
 
 xtask 会拒绝 absolute、parent、duplicate、unsorted、symlink、special、missing、extra、changed、compressed、timestamp-drifted、mode-drifted 或 digest-drifted entry。
+
+artifact workflow 不把 xtask 的有限 smoke 当作生命周期证明。它再次核对 `SHA256SUMS` 中的 archive/manifest 摘要、manifest 的 archive identity 和 binary entry digest，解压最终 ZIP，设置 `MINO_E2E_PROFILE=release-artifact` 与 `MINO_E2E_EXPECTED_DIGEST`，再让该绝对 binary 完成 `e2e_v0_1` 全流程。日志同时记录 archive digest 与 executable path/profile/digest。
 
 ## 隔离冒烟与安装边界
 

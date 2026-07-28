@@ -11,7 +11,8 @@ use mino::application::execution::ExecutionService;
 use mino::application::monitor::MonitorBounds;
 use mino::application::plan::PlanMutationRequest;
 use mino::domain::{
-    AcceptanceCriterion, Approval, CheckId, CriterionId, GitFlowConsent, GitReadiness, Plan,
+    AcceptanceCriterion, Approval, CheckId, CriterionId, GitFlowConsent, GitReadiness,
+    GitReadinessObservation, GitReadinessState, GitRepositoryMode, GitSetupDecision, Plan,
     PlanDraftSeed, PlanId, RequestId, Task, TaskId, Timestamp, VerificationCheck,
 };
 use mino::project::initialize;
@@ -79,7 +80,7 @@ fn create_started_plan(root: &Path) -> u64 {
         0,
         true,
     );
-    let plan = Plan::from_draft_seed(
+    let mut plan = Plan::from_draft_seed(
         PlanDraftSeed {
             id: plan_id(),
             name: "Scheduled handoff contract".to_owned(),
@@ -87,12 +88,21 @@ fn create_started_plan(root: &Path) -> u64 {
             original_request: "Emit an inert complete scheduled task handoff.".to_owned(),
             branch: None,
             markdown_path: projection_relative().to_owned(),
-            git_readiness: GitReadiness::detected("Present", "Clean", None, None, "Clean", true),
+            git_readiness: GitReadiness::detected(
+                "Missing",
+                "Not Applicable",
+                None,
+                None,
+                "No Git repository",
+                false,
+            ),
             standards: Vec::new(),
             verification_plan: vec![global],
         },
         timestamp(0),
     );
+    plan.record_initial_git_readiness(&non_git_readiness_state())
+        .expect("initial Git readiness should record");
     let store = PlanStore::new(root);
     store
         .create_plan(
@@ -130,7 +140,7 @@ fn create_started_plan(root: &Path) -> u64 {
             "user",
             "chat:schedule-approval",
             timestamp(4),
-            GitFlowConsent::Approved,
+            GitFlowConsent::Disabled,
         ))
     });
     let approved = store
@@ -154,6 +164,32 @@ fn create_started_plan(root: &Path) -> u64 {
         )
         .expect("task should start")
         .revision
+}
+
+fn non_git_readiness_state() -> GitReadinessState {
+    let mut state = GitReadinessState::new(
+        GitReadinessObservation::new(
+            GitRepositoryMode::NotRepository,
+            None,
+            None,
+            None,
+            None,
+            sha256_digest(b"[]"),
+            false,
+            timestamp(0),
+        )
+        .expect("non-Git observation should validate"),
+    )
+    .expect("non-Git readiness should validate");
+    state
+        .decide_setup(
+            GitSetupDecision::ContinueWithoutGit,
+            "user".to_owned(),
+            "chat:continue-without-git".to_owned(),
+            timestamp(0),
+        )
+        .expect("non-Git setup decision should record");
+    state
 }
 
 fn commit<F>(

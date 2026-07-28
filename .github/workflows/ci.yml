@@ -48,17 +48,19 @@ jobs:
       - name: Run Miri library tests
         run: cargo +nightly miri test --lib
       - name: Install Mino offline
-        run: cargo install --path . --root "${{ runner.temp }}/mino-install" --locked --offline --debug
+        run: cargo install --path . --root "${{ runner.temp }}/mino-install" --locked --offline --profile release
       - name: Verify installed binary
         shell: pwsh
         run: '& "${{ runner.temp }}/mino-install/bin/${{ matrix.binary }}" --version'
       - name: Run installed-binary lifecycle
         env:
           MINO_E2E_BINARY: ${{ runner.temp }}/mino-install/bin/${{ matrix.binary }}
-        run: cargo test --offline --test e2e_v0_1 -- --test-threads=1
+          MINO_E2E_PROFILE: release-installed
+        run: cargo test --offline --test e2e_v0_1 -- --test-threads=1 --nocapture
       - name: Run all tests
         env:
           MINO_E2E_BINARY: ${{ runner.temp }}/mino-install/bin/${{ matrix.binary }}
+          MINO_E2E_PROFILE: release-installed
         run: cargo test --release --offline --all-targets --all-features
       - name: Build warning-free documentation
         env:

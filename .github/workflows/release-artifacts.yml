@@ -9,6 +9,9 @@ on:
       - "plugins/mino/**"
       - "src/distribution/**"
       - "src/bin/xtask.rs"
+      - "tests/e2e_v0_1.rs"
+      - "tests/e2e_v0_3.rs"
+      - "tests/plugin_contract.rs"
       - "Cargo.toml"
       - "Cargo.lock"
       - "LICENSE-*"
@@ -64,3 +67,63 @@ jobs:
           --binary "${{ matrix.binary }}"
           --target "${{ matrix.target }}"
           --output dist
+      - name: Validate checksums and extract final archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $targetDirectory = Join-Path "dist" "${{ matrix.target }}"
+          $manifestPath = Join-Path $targetDirectory "artifact-manifest.json"
+          $checksumsPath = Join-Path $targetDirectory "SHA256SUMS"
+          $archives = @(Get-ChildItem -LiteralPath $targetDirectory -Filter "*.zip" -File)
+          if ($archives.Count -ne 1) {
+            throw "Expected exactly one final ZIP in $targetDirectory"
+          }
+          $archive = $archives[0]
+          $checksums = @{}
+          foreach ($line in Get-Content -LiteralPath $checksumsPath) {
+            if ($line -notmatch '^([0-9a-f]{64})  (.+)$') {
+              throw "Non-canonical SHA256SUMS line: $line"
+            }
+            $checksums[$Matches[2]] = $Matches[1]
+          }
+          foreach ($artifactPath in @($archive.FullName, $manifestPath)) {
+            $artifactName = Split-Path -Leaf $artifactPath
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $artifactPath).Hash.ToLowerInvariant()
+            if (-not $checksums.ContainsKey($artifactName) -or $checksums[$artifactName] -ne $actual) {
+              throw "Checksum mismatch for $artifactName"
+            }
+          }
+          $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+          $archiveDigest = "sha256:" + (Get-FileHash -Algorithm SHA256 -LiteralPath $archive.FullName).Hash.ToLowerInvariant()
+          if ($manifest.archive.file -ne $archive.Name -or $manifest.archive.digest -ne $archiveDigest) {
+            throw "Manifest archive identity does not match the final ZIP"
+          }
+          $extractRoot = Join-Path $env:RUNNER_TEMP "mino-final-${{ matrix.target }}"
+          if (Test-Path -LiteralPath $extractRoot) {
+            throw "Final archive extraction root already exists: $extractRoot"
+          }
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $extractRoot
+          $binaryName = Split-Path -Leaf "${{ matrix.binary }}"
+          $relativeBinary = "mino/bin/$binaryName"
+          $binaryPath = Join-Path (Join-Path (Join-Path $extractRoot "mino") "bin") $binaryName
+          $binaryPath = (Resolve-Path -LiteralPath $binaryPath).Path
+          if (-not $IsWindows) {
+            & chmod 755 $binaryPath
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to make the archived binary executable"
+            }
+          }
+          $entries = @($manifest.files | Where-Object { $_.path -eq $relativeBinary })
+          if ($entries.Count -ne 1) {
+            throw "Manifest must contain exactly one $relativeBinary entry"
+          }
+          $binaryDigest = "sha256:" + (Get-FileHash -Algorithm SHA256 -LiteralPath $binaryPath).Hash.ToLowerInvariant()
+          if ($entries[0].digest -ne $binaryDigest) {
+            throw "Extracted binary digest does not match the archive manifest"
+          }
+          Add-Content -Encoding utf8 -LiteralPath $env:GITHUB_ENV -Value "MINO_E2E_BINARY=$binaryPath"
+          Add-Content -Encoding utf8 -LiteralPath $env:GITHUB_ENV -Value "MINO_E2E_PROFILE=release-artifact"
+          Add-Content -Encoding utf8 -LiteralPath $env:GITHUB_ENV -Value "MINO_E2E_EXPECTED_DIGEST=$binaryDigest"
+          Write-Output "mino-archive-proof archive=$archiveDigest path=$binaryPath profile=release-artifact digest=$binaryDigest"
+      - name: Run final-archive lifecycle
+        run: cargo test --release --locked --offline --test e2e_v0_1 -- --test-threads=1 --nocapture

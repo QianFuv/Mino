@@ -9,7 +9,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -25,6 +25,19 @@ use mino::store::{
 use serde_json::Value;
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+static BINARY_PROOF: OnceLock<BinaryProof> = OnceLock::new();
+
+const E2E_PROFILE_ENVIRONMENT: &str = "MINO_E2E_PROFILE";
+const E2E_EXPECTED_DIGEST_ENVIRONMENT: &str = "MINO_E2E_EXPECTED_DIGEST";
+const RELEASE_INSTALLED_PROFILE: &str = "release-installed";
+const RELEASE_ARTIFACT_PROFILE: &str = "release-artifact";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BinaryProof {
+    path: PathBuf,
+    profile: String,
+    digest: String,
+}
 
 struct TestWorkspace {
     root: PathBuf,
@@ -149,6 +162,13 @@ fn agent_loop_follows_returned_binding_and_commit_actions_through_the_v0_1_lifec
     let plan_id = author_and_approve_plan(&binary, &workspace.project);
     execute_plan_through_review(&binary, &workspace.project, &plan_id);
     verify_final_state(&binary, &workspace.project, &plan_id);
+    verify_binary_identity(
+        BINARY_PROOF
+            .get()
+            .expect("installed binary proof should remain registered"),
+        &binary,
+    )
+    .expect("installed binary identity should remain unchanged");
     assert!(server.request_count() >= 4);
     assert_eq!(git_status(source_root), source_status);
 }
@@ -163,29 +183,116 @@ fn catalog_package_digest_normalizes_line_endings() {
     assert_eq!(lf, cr);
 }
 
+#[test]
+fn binary_proof_rejects_undeclared_profiles_digest_drift_and_changed_bytes() {
+    let workspace = TestWorkspace::new();
+    let binary = workspace.root.join("proof binary");
+    fs::write(&binary, b"first binary bytes").expect("proof binary should be written");
+    assert!(create_binary_proof(&binary, "debug", None).is_err());
+    assert!(create_binary_proof(&binary, RELEASE_ARTIFACT_PROFILE, None).is_err());
+    assert!(
+        create_binary_proof(
+            &binary,
+            RELEASE_ARTIFACT_PROFILE,
+            Some(&format!("sha256:{}", "0".repeat(64)))
+        )
+        .is_err()
+    );
+    let proof = create_binary_proof(&binary, RELEASE_INSTALLED_PROFILE, None)
+        .expect("declared installed proof should be accepted");
+    verify_binary_identity(&proof, &binary).expect("unchanged proof should verify");
+    fs::write(&binary, b"changed binary bytes").expect("proof binary should change");
+    assert!(verify_binary_identity(&proof, &binary).is_err());
+}
+
 fn install_binary(workspace: &TestWorkspace, source_root: &Path) -> PathBuf {
-    if let Some(configured) = env::var_os("MINO_E2E_BINARY") {
-        let binary = PathBuf::from(configured);
-        assert!(binary.is_file(), "configured E2E binary must exist");
-        return binary;
+    let (binary, profile, expected_digest) =
+        if let Some(configured) = env::var_os("MINO_E2E_BINARY") {
+            let profile = env::var(E2E_PROFILE_ENVIRONMENT)
+                .expect("configured E2E binary requires MINO_E2E_PROFILE");
+            let expected_digest = env::var(E2E_EXPECTED_DIGEST_ENVIRONMENT).ok();
+            (PathBuf::from(configured), profile, expected_digest)
+        } else {
+            let target_directory = workspace.root.join("cargo install target");
+            let output = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+                .arg("install")
+                .arg("--path")
+                .arg(source_root)
+                .arg("--root")
+                .arg(&workspace.install_root)
+                .args(["--locked", "--offline", "--profile", "release"])
+                .env("CARGO_TARGET_DIR", target_directory)
+                .stdin(Stdio::null())
+                .output()
+                .expect("cargo install should start");
+            assert_successful_process(&output, "cargo install --profile release");
+            (
+                workspace.install_root.join("bin").join(if cfg!(windows) {
+                    "mino.exe"
+                } else {
+                    "mino"
+                }),
+                RELEASE_INSTALLED_PROFILE.to_owned(),
+                None,
+            )
+        };
+    let proof = create_binary_proof(&binary, &profile, expected_digest.as_deref())
+        .unwrap_or_else(|message| panic!("invalid E2E binary proof: {message}"));
+    BINARY_PROOF
+        .set(proof.clone())
+        .expect("E2E binary proof should be registered once");
+    println!(
+        "mino-e2e-binary path={} profile={} digest={}",
+        proof.path.display(),
+        proof.profile,
+        proof.digest
+    );
+    proof.path
+}
+
+fn create_binary_proof(
+    binary: &Path,
+    profile: &str,
+    expected_digest: Option<&str>,
+) -> Result<BinaryProof, String> {
+    if !matches!(
+        profile,
+        RELEASE_INSTALLED_PROFILE | RELEASE_ARTIFACT_PROFILE
+    ) {
+        return Err(format!("undeclared E2E binary profile {profile:?}"));
     }
-    let target_directory = workspace.root.join("cargo install target");
-    let output = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-        .arg("install")
-        .arg("--path")
-        .arg(source_root)
-        .arg("--root")
-        .arg(&workspace.install_root)
-        .args(["--locked", "--offline", "--debug"])
-        .env("CARGO_TARGET_DIR", target_directory)
-        .stdin(Stdio::null())
-        .output()
-        .expect("cargo install should start");
-    assert_successful_process(&output, "cargo install");
-    workspace
-        .install_root
-        .join("bin")
-        .join(if cfg!(windows) { "mino.exe" } else { "mino" })
+    if profile == RELEASE_ARTIFACT_PROFILE && expected_digest.is_none() {
+        return Err("release-artifact requires an archive-bound expected digest".to_owned());
+    }
+    let path = binary
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize {}: {error}", binary.display()))?;
+    if !path.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    let digest = sha256_digest(
+        &fs::read(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?,
+    );
+    if expected_digest.is_some_and(|expected| expected != digest) {
+        return Err(format!(
+            "binary digest {digest} does not match declared digest {}",
+            expected_digest.unwrap_or_default()
+        ));
+    }
+    Ok(BinaryProof {
+        path,
+        profile: profile.to_owned(),
+        digest,
+    })
+}
+
+fn verify_binary_identity(proof: &BinaryProof, binary: &Path) -> Result<(), String> {
+    let current = create_binary_proof(binary, &proof.profile, Some(&proof.digest))?;
+    if current == *proof {
+        Ok(())
+    } else {
+        Err("E2E binary path, profile, or digest changed between runs".to_owned())
+    }
 }
 
 fn verify_version(binary: &Path) {
@@ -1078,6 +1185,13 @@ fn run_with_global_flags(binary: &Path, root: &Path, flags: &[&str], command: &[
 }
 
 fn run_binary(binary: &Path, arguments: &[String]) -> Output {
+    verify_binary_identity(
+        BINARY_PROOF
+            .get()
+            .expect("E2E binary proof must be registered before execution"),
+        binary,
+    )
+    .expect("E2E binary identity must not change between runs");
     Command::new(binary)
         .args(arguments)
         .stdin(Stdio::null())

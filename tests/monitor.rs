@@ -16,7 +16,8 @@ use mino::application::monitor::{
 use mino::application::plan::PlanMutationRequest;
 use mino::domain::{
     AcceptanceCriterion, Approval, CheckId, CheckRunLimits, CheckRunOutcome, CriterionId,
-    GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId, RequestId, Task, TaskId, Timestamp,
+    GitFlowConsent, GitReadiness, GitReadinessObservation, GitReadinessState, GitRepositoryMode,
+    GitSetupDecision, Plan, PlanDraftSeed, PlanId, RequestId, Task, TaskId, Timestamp,
     VerificationCheck,
 };
 use mino::evidence::EvidenceStore;
@@ -195,7 +196,7 @@ fn fixture_command(root: &Path, helper: &Path, marker: &Path, fixture: Fixture) 
 fn create_started_plan(root: &Path, task_command: Vec<String>) -> u64 {
     let global =
         VerificationCheck::new(check_id("GLOBAL-CHECK"), task_command.clone(), ".", 0, true);
-    let plan = Plan::from_draft_seed(
+    let mut plan = Plan::from_draft_seed(
         PlanDraftSeed {
             id: plan_id(),
             name: "Monitor contract".to_owned(),
@@ -203,12 +204,21 @@ fn create_started_plan(root: &Path, task_command: Vec<String>) -> u64 {
             original_request: "Observe one planned check within finite bounds.".to_owned(),
             branch: None,
             markdown_path: projection_relative().to_owned(),
-            git_readiness: GitReadiness::detected("Present", "Clean", None, None, "Clean", true),
+            git_readiness: GitReadiness::detected(
+                "Missing",
+                "Not Applicable",
+                None,
+                None,
+                "No Git repository",
+                false,
+            ),
             standards: Vec::new(),
             verification_plan: vec![global],
         },
         timestamp(0),
     );
+    plan.record_initial_git_readiness(&non_git_readiness_state())
+        .expect("initial Git readiness should record");
     let store = PlanStore::new(root);
     store
         .create_plan(
@@ -246,7 +256,7 @@ fn create_started_plan(root: &Path, task_command: Vec<String>) -> u64 {
             "user",
             "chat:monitor-approval",
             timestamp(4),
-            GitFlowConsent::Approved,
+            GitFlowConsent::Disabled,
         ))
     });
     let approved = store
@@ -270,6 +280,32 @@ fn create_started_plan(root: &Path, task_command: Vec<String>) -> u64 {
         )
         .expect("task should start")
         .revision
+}
+
+fn non_git_readiness_state() -> GitReadinessState {
+    let mut state = GitReadinessState::new(
+        GitReadinessObservation::new(
+            GitRepositoryMode::NotRepository,
+            None,
+            None,
+            None,
+            None,
+            sha256_digest(b"[]"),
+            false,
+            timestamp(0),
+        )
+        .expect("non-Git observation should validate"),
+    )
+    .expect("non-Git readiness should validate");
+    state
+        .decide_setup(
+            GitSetupDecision::ContinueWithoutGit,
+            "user".to_owned(),
+            "chat:continue-without-git".to_owned(),
+            timestamp(0),
+        )
+        .expect("non-Git setup decision should record");
+    state
 }
 
 fn commit<F>(

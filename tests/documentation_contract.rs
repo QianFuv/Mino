@@ -622,9 +622,10 @@ fn primary_ci_runs_the_complete_pipeline_on_three_platforms() {
         "cargo clippy --all-targets --all-features -- -D warnings",
         "cargo sort --check",
         "cargo +nightly miri test --lib",
-        "cargo install --path .",
+        "cargo install --path . --root \"${{ runner.temp }}/mino-install\" --locked --offline --profile release",
         "MINO_E2E_BINARY:",
-        "cargo test --offline --test e2e_v0_1 -- --test-threads=1",
+        "MINO_E2E_PROFILE: release-installed",
+        "cargo test --offline --test e2e_v0_1 -- --test-threads=1 --nocapture",
         "cargo test --release --offline --all-targets --all-features",
         "cargo doc --offline --all-features --no-deps",
     ] {
@@ -632,6 +633,7 @@ fn primary_ci_runs_the_complete_pipeline_on_three_platforms() {
     }
     assert_eq!(workflow.matches("runner: ").count(), 3);
     assert_eq!(workflow.matches("binary: ").count(), 3);
+    assert!(!workflow.contains("--debug"));
 
     let readme = read("README.md");
     let documentation_index = read("docs/README.md");
@@ -718,6 +720,10 @@ fn operator_guides_cover_operations_recovery_verification_and_product_boundaries
         "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
         "aarch64-apple-darwin",
+        "release-installed",
+        "release-artifact",
+        "test-harness-artifact",
+        "MINO_E2E_EXPECTED_DIGEST",
         "doc-contract: upgrade-rollback-publication",
         "doc-contract: deliberate-non-goals",
     ] {

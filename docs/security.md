@@ -239,7 +239,8 @@ Mino 同样不会部署软件、发送消息、创建 ticket 或修改远程系�
 - Mino 不执行远程或破坏性 Git 操作，也不提供 plan merge。
 - Mino 不允许通过手工修改 managed state、伪造 evidence 或任意设置 status 来声明成功。
 - 远程 Team Catalog 当前只支持显式 sync/cache 验证，不授予 recommend/apply 选择远程 package 的能力。
-- 普通完整 CI 当前仍只有 Windows job；多目标 artifact smoke 不是 Linux/macOS 全套测试，这一工程覆盖扩展仍属后续工作。
+- 普通完整 CI 在 Windows、Linux、macOS 都使用显式 release-profile 离线安装 binary 跑完整 lifecycle；五目标 artifact workflow 还会验证并解压最终 ZIP，再让 exact archive binary 跑同一 lifecycle。两条路径都记录 canonical path、profile 和 executable digest；未知 profile、摘要漂移或运行间替换会失败。
+- `test-harness-artifact` 只证明源码测试进程的打包路径，不能因 test harness 恰好以 release 编译就升级为 `release-installed` 或 `release-artifact` 证明。artifact proof 必须携带 manifest-bound `MINO_E2E_EXPECTED_DIGEST`。
 
 ## Agent 必须停止的情况
 

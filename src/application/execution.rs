@@ -8,8 +8,8 @@ use serde::Serialize;
 use crate::application::plan::{PlanMutationRequest, PlanOperationReport, PlanService};
 use crate::domain::{
     CheckId, CheckRunContext, CheckRunLease, CheckRunLimits, CheckRunResult, CheckpointKind,
-    Deviation, DeviationClassification, Evidence, EvidenceId, Plan, PlanId, RequestId, TaskId,
-    Timestamp, VerificationCheck,
+    Deviation, DeviationClassification, Evidence, EvidenceId, GitFlowConsent, Plan, PlanId,
+    RequestId, TaskId, Timestamp, VerificationCheck,
 };
 use crate::evidence::{CommandEvidenceRequest, EvidenceError, EvidenceErrorKind, EvidenceStore};
 use crate::runner::{
@@ -157,11 +157,14 @@ impl ExecutionService {
     ) -> Result<PlanOperationReport, MinoError> {
         let stored = self.plans.load_stored(&request.plan_id)?;
         if stored.revision() == request.expected_revision {
-            require_current_git_readiness(
-                &self.root,
-                &stored,
-                GitReadinessRequirement::CleanBaseline,
-            )?;
+            let readiness_requirement = if stored.git_readiness().git_flow_enabled()
+                && stored.git_readiness().git_flow_consent() == GitFlowConsent::Approved
+            {
+                GitReadinessRequirement::CleanBaseline
+            } else {
+                GitReadinessRequirement::IdentityOnly
+            };
+            require_current_git_readiness(&self.root, &stored, readiness_requirement)?;
             let validation = validate_plan(&self.root, &stored)?;
             if validation.findings.iter().any(|finding| {
                 finding.blocking && finding.id.starts_with("POLICY-STANDARD-CONFLICT")

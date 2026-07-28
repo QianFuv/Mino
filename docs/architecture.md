@@ -290,4 +290,6 @@ Validation 的修复路由按 finding 类型确定：`POLICY-STANDARD-REQUIRED`�
 
 <!-- doc-contract: three-platform-full-ci -->
 
-普通完整 CI 使用 `windows-latest`、`ubuntu-24.04`、`macos-15` 三平台 matrix，并在每个平台执行格式、Clippy、依赖排序、Miri 适用库目标、离线安装、安装后二进制 E2E、完整测试和 warning-free Rustdoc。matrix 使用 `fail-fast: false`，因此一个平台失败不会隐藏另外两个平台的兼容结果。五目标 artifact workflow 仍独立验证 release build、plugin contract 和 package smoke，不能替代这套三平台完整测试。
+普通完整 CI 使用 `windows-latest`、`ubuntu-24.04`、`macos-15` 三平台 matrix，并在每个平台执行格式、Clippy、依赖排序、Miri 适用库目标、`--profile release` 离线安装、安装后二进制 E2E、完整测试和 warning-free Rustdoc。installed lifecycle 把 canonical binary path、`release-installed` profile 和启动前复核的 executable SHA-256 写入日志；测试进程会在每次命令间重新核对路径和摘要。matrix 使用 `fail-fast: false`，因此一个平台失败不会隐藏另外两个平台的兼容结果。
+
+五目标 artifact workflow 在 release build、plugin contract、package smoke、canonical manifest 和 `SHA256SUMS` 全部通过后，解压最终 ZIP 中的 `mino/bin/mino[.exe]`。它把 manifest 中的 binary digest 作为 `MINO_E2E_EXPECTED_DIGEST`，以 `release-artifact` profile 运行相同的完整 v0.1 lifecycle。普通 `CARGO_BIN_EXE_mino` 打包回归明确标记为 `test-harness-artifact`，无论 test harness 自身是否用 release 编译，都不构成外部 installed/artifact profile 证明。

@@ -13,16 +13,16 @@ use mino::application::review::ReviewService;
 use mino::domain::{
     AcceptanceCriterion, Approval, CheckId, CheckStatus, CheckpointKind, CriterionId,
     CriterionStatus, DeviationStatus, Evidence, EvidenceId, EvidenceType, FileChange, FileMapEntry,
-    GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId,
-    ReviewClassification, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
-    WorkspaceRepositoryMode,
+    GitFlowConsent, GitReadiness, GitReadinessObservation, GitReadinessState, GitRepositoryMode,
+    GitSetupDecision, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId, ReviewClassification,
+    Task, TaskId, TaskStatus, Timestamp, VerificationCheck, WorkspaceRepositoryMode,
 };
 use mino::evidence::{AddEvidenceRequest, EvidenceRequestContext, EvidenceSource, EvidenceStore};
-use mino::git::matches_file_map_path;
+use mino::git::{GitAdapter, matches_file_map_path};
 use mino::project::initialize;
 use mino::render::{render_plan, write_projection};
 use mino::runner::Redactor;
-use mino::store::{MutationRequest, PlanStore};
+use mino::store::{MutationRequest, PlanStore, canonical_json_bytes, sha256_digest};
 use serde_json::Value;
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -294,32 +294,15 @@ fn create_approved_plan(
 }
 
 fn fixture_plan(helper: &Path, has_git_repository: bool) -> Plan {
-    let git_readiness = if has_git_repository {
-        GitReadiness::detected(
-            "Present",
-            "Clean",
-            Some("master".to_owned()),
-            None,
-            "Clean",
-            false,
-        )
-    } else {
-        GitReadiness::detected(
-            "Missing",
-            "Not Applicable",
-            None,
-            None,
-            "No Git repository",
-            false,
-        )
-    };
-    Plan::from_draft_seed(
+    let root = helper.parent().expect("helper should have a project root");
+    let (git_readiness, branch, readiness_state) = fixture_git_readiness(root, has_git_repository);
+    let mut plan = Plan::from_draft_seed(
         PlanDraftSeed {
             id: plan_id(),
             name: "Completion contract".to_owned(),
             trigger: "durable".to_owned(),
             original_request: "Complete only with compatible evidence.".to_owned(),
-            branch: Some("master".to_owned()),
+            branch,
             markdown_path: projection_relative().to_owned(),
             git_readiness,
             standards: Vec::new(),
@@ -332,6 +315,110 @@ fn fixture_plan(helper: &Path, has_git_repository: bool) -> Plan {
             )],
         },
         timestamp(0),
+    );
+    plan.record_initial_git_readiness(&readiness_state)
+        .expect("initial Git readiness should record");
+    plan
+}
+
+fn fixture_git_readiness(
+    root: &Path,
+    has_git_repository: bool,
+) -> (GitReadiness, Option<String>, GitReadinessState) {
+    if !has_git_repository {
+        let mut state = GitReadinessState::new(
+            GitReadinessObservation::new(
+                GitRepositoryMode::NotRepository,
+                None,
+                None,
+                None,
+                None,
+                sha256_digest(b"[]"),
+                false,
+                timestamp(0),
+            )
+            .expect("non-Git observation should validate"),
+        )
+        .expect("non-Git readiness should validate");
+        state
+            .decide_setup(
+                GitSetupDecision::ContinueWithoutGit,
+                "user".to_owned(),
+                "chat:continue-without-git".to_owned(),
+                timestamp(0),
+            )
+            .expect("non-Git setup decision should record");
+        return (
+            GitReadiness::detected(
+                "Missing",
+                "Not Applicable",
+                None,
+                None,
+                "No Git repository",
+                false,
+            ),
+            None,
+            state,
+        );
+    }
+
+    let facts = GitAdapter::new(root)
+        .inspect()
+        .expect("Git readiness should inspect");
+    let branch = facts.branch.clone();
+    let state = GitReadinessState::new(
+        GitReadinessObservation::new(
+            if facts.is_worktree {
+                GitRepositoryMode::Worktree
+            } else {
+                GitRepositoryMode::Bare
+            },
+            facts
+                .worktree
+                .as_deref()
+                .map(|path| path.to_string_lossy().replace('\\', "/")),
+            facts
+                .common_dir
+                .as_deref()
+                .map(|path| path.to_string_lossy().replace('\\', "/")),
+            branch.clone(),
+            facts.head.clone(),
+            sha256_digest(
+                &canonical_json_bytes(&facts.status).expect("Git status should canonicalize"),
+            ),
+            facts.is_clean,
+            timestamp(0),
+        )
+        .expect("Git observation should validate"),
+    )
+    .expect("Git readiness should validate");
+    let working_tree = if facts.is_worktree {
+        if facts.is_clean { "Clean" } else { "Dirty" }
+    } else {
+        "Not Applicable"
+    };
+    let base_status = if facts.is_worktree {
+        if facts.is_clean {
+            "Clean: Git status contains no entries"
+        } else {
+            "Dirty: Git status contains changes"
+        }
+    } else {
+        "Not Applicable: bare Git repository"
+    };
+    let is_git_flow_eligible =
+        facts.is_worktree && facts.is_clean && branch.is_some() && facts.head.is_some();
+    (
+        GitReadiness::detected(
+            "Present",
+            working_tree,
+            branch.clone(),
+            facts.head,
+            base_status,
+            is_git_flow_eligible,
+        ),
+        branch,
+        state,
     )
 }
 

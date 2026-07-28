@@ -13,6 +13,7 @@ use mino::domain::{
     AcceptanceCriterion, AmendmentPatch, AmendmentStatus, Approval, CheckId, CommitGate,
     CriterionId, DraftCommitGateInput, DraftCriterionInput, DraftFileInput, DraftTaskInput,
     DraftVerificationInput, EvidenceId, FileChange, FileMapEntry, GitFlowConsent, GitReadiness,
+    GitReadinessObservation, GitReadinessState, GitRepositoryMode, GitSetupDecision,
     MaterialReviewDisposition, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId,
     ReviewClassification, ReviewStatus, StandardSelection, Task, TaskId, TaskStatus, Timestamp,
     VerificationCheck,
@@ -106,21 +107,21 @@ fn parse_cli_success(output: &Output) -> serde_json::Value {
 }
 
 fn seed(label: &str) -> Plan {
-    Plan::from_draft_seed(
+    let mut plan = Plan::from_draft_seed(
         PlanDraftSeed {
             id: plan_id(label),
             name: "Review workflow".to_owned(),
             trigger: "durable".to_owned(),
             original_request: "Implement and review one change.".to_owned(),
-            branch: Some("main".to_owned()),
+            branch: None,
             markdown_path: format!("docs/plan/2026-07-26-{label}.md"),
             git_readiness: GitReadiness::detected(
-                "Present",
-                "Clean",
-                Some("main".to_owned()),
-                Some("1111111".to_owned()),
-                "Clean: git status --short returned empty",
-                true,
+                "Missing",
+                "Not Applicable",
+                None,
+                None,
+                "No Git repository",
+                false,
             ),
             standards: Vec::<StandardSelection>::new(),
             verification_plan: vec![VerificationCheck::new(
@@ -132,7 +133,36 @@ fn seed(label: &str) -> Plan {
             )],
         },
         timestamp(0),
+    );
+    plan.record_initial_git_readiness(&non_git_readiness_state())
+        .expect("initial Git readiness should record");
+    plan
+}
+
+fn non_git_readiness_state() -> GitReadinessState {
+    let mut state = GitReadinessState::new(
+        GitReadinessObservation::new(
+            GitRepositoryMode::NotRepository,
+            None,
+            None,
+            None,
+            None,
+            sha256_digest(b"[]"),
+            false,
+            timestamp(0),
+        )
+        .expect("non-Git observation should validate"),
     )
+    .expect("non-Git readiness should validate");
+    state
+        .decide_setup(
+            GitSetupDecision::ContinueWithoutGit,
+            "user".to_owned(),
+            "chat:continue-without-git".to_owned(),
+            timestamp(0),
+        )
+        .expect("non-Git setup decision should record");
+    state
 }
 
 fn original_task() -> Task {
@@ -181,7 +211,7 @@ fn reviewed_plan(label: &str) -> Plan {
         "user",
         "chat:plan-approved",
         timestamp(4),
-        GitFlowConsent::Approved,
+        GitFlowConsent::Disabled,
     ))
     .expect("plan should be approved");
     plan.start_task(&task, timestamp(5))
@@ -370,6 +400,7 @@ fn complete_rework_input(id: &str) -> DraftTaskInput {
 
 #[test]
 fn every_review_classification_selects_one_typed_action() {
+    let project = TestProject::new();
     let mut plan = reviewed_plan("classification-matrix");
     let original_order = plan.task_order().to_vec();
 
@@ -426,7 +457,7 @@ fn every_review_classification_selects_one_typed_action() {
     assert_eq!(plan.status(), PlanStatus::Blocked);
     assert!(plan.is_blocked_for_material_review());
     assert!(plan.resume(timestamp(16)).is_err());
-    let context = build_agent_context(Path::new("C:/fixture"), Some(&plan))
+    let context = build_agent_context(project.path(), Some(&plan))
         .expect("material review context should build");
     assert!(context.approval_required);
     assert!(context.next_actions.is_empty());
@@ -442,6 +473,7 @@ fn every_review_classification_selects_one_typed_action() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn material_review_dispositions_close_every_product_decision_branch() {
+    let project = TestProject::new();
     let mut accepted = reviewed_plan("material-accepted");
     let accepted_id = accepted
         .record_review(
@@ -473,7 +505,7 @@ fn material_review_dispositions_close_every_product_decision_branch() {
     assert_eq!(item.disposition_actor(), Some("user"));
     assert_eq!(item.disposition_reference(), Some("chat:accept-change"));
     assert!(accepted.is_blocked_for_material_review());
-    let accepted_context = build_agent_context(Path::new("C:/fixture"), Some(&accepted))
+    let accepted_context = build_agent_context(project.path(), Some(&accepted))
         .expect("accepted Material context should build");
     assert_eq!(
         accepted_context.allowed_actions,
@@ -565,6 +597,7 @@ fn material_review_dispositions_close_every_product_decision_branch() {
 
 #[test]
 fn terminated_review_amendments_allow_audited_decline_or_defer_revision() {
+    let project = TestProject::new();
     let cases = [
         (
             TerminalAmendment::Reject,
@@ -594,7 +627,7 @@ fn terminated_review_amendments_allow_audited_decline_or_defer_revision() {
         assert_eq!(item.linked_changes(), ["C1"]);
         assert_eq!(item.material_decisions().len(), 1);
         assert!(plan.revisable_material_review().is_some());
-        let context = build_agent_context(Path::new("C:/fixture"), Some(&plan))
+        let context = build_agent_context(project.path(), Some(&plan))
             .expect("terminal amendment context should build");
         assert!(context.approval_required);
         assert!(

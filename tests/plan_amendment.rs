@@ -109,6 +109,38 @@ fn run_mino(arguments: &[String]) -> Output {
         .expect("Mino binary should run")
 }
 
+fn initialize_git_baseline(root: &Path) {
+    let initialized = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(root)
+        .output()
+        .expect("Git should initialize");
+    assert!(initialized.status.success());
+    fs::write(
+        root.join(".git/info/exclude"),
+        ".agents/\n.mino/\ndocs/plan/\n",
+    )
+    .expect("managed paths should be excluded");
+    for arguments in [
+        vec!["config", "user.name", "Mino Amendment Test"],
+        vec!["config", "user.email", "mino-amendment@example.invalid"],
+        vec!["add", "--all"],
+        vec!["commit", "--quiet", "-m", "test: create amendment fixture"],
+    ] {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(root)
+            .output()
+            .expect("Git should run");
+        assert!(
+            output.status.success(),
+            "git stdout: {}\ngit stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 fn base_arguments(project: &TestProject) -> Vec<String> {
     vec![
         "--root".to_owned(),
@@ -163,6 +195,7 @@ fn create_approved_cli_plan(project: &TestProject) -> (String, u64) {
         "Exercise the protected amendment protocol.\n",
     )
     .expect("request should be written");
+    initialize_git_baseline(project.path());
     let mut create = base_arguments(project);
     create.extend([
         "plan".to_owned(),

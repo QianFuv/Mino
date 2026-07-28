@@ -13,7 +13,8 @@ use mino::application::standards::StandardsPlanService;
 use mino::domain::{
     AcceptanceCriterion, AmendmentClassification, AmendmentPatch, Approval, CheckId, CheckStatus,
     CommitGate, CriterionId, DomainError, DraftCriterionInput, DraftFileInput, DraftTaskInput,
-    DraftVerificationInput, FileChange, FileMapEntry, GitFlowConsent, GitReadiness, Plan,
+    DraftVerificationInput, FileChange, FileMapEntry, GitFlowConsent, GitReadiness,
+    GitReadinessObservation, GitReadinessState, GitRepositoryMode, GitSetupDecision, Plan,
     PlanDraftSeed, PlanId, PlanStatus, RequestId, StandardSelection, Task, TaskId, Timestamp,
     VerificationCheck,
 };
@@ -23,7 +24,7 @@ use mino::standards::{
     CommandSource, EmbeddedCatalog, ResolvedCheckStatus, ToolProbe, ToolProbeOutcome,
     apply_recommendation, recommend_for_paths, recommend_initial,
 };
-use mino::store::{MutationRequest, PlanStore};
+use mino::store::{MutationRequest, PlanStore, sha256_digest};
 use serde_json::{Value, json};
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -162,7 +163,7 @@ fn embedded_standard(package_id: &str) -> StandardSelection {
 }
 
 fn language_plan_seed(plan_id: PlanId, projection_path: String) -> Plan {
-    Plan::from_draft_seed(
+    let mut plan = Plan::from_draft_seed(
         PlanDraftSeed {
             id: plan_id,
             name: "Reconcile an amended language".to_owned(),
@@ -188,7 +189,36 @@ fn language_plan_seed(plan_id: PlanId, projection_path: String) -> Plan {
             )],
         },
         timestamp(0),
+    );
+    plan.record_initial_git_readiness(&non_git_readiness_state())
+        .expect("initial Git readiness should record");
+    plan
+}
+
+fn non_git_readiness_state() -> GitReadinessState {
+    let mut state = GitReadinessState::new(
+        GitReadinessObservation::new(
+            GitRepositoryMode::NotRepository,
+            None,
+            None,
+            None,
+            None,
+            sha256_digest(b"[]"),
+            false,
+            timestamp(0),
+        )
+        .expect("non-Git observation should validate"),
     )
+    .expect("non-Git readiness should validate");
+    state
+        .decide_setup(
+            GitSetupDecision::ContinueWithoutGit,
+            "user".to_owned(),
+            "chat:continue-without-git".to_owned(),
+            timestamp(0),
+        )
+        .expect("non-Git setup decision should record");
+    state
 }
 
 fn configured_rust_task() -> Task {

@@ -434,6 +434,10 @@ fn native_workflow_covers_every_target_and_has_no_upload_or_publish_step() {
         "x86_64-apple-darwin",
         "aarch64-apple-darwin",
         "cargo run --release --locked --bin xtask -- package-plugin",
+        "Validate checksums and extract final archive",
+        "MINO_E2E_PROFILE=release-artifact",
+        "MINO_E2E_EXPECTED_DIGEST=$binaryDigest",
+        "cargo test --release --locked --offline --test e2e_v0_1 -- --test-threads=1 --nocapture",
         "permissions:\n  contents: read",
     ] {
         assert!(
@@ -447,10 +451,16 @@ fn native_workflow_covers_every_target_and_has_no_upload_or_publish_step() {
         "gh release",
         "secrets.",
         "plugin marketplace",
+        "contents: write",
+        "id-token:",
+        "packages:",
+        "attestations:",
     ] {
         assert!(
             !workflow.contains(forbidden),
             "workflow contains forbidden text {forbidden}"
         );
     }
+    assert_eq!(workflow.matches("permissions:").count(), 1);
+    assert_eq!(workflow.matches("contents: read").count(), 1);
 }

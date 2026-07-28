@@ -529,6 +529,8 @@ fn automatic_git_flow_requires_current_plan_binding_before_start_and_commit() {
     .expect("task check should pass");
     plan.complete_task(&task_id(), timestamp(9))
         .expect("task should complete");
+    fs::write(project.path().join("fixture.txt"), "planned task change\n")
+        .expect("planned task dirt should be written");
 
     let bound_commit = build_agent_context(project.path(), Some(&plan))
         .expect("bound commit context should build");

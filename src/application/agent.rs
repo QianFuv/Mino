@@ -862,7 +862,14 @@ fn git_decision_guidance(root: &Path, plan: &Plan) -> Result<Option<Guidance>, M
             vec![git_inspect_action(plan)],
         )));
     }
-    let mismatches = readiness_mismatches(root, plan, GitReadinessRequirement::CleanBaseline)?;
+    let requirement = if matches!(plan.status(), PlanStatus::Draft | PlanStatus::Ready)
+        || plan.is_blocked_for_git_readiness()
+    {
+        GitReadinessRequirement::CleanBaseline
+    } else {
+        GitReadinessRequirement::IdentityOnly
+    };
+    let mismatches = readiness_mismatches(root, plan, requirement)?;
     if !mismatches.is_empty() {
         return Ok(Some(readiness_refresh_guidance(plan, &mismatches)));
     }

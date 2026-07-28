@@ -302,6 +302,27 @@ fn cli_import_is_source_preserving_valid_draft_and_retry_safe() {
         before
     );
 
+    let mut setup = base_arguments(&project);
+    setup.extend([
+        "git".to_owned(),
+        "setup".to_owned(),
+        "decide".to_owned(),
+        "--plan".to_owned(),
+        plan_id.to_owned(),
+        "--expect-revision".to_owned(),
+        "2".to_owned(),
+        "--request-id".to_owned(),
+        request_id(3),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+        "--decision".to_owned(),
+        "continue-without-git".to_owned(),
+        "--approval-ref".to_owned(),
+        "chat:legacy-import-continue-without-git".to_owned(),
+    ]);
+    let setup = parse_success(&run_mino(&setup));
+    assert_eq!(setup["revision"], 3);
+
     let mut validate = base_arguments(&project);
     validate.extend([
         "plan".to_owned(),

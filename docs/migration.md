@@ -210,4 +210,4 @@ mino project import legacy \
 - Pending/stale planning authority、pending rewrite 或 declined decision 会阻止 Durable create。不要手工编辑 `.mino/authority.json` 或 transaction；用相同 digest-bound apply request 恢复中断，source 改变后重新检查并作新决定。
 - 常规计划加载和 `project doctor` 会恢复 prepared transaction。不要手工删除 `.mino/**` 中的 transaction、snapshot 或 history 文件。
 
-当前远程 Team Catalog package 只支持 sync/cache，不会被 recommend/apply 选入计划。普通完整 CI 仍只配置 Windows；多目标 artifact smoke 不能替代 Linux/macOS 全套验证。这两项是明确的后续边界，不应在迁移时解释为已经具备。
+当前远程 Team Catalog package 只支持 sync/cache，不会被 recommend/apply 选入计划。普通完整 CI 在 Windows、Linux、macOS 上验证 release-profile 安装 binary；五目标 artifact workflow 另从最终 ZIP 解压并验证 archive-bound binary lifecycle。这些验证不授权发布、上传或安装，也不应在迁移时解释为远程分发已经发生。

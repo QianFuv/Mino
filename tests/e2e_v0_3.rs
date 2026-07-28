@@ -24,11 +24,12 @@ use mino::standards::{
     SourcePolicy, SyncLimits, SyncOptions, build_team_catalog_with_policy,
     synchronize_all_with_options,
 };
-use mino::store::PlanStore;
+use mino::store::{PlanStore, sha256_digest};
 use serde_json::Value;
 use zip::ZipArchive;
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+const TEST_HARNESS_ARTIFACT_PROFILE: &str = "test-harness-artifact";
 
 struct TestWorkspace {
     root: PathBuf,
@@ -157,7 +158,7 @@ fn packaged_entry_completes_catalog_observation_plan_and_variant_flow() {
 
     let mut request_number = 1;
     let plan_id = create_and_approve_plan(&workspace, &binary, &mut request_number);
-    let mut revision = 4;
+    let mut revision = 5;
     let started = parse_success(&run_mino(
         &binary,
         &workspace.project,
@@ -513,14 +514,28 @@ fn release_surface_excludes_unsupported_runtime_and_git_operations() {
     }
     let workflow = fs::read_to_string(repository.join(".github/workflows/release-artifacts.yml"))
         .expect("artifact workflow should be readable");
+    for required in [
+        "Validate checksums and extract final archive",
+        "MINO_E2E_PROFILE=release-artifact",
+        "MINO_E2E_EXPECTED_DIGEST=$binaryDigest",
+        "cargo test --release --locked --offline --test e2e_v0_1 -- --test-threads=1 --nocapture",
+    ] {
+        assert!(workflow.contains(required));
+    }
     for forbidden in [
         "actions/upload-artifact",
         "cargo publish",
         "gh release",
         "secrets.",
+        "contents: write",
+        "id-token:",
+        "packages:",
+        "attestations:",
     ] {
         assert!(!workflow.contains(forbidden));
     }
+    assert_eq!(workflow.matches("permissions:").count(), 1);
+    assert_eq!(workflow.matches("contents: read").count(), 1);
 }
 
 fn package_and_extract(workspace: &TestWorkspace) -> PathBuf {
@@ -567,9 +582,34 @@ fn package_and_extract(workspace: &TestWorkspace) -> PathBuf {
                 .expect("plugin ZIP permissions should apply");
         }
     }
-    install
+    let binary = install
         .join("mino/bin")
         .join(if cfg!(windows) { "mino.exe" } else { "mino" })
+        .canonicalize()
+        .expect("extracted plugin binary should resolve");
+    let relative_binary = if cfg!(windows) {
+        "mino/bin/mino.exe"
+    } else {
+        "mino/bin/mino"
+    };
+    let expected_digest = manifest
+        .files
+        .iter()
+        .find(|file| file.path == relative_binary)
+        .expect("manifest should contain the plugin binary")
+        .digest
+        .clone();
+    let binary_digest =
+        sha256_digest(&fs::read(&binary).expect("extracted plugin binary should read"));
+    assert_eq!(binary_digest, expected_digest);
+    println!(
+        "mino-e2e-binary path={} profile={} digest={} archive={}",
+        binary.display(),
+        TEST_HARNESS_ARTIFACT_PROFILE,
+        binary_digest,
+        report.archive_digest
+    );
+    binary
 }
 
 fn assert_packaged_identity(binary: &Path) {
@@ -764,6 +804,7 @@ fn create_and_approve_plan(
         ),
     ));
     assert_eq!(applied["revision"], 2);
+    record_non_git_decision(binary, &workspace.project, &plan_id, request_number);
     let validation = parse_success(&run_mino(
         binary,
         &workspace.project,
@@ -776,7 +817,7 @@ fn create_and_approve_plan(
         &mutation_arguments(
             &["plan", "finalize"],
             &plan_id,
-            2,
+            3,
             next_request(request_number),
             Vec::new(),
         ),
@@ -788,7 +829,7 @@ fn create_and_approve_plan(
         &mutation_arguments(
             &["plan", "approve"],
             &plan_id,
-            3,
+            4,
             next_request(request_number),
             arguments(&[
                 "--approval-ref",
@@ -798,8 +839,28 @@ fn create_and_approve_plan(
             ]),
         ),
     ));
-    assert_eq!(approved["revision"], 4);
+    assert_eq!(approved["revision"], 5);
     plan_id
+}
+
+fn record_non_git_decision(binary: &Path, project: &Path, plan_id: &str, request_number: &mut u64) {
+    let setup = parse_success(&run_mino(
+        binary,
+        project,
+        &mutation_arguments(
+            &["git", "setup", "decide"],
+            plan_id,
+            2,
+            next_request(request_number),
+            arguments(&[
+                "--decision",
+                "continue-without-git",
+                "--approval-ref",
+                "chat:v0-3-continue-without-git",
+            ]),
+        ),
+    ));
+    assert_eq!(setup["revision"], 3);
 }
 
 fn verify_audited_done_state(project: &Path, plan_id: &str, revision: u64) {
