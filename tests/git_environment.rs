@@ -472,7 +472,15 @@ fn unsafe_initial_cleanup_state_is_recoverably_blocked() {
     git_commit(&repository, "test(git): change main branch");
     let mut merge = Command::new("git");
     merge
-        .args(["merge", "--no-edit", "cleanup-conflict"])
+        .args([
+            "-c",
+            "user.name=Mino Tests",
+            "-c",
+            "user.email=mino-tests@example.invalid",
+            "merge",
+            "--no-edit",
+            "cleanup-conflict",
+        ])
         .current_dir(&repository);
     clear_git_environment(&mut merge);
     let output = merge.output().expect("conflicting merge should run");
