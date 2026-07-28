@@ -294,6 +294,17 @@ impl VerificationCheck {
         Ok(())
     }
 
+    pub(crate) fn record_capture_blocked(&mut self) -> Result<(), DomainError> {
+        if self.status != CheckStatus::Running {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                format!("Check {} is not Running", self.id),
+            ));
+        }
+        self.status = CheckStatus::Failed;
+        Ok(())
+    }
+
     pub(crate) fn mark_stale(&mut self) -> Result<(), DomainError> {
         if self.status != CheckStatus::Passed {
             return Err(DomainError::new(
@@ -1657,6 +1668,26 @@ impl Task {
                 )
             })?;
         check.record_run(evidence_id, passed)
+    }
+
+    pub(crate) fn record_check_capture_blocked(
+        &mut self,
+        check_id: &CheckId,
+    ) -> Result<(), DomainError> {
+        if self.status != TaskStatus::InProgress {
+            return Err(self.invalid_transition("record a blocked verification capture"));
+        }
+        let check = self
+            .verification_checks
+            .iter_mut()
+            .find(|check| check.id() == check_id)
+            .ok_or_else(|| {
+                DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    format!("Task {} has no check {check_id}", self.id),
+                )
+            })?;
+        check.record_capture_blocked()
     }
 
     pub(crate) fn mark_check_stale(&mut self, check_id: &CheckId) -> Result<bool, DomainError> {

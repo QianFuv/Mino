@@ -27,6 +27,8 @@ use super::{Redactor, RunnerError, RunnerErrorKind};
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CAPTURE_CHUNK_BYTES: usize = 8 * 1_024;
 const MAX_RUN_JOURNAL_BYTES: u64 = 4 * 1_024 * 1_024;
+const CAPTURE_BLOCKED_MESSAGE: &str =
+    "Captured output matched a residual credential pattern and was not persisted";
 const TRUNCATION_MARKER: &str = "\n[output truncated by Mino]";
 static NEXT_PENDING_FILE: AtomicU64 = AtomicU64::new(1);
 
@@ -742,33 +744,45 @@ fn build_result(
     observation: ProcessObservation,
 ) -> CheckRunResult {
     let runtime_literals = environment.secret_literals();
-    let (mut stdout_summary, stdout_redactions) =
+    let (mut stdout_summary, stdout_redactions, stdout_blocked) =
         redact_bytes(redactor, stdout_bytes, &runtime_literals);
-    let (mut stderr_summary, stderr_redactions) =
+    let (mut stderr_summary, stderr_redactions, stderr_blocked) =
         redact_bytes(redactor, stderr_bytes, &runtime_literals);
+    let mut capture_blocked = stdout_blocked || stderr_blocked;
     let output_truncated = observation.forced_outcome == Some(CheckRunOutcome::OutputLimitExceeded);
-    if output_truncated {
+    if output_truncated && !capture_blocked {
         stdout_summary.push_str(TRUNCATION_MARKER);
         stderr_summary.push_str(TRUNCATION_MARKER);
     }
     let mut redactions = merge_redactions([stdout_redactions, stderr_redactions]);
     let mut error_summary = observation.capture_error;
     if let Some(error) = error_summary.take() {
-        let (redacted_error, error_redactions) =
-            redactor.redact_with_literals(&error, &runtime_literals);
+        let (redacted_error, error_redactions, error_blocked) = redactor
+            .redact_checked(&error, &runtime_literals)
+            .into_parts();
         redactions = merge_redactions([redactions, error_redactions]);
+        capture_blocked |= error_blocked;
         error_summary = Some(redacted_error);
     }
+    if capture_blocked {
+        stdout_summary.clear();
+        stderr_summary.clear();
+        error_summary = Some(CAPTURE_BLOCKED_MESSAGE.to_owned());
+    }
     let exit_code = observation.status.and_then(|status| status.code());
-    let outcome = observation.forced_outcome.unwrap_or_else(|| {
-        if error_summary.is_some() {
-            CheckRunOutcome::CaptureFailed
-        } else if exit_code == Some(lease.expected_exit_code()) {
-            CheckRunOutcome::Passed
-        } else {
-            CheckRunOutcome::UnexpectedExit
-        }
-    });
+    let outcome = if capture_blocked {
+        CheckRunOutcome::CaptureBlocked
+    } else {
+        observation.forced_outcome.unwrap_or_else(|| {
+            if error_summary.is_some() {
+                CheckRunOutcome::CaptureFailed
+            } else if exit_code == Some(lease.expected_exit_code()) {
+                CheckRunOutcome::Passed
+            } else {
+                CheckRunOutcome::UnexpectedExit
+            }
+        })
+    };
     let digest_material = format!("stdout\0{stdout_summary}\0stderr\0{stderr_summary}");
     CheckRunResult::completed(
         lease,
@@ -796,12 +810,17 @@ fn spawn_failed_result(
     error: &io::Error,
 ) -> CheckRunResult {
     let runtime_literals = environment.secret_literals();
-    let (error_summary, redactions) =
-        redactor.redact_with_literals(&error.to_string(), &runtime_literals);
+    let (error_summary, redactions, capture_blocked) = redactor
+        .redact_checked(&error.to_string(), &runtime_literals)
+        .into_parts();
     CheckRunResult::completed(
         lease,
         CheckRunCompletion {
-            outcome: CheckRunOutcome::SpawnFailed,
+            outcome: if capture_blocked {
+                CheckRunOutcome::CaptureBlocked
+            } else {
+                CheckRunOutcome::SpawnFailed
+            },
             exit_code: None,
             finished_at: Timestamp::now_utc(),
             duration_milliseconds: elapsed_milliseconds(started),
@@ -811,7 +830,11 @@ fn spawn_failed_result(
             output_truncated: false,
             redactions,
             process_tree_terminated: false,
-            error_summary: Some(error_summary),
+            error_summary: Some(if capture_blocked {
+                CAPTURE_BLOCKED_MESSAGE.to_owned()
+            } else {
+                error_summary
+            }),
         },
     )
 }
@@ -841,11 +864,13 @@ fn redact_bytes(
     redactor: &Redactor,
     bytes: &mut Vec<u8>,
     runtime_literals: &[(String, String)],
-) -> (String, Vec<AppliedRedaction>) {
+) -> (String, Vec<AppliedRedaction>, bool) {
     let text = String::from_utf8_lossy(bytes).into_owned();
     bytes.fill(0);
     bytes.clear();
-    redactor.redact_with_literals(&text, runtime_literals)
+    redactor
+        .redact_checked(&text, runtime_literals)
+        .into_parts()
 }
 
 fn merge_redactions<const COUNT: usize>(

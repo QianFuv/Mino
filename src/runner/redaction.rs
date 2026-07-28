@@ -2,17 +2,83 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use regex::{NoExpand, Regex};
+use regex::{Captures, Regex};
 
 use crate::domain::AppliedRedaction;
 use crate::store::sha256_digest;
 
 use super::{RunnerError, RunnerErrorKind};
 
-const SECRET_VALUE_RULE_ID: &str = "builtin-secret-key-value";
-const SECRET_VALUE_PATTERN: &str =
-    r"(?i)\b(?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*[^\s,;]+";
 const REDACTION_MARKER: &str = "[REDACTED]";
+const RESIDUAL_SECRET_RULE_ID: &str = "builtin-residual-secret-scan";
+const BUILTIN_RULES: &[(&str, &str, &str)] = &[
+    (
+        "builtin-authorization-scheme",
+        r"(?im)\b(authorization[ \t]*:[ \t]*(?:bearer|basic|digest)[ \t]+)[^\r\n]+",
+        "${1}[REDACTED]",
+    ),
+    (
+        "builtin-authorization-header",
+        r"(?im)\b(authorization[ \t]*:[ \t]*)[^\r\n]+",
+        "${1}[REDACTED]",
+    ),
+    (
+        "builtin-auth-credential",
+        r"(?i)\b((?:bearer|basic|digest)[ \t]+)[A-Za-z0-9._~+/=-]{8,}",
+        "${1}[REDACTED]",
+    ),
+    (
+        "builtin-json-double-quoted-secret",
+        r#"(?i)("(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|secret|password|authorization)"[ \t]*:[ \t]*")[^"\r\n]*(")"#,
+        "${1}[REDACTED]${2}",
+    ),
+    (
+        "builtin-json-single-quoted-secret",
+        r"(?i)('(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|secret|password|authorization)'[ \t]*:[ \t]*')[^'\r\n]*(')",
+        "${1}[REDACTED]${2}",
+    ),
+    (
+        "builtin-url-query-secret",
+        r"(?i)([?&](?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|secret|password|authorization)=)[^&#\s]+",
+        "${1}[REDACTED]",
+    ),
+    (
+        "builtin-shell-secret-assignment",
+        r#"(?im)\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|secret|password|authorization)[ \t]*=[ \t]*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"#,
+        "${1}[REDACTED]",
+    ),
+    (
+        "builtin-secret-key-value",
+        r"(?im)\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|secret|password)[ \t]*:[ \t]*)[^\s,;\r\n]+",
+        "${1}[REDACTED]",
+    ),
+    (
+        "builtin-known-token-prefix",
+        r"(?i)\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})\b",
+        REDACTION_MARKER,
+    ),
+    (
+        "builtin-jwt",
+        r"\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+        REDACTION_MARKER,
+    ),
+    (
+        "builtin-private-key",
+        r"(?s)-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----",
+        REDACTION_MARKER,
+    ),
+];
+const RESIDUAL_SECRET_PATTERNS: &[&str] = &[
+    r"(?im)\bauthorization[ \t]*:[ \t]*[^\r\n]+",
+    r"(?im)\bauthorization[ \t]*=[ \t]*[^\r\n]+",
+    r#"(?i)["'](?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|secret|password|authorization)["'][ \t]*:[ \t]*["'][^"'\r\n]+["']"#,
+    r"(?im)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|secret|password)[ \t]*[:=][ \t]*[^\s,;\r\n]+",
+    r"(?i)[?&](?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|secret|password|authorization)=[^&#\s]+",
+    r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|secret|password)[ \t]+[A-Za-z0-9._~+/=-]{12,}\b",
+    r"(?i)\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})\b",
+    r"\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
+    r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----",
+];
 
 /// One named output-redaction rule.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,7 +122,10 @@ impl RedactionRule {
 #[derive(Clone, Debug)]
 enum CompiledMatcher {
     Literal(String),
-    Regex(Regex),
+    Regex {
+        expression: Regex,
+        replacement: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -69,11 +138,24 @@ struct CompiledRule {
 #[derive(Clone, Debug)]
 pub struct Redactor {
     rules: Vec<CompiledRule>,
+    residual_scanners: Vec<Regex>,
     policy_digest: String,
 }
 
+pub(crate) struct RedactedText {
+    text: String,
+    applied: Vec<AppliedRedaction>,
+    capture_blocked: bool,
+}
+
+impl RedactedText {
+    pub(crate) fn into_parts(self) -> (String, Vec<AppliedRedaction>, bool) {
+        (self.text, self.applied, self.capture_blocked)
+    }
+}
+
 impl Redactor {
-    /// Compiles an ordered policy and appends the built-in secret key/value rule.
+    /// Compiles an ordered policy and appends the built-in credential rules.
     ///
     /// # Errors
     ///
@@ -81,7 +163,7 @@ impl Redactor {
     /// empty literals, or invalid regular expressions.
     pub fn new(rules: Vec<RedactionRule>) -> Result<Self, RunnerError> {
         let mut identifiers = BTreeSet::new();
-        let mut compiled = Vec::with_capacity(rules.len().saturating_add(1));
+        let mut compiled = Vec::with_capacity(rules.len().saturating_add(BUILTIN_RULES.len()));
         let mut digest_material = String::new();
         for rule in rules {
             let (id, matcher, material) = match rule {
@@ -103,7 +185,10 @@ impl Redactor {
                     let pattern_digest = sha256_digest(pattern.as_bytes());
                     (
                         id,
-                        CompiledMatcher::Regex(expression),
+                        CompiledMatcher::Regex {
+                            expression,
+                            replacement: REDACTION_MARKER.to_owned(),
+                        },
                         format!("regex:{pattern_digest}"),
                     )
                 }
@@ -120,22 +205,49 @@ impl Redactor {
             digest_material.push('\0');
             compiled.push(CompiledRule { id, matcher });
         }
-        if !identifiers.insert(SECRET_VALUE_RULE_ID.to_owned()) {
+        for (id, pattern, replacement) in BUILTIN_RULES {
+            if !identifiers.insert((*id).to_owned()) {
+                return Err(invalid_rule(format!(
+                    "Redaction rule identifier {id} is reserved"
+                )));
+            }
+            let expression = Regex::new(pattern).map_err(|error| {
+                invalid_rule(format!("Built-in redaction regex {id} failed: {error}"))
+            })?;
+            digest_material.push_str(id);
+            digest_material.push('\0');
+            digest_material.push_str(&sha256_digest(pattern.as_bytes()));
+            digest_material.push('\0');
+            digest_material.push_str(&sha256_digest(replacement.as_bytes()));
+            digest_material.push('\0');
+            compiled.push(CompiledRule {
+                id: (*id).to_owned(),
+                matcher: CompiledMatcher::Regex {
+                    expression,
+                    replacement: (*replacement).to_owned(),
+                },
+            });
+        }
+        if !identifiers.insert(RESIDUAL_SECRET_RULE_ID.to_owned()) {
             return Err(invalid_rule(format!(
-                "Redaction rule identifier {SECRET_VALUE_RULE_ID} is reserved"
+                "Redaction rule identifier {RESIDUAL_SECRET_RULE_ID} is reserved"
             )));
         }
-        let secret_expression = Regex::new(SECRET_VALUE_PATTERN)
-            .map_err(|error| invalid_rule(format!("Built-in redaction regex failed: {error}")))?;
-        digest_material.push_str(SECRET_VALUE_RULE_ID);
-        digest_material.push('\0');
-        digest_material.push_str(&sha256_digest(SECRET_VALUE_PATTERN.as_bytes()));
-        compiled.push(CompiledRule {
-            id: SECRET_VALUE_RULE_ID.to_owned(),
-            matcher: CompiledMatcher::Regex(secret_expression),
-        });
+        let residual_scanners = RESIDUAL_SECRET_PATTERNS
+            .iter()
+            .map(|pattern| {
+                digest_material.push_str(RESIDUAL_SECRET_RULE_ID);
+                digest_material.push('\0');
+                digest_material.push_str(&sha256_digest(pattern.as_bytes()));
+                digest_material.push('\0');
+                Regex::new(pattern).map_err(|error| {
+                    invalid_rule(format!("Residual secret scan regex failed: {error}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             rules: compiled,
+            residual_scanners,
             policy_digest: sha256_digest(digest_material.as_bytes()),
         })
     }
@@ -149,14 +261,15 @@ impl Redactor {
     /// Redacts text and returns replacement counts for rules that matched.
     #[must_use]
     pub fn redact(&self, text: &str) -> (String, Vec<AppliedRedaction>) {
-        self.redact_with_literals(text, &[])
+        let (text, applied, _) = self.redact_checked(text, &[]).into_parts();
+        (text, applied)
     }
 
-    pub(crate) fn redact_with_literals(
+    pub(crate) fn redact_checked(
         &self,
         text: &str,
         runtime_literals: &[(String, String)],
-    ) -> (String, Vec<AppliedRedaction>) {
+    ) -> RedactedText {
         let mut redacted = text.to_owned();
         let mut counts = BTreeMap::<String, u32>::new();
         for (id, literal) in runtime_literals {
@@ -178,17 +291,31 @@ impl Redactor {
                     }
                     count
                 }
-                CompiledMatcher::Regex(expression) => {
-                    let count = expression.find_iter(&redacted).count();
-                    if count != 0 {
-                        redacted = expression
-                            .replace_all(&redacted, NoExpand(REDACTION_MARKER))
-                            .into_owned();
-                    }
+                CompiledMatcher::Regex {
+                    expression,
+                    replacement,
+                } => {
+                    let (next, count) = replace_matches(expression, replacement, &redacted);
+                    redacted = next;
                     count
                 }
             };
             record_count(&mut counts, &rule.id, replacements);
+        }
+        let residual_count = self
+            .residual_scanners
+            .iter()
+            .map(|scanner| {
+                scanner
+                    .find_iter(&redacted)
+                    .filter(|matched| !matched.as_str().contains(REDACTION_MARKER))
+                    .count()
+            })
+            .sum::<usize>();
+        let capture_blocked = residual_count != 0;
+        if capture_blocked {
+            redacted.clear();
+            record_count(&mut counts, RESIDUAL_SECRET_RULE_ID, residual_count);
         }
         let applied = counts
             .into_iter()
@@ -196,7 +323,11 @@ impl Redactor {
                 (replacements != 0).then(|| AppliedRedaction::new(id, replacements))
             })
             .collect();
-        (redacted, applied)
+        RedactedText {
+            text: redacted,
+            applied,
+            capture_blocked,
+        }
     }
 }
 
@@ -235,4 +366,25 @@ fn record_count(counts: &mut BTreeMap<String, u32>, id: &str, count: usize) {
         .entry(id.to_owned())
         .and_modify(|current| *current = current.saturating_add(count))
         .or_insert(count);
+}
+
+fn replace_matches(expression: &Regex, replacement: &str, text: &str) -> (String, usize) {
+    let mut replacements = 0_usize;
+    let replaced = expression
+        .replace_all(text, |captures: &Captures<'_>| {
+            let matched = captures
+                .get(0)
+                .expect("a regex capture always contains the complete match")
+                .as_str();
+            if matched.contains(REDACTION_MARKER) {
+                matched.to_owned()
+            } else {
+                replacements = replacements.saturating_add(1);
+                let mut expanded = String::new();
+                captures.expand(replacement, &mut expanded);
+                expanded
+            }
+        })
+        .into_owned();
+    (replaced, replacements)
 }

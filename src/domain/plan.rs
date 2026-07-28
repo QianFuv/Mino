@@ -3617,6 +3617,45 @@ impl Plan {
         self.validate_invariants()
     }
 
+    /// Marks a Running verification check Failed after its output capture was blocked.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the addressed check is Running at the current
+    /// ordered execution position.
+    pub fn record_check_capture_blocked(
+        &mut self,
+        check_id: &CheckId,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        self.require_status(
+            PlanStatus::InProgress,
+            "record a blocked verification capture",
+        )?;
+        let next_revision = self.next_revision()?;
+        if let Some(task_index) = self.tasks.iter().position(|task| {
+            task.verification_checks()
+                .iter()
+                .any(|check| check.id() == check_id)
+        }) {
+            self.tasks[task_index].record_check_capture_blocked(check_id)?;
+        } else {
+            let check = self
+                .global_verification
+                .iter_mut()
+                .find(|check| check.id() == check_id)
+                .ok_or_else(|| {
+                    DomainError::new(
+                        DomainErrorKind::InvariantViolation,
+                        format!("Check {check_id} does not exist"),
+                    )
+                })?;
+            check.record_capture_blocked()?;
+        }
+        self.record_revision(next_revision, updated_at);
+        self.validate_invariants()
+    }
+
     /// Reopens one completed task after required final verification fails.
     ///
     /// # Errors

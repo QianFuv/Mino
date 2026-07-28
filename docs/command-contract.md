@@ -188,7 +188,7 @@ Command evidence 还绑定实际被检查内容的 `WorkspaceFingerprint`：repo
 | `mino exec deviation resolve` | 计划 | 用当前计划中未 stale、未 supersede 的任务 evidence 把 Open 偏差置为 Resolved。 |
 | `mino exec deviation reject` | 计划，审批边界 | 用 decision reference 和 reason 把 Open 偏差置为 Rejected。 |
 | `mino exec deviation supersede` | 计划 | 用已 Applied 的 Amendment 和 reason 把 Open 偏差置为 Superseded。 |
-| `mino exec check run` | 计划、进程、证据 | 运行一项任务级或全局计划检查，保存 lease、结果和 evidence。 |
+| `mino exec check run` | 计划、进程、证据 | 运行一项任务级或全局计划检查，保存 lease 和结果；普通终态保存 evidence，`capture_blocked` 只将 check 置为 Failed，不发布 evidence。 |
 | `mino exec check monitor` | 计划、有限进程、证据 | 在次数、间隔和总 deadline 内重试一项已有检查，可使用安全取消文件。 |
 | `mino exec schedule spec` | 无 | 输出摘要绑定、调度器中立的检查 handoff；不创建外部任务、不联网、不写 Mino 状态。 |
 | `mino exec criterion pass` | 计划 | 把兼容的不可变证据绑定到一个活动验收条件。 |
@@ -204,7 +204,7 @@ Command evidence 还绑定实际被检查内容的 `WorkspaceFingerprint`：repo
 
 `plan approve` 捕获 project baseline，`exec start` 捕获 task baseline。task complete 比较的是当前 workspace 与 task-start baseline 的局部增量，而不是整个脏工作树；批准前未变化的 dirt、前一任务留下的未提交变化和非 Git 文件都按摘要区分。单个 fingerprint 文件最多 16 MiB，一次 capture 总计最多 256 MiB，超限会明确失败而不是退化为未跟踪变化。
 
-相同 request ID 的 `exec check run` 可以安全精确重试。已有 terminal result 时返回 replay；原调用仍持有 run owner lock 时返回 exit 3 `revision_conflict`，消息标识 AlreadyRunning，并且不新增 evidence 或 plan revision；只有 owner lock 已释放且 lease 没有 result 时才恢复一次 `Interrupted` 终态。
+相同 request ID 的 `exec check run` 可以安全精确重试。已有 terminal result 时返回 replay；原调用仍持有 run owner lock 时返回 exit 3 `revision_conflict`，消息标识 AlreadyRunning，并且不新增 evidence 或 plan revision；只有 owner lock 已释放且 lease 没有 result 时才恢复一次 `Interrupted` 终态。若 residual credential scan 命中，terminal result 为 `capture_blocked`，stdout/stderr 被清空，check 以无 evidence 的 Failed 状态结束，调用返回 policy violation；使用新 request ID 才能在修正检查输出后重新运行。
 
 monitor 参数范围如下：
 

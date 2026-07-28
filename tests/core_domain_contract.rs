@@ -1,11 +1,11 @@
 //! Contract tests for the versioned Mino domain aggregate.
 
 use mino::domain::{
-    AcceptanceCriterion, AmendmentPatch, CheckId, CheckpointKind, CommitGate, CriterionId,
-    DeviationClassification, DeviationStatus, DomainError, DomainErrorKind, Event, Evidence,
-    EvidenceId, GitFlowConsent, MaterialReviewDisposition, Plan, PlanId, PlanStatus, RequestId,
-    ReviewClassification, ReviewItem, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
-    WorkspaceFingerprint, WorkspaceGitEntry,
+    AcceptanceCriterion, AmendmentPatch, CheckId, CheckRunOutcome, CheckpointKind, CommitGate,
+    CriterionId, DeviationClassification, DeviationStatus, DomainError, DomainErrorKind, Event,
+    Evidence, EvidenceId, GitFlowConsent, MaterialReviewDisposition, Plan, PlanId, PlanStatus,
+    RequestId, ReviewClassification, ReviewItem, Task, TaskId, TaskStatus, Timestamp,
+    VerificationCheck, WorkspaceFingerprint, WorkspaceGitEntry,
 };
 use mino::store::{canonical_json_bytes, sha256_digest};
 use schemars::schema_for;
@@ -14,6 +14,18 @@ use serde_json::{Value, json};
 fn timestamp(minute: u8) -> Timestamp {
     Timestamp::parse(format!("2026-07-25T11:{minute:02}:00Z"))
         .expect("test timestamp should be valid")
+}
+
+#[test]
+fn capture_blocked_outcome_has_a_stable_wire_value() {
+    let serialized = serde_json::to_value(CheckRunOutcome::CaptureBlocked)
+        .expect("capture-blocked outcome should serialize");
+    assert_eq!(serialized, json!("capture_blocked"));
+    assert_eq!(
+        serde_json::from_value::<CheckRunOutcome>(serialized)
+            .expect("capture-blocked outcome should deserialize"),
+        CheckRunOutcome::CaptureBlocked
+    );
 }
 
 fn task_id(value: &str) -> TaskId {

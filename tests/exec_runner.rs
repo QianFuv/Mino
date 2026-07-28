@@ -236,6 +236,21 @@ fn runner_fixture_process() {
             std::env::var("MINO_RUNNER_ACCESS_TOKEN")
                 .expect("secret fixture variable should be present")
         ),
+        "residual-secret" => println!("client_secret abcdefghijklmnopqrstuvwxyz"),
+        "chunk-secret" => {
+            io::stdout()
+                .write_all(&vec![b'x'; 8 * 1_024 - 4])
+                .expect("chunk prefix should write");
+            println!("\nTOKEN=chunk-boundary-secret");
+        }
+        "truncated-secret" => {
+            print!("TOKEN=truncation-boundary-secret");
+            io::stdout()
+                .write_all(&vec![b'x'; 32 * 1_024])
+                .expect("truncation suffix should write");
+            io::stdout().flush().expect("fixture output should flush");
+            thread::sleep(Duration::from_secs(1));
+        }
         "abort" => std::process::abort(),
         "replay" => {
             write_marker();
@@ -361,6 +376,127 @@ fn planned_process_outcomes_are_bounded_and_redacted() {
             assert!(serialized.contains("[REDACTED]"));
             assert_eq!(run.result().redactions().len(), 4);
         }
+    }
+}
+
+#[test]
+fn built_in_redaction_covers_structured_credentials_and_fails_closed() {
+    let redactor = Redactor::default();
+    let cases = [
+        (
+            "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature\r\n",
+            "Authorization: Bearer [REDACTED]\r\n",
+        ),
+        (
+            "authorization: Basic dXNlcjpwYXNzd29yZA==\n",
+            "authorization: Basic [REDACTED]\n",
+        ),
+        (
+            r#"{"token" : "json-secret-value"}"#,
+            r#"{"token" : "[REDACTED]"}"#,
+        ),
+        (
+            "{'client_secret': 'single-secret-value'}",
+            "{'client_secret': '[REDACTED]'}",
+        ),
+        ("PASSWORD=\"shell-secret-value\"", "PASSWORD=[REDACTED]"),
+        (
+            "https://example.test/report?access_token=query-secret-value&view=1",
+            "https://example.test/report?access_token=[REDACTED]&view=1",
+        ),
+        ("github_pat_abcdefghijklmnopqrstuvwxyz123456", "[REDACTED]"),
+        ("abcdefghijk.abcdefghijkl.abcdefghijklm", "[REDACTED]"),
+        ("password=秘密值", "password=[REDACTED]"),
+    ];
+    for (input, expected) in cases {
+        let (redacted, applied) = redactor.redact(input);
+        assert_eq!(redacted, expected);
+        assert!(!applied.is_empty());
+    }
+
+    let (blocked, applied) = redactor.redact("client_secret abcdefghijklmnopqrstuvwxyz");
+    assert!(blocked.is_empty());
+    assert!(
+        applied
+            .iter()
+            .any(|redaction| redaction.rule_id() == "builtin-residual-secret-scan")
+    );
+}
+
+#[test]
+fn residual_and_capture_boundary_secrets_never_reach_run_journals() {
+    let project = TestProject::new("credential-boundaries");
+    let journal = CheckRunJournal::new(project.path(), Path::new(".mino/runs"))
+        .expect("journal should be valid");
+    let runner = ProcessRunner::new(Duration::from_millis(5)).expect("runner should be valid");
+    let redactor = Redactor::default();
+    let check = fixture_check();
+    let cases = [
+        (
+            "residual-secret",
+            CheckRunOutcome::CaptureBlocked,
+            8_192,
+            "abcdefghijklmnopqrstuvwxyz",
+        ),
+        (
+            "chunk-secret",
+            CheckRunOutcome::Passed,
+            16_384,
+            "chunk-boundary-secret",
+        ),
+        (
+            "truncated-secret",
+            CheckRunOutcome::OutputLimitExceeded,
+            1_024,
+            "truncation-boundary-secret",
+        ),
+    ];
+    for (index, (mode, expected, output_limit, secret)) in cases.into_iter().enumerate() {
+        let environment = fixture_environment(mode, None);
+        let lease = lease(
+            u64::try_from(index).expect("index should fit") + 80,
+            &check,
+            limits(2_000, output_limit),
+            &environment,
+            &redactor,
+        );
+        let run = runner
+            .run_journaled(project.path(), &journal, lease, &environment, &redactor)
+            .expect("credential fixture should produce a terminal record");
+        assert_eq!(run.result().outcome(), expected);
+        let serialized = serde_json::to_string(run.result()).expect("result should serialize");
+        assert!(
+            !serialized.contains(secret),
+            "{mode} persisted secret-shaped output: {serialized}"
+        );
+        if expected == CheckRunOutcome::CaptureBlocked {
+            assert!(run.result().stdout_summary().is_empty());
+            assert!(run.result().stderr_summary().is_empty());
+            assert!(
+                run.result()
+                    .error_summary()
+                    .is_some_and(|error| error.contains("residual credential pattern"))
+            );
+        } else {
+            assert!(serialized.contains("[REDACTED]"));
+        }
+    }
+    let journal_bytes = fs::read_dir(project.path().join(".mino/runs"))
+        .expect("run journal directory should exist")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .flat_map(|entry| fs::read_dir(entry.path()).expect("request directory should read"))
+        .filter_map(Result::ok)
+        .filter_map(|entry| fs::read(entry.path()).ok())
+        .flatten()
+        .collect::<Vec<_>>();
+    let journals = String::from_utf8_lossy(&journal_bytes);
+    for secret in [
+        "abcdefghijklmnopqrstuvwxyz",
+        "chunk-boundary-secret",
+        "truncation-boundary-secret",
+    ] {
+        assert!(!journals.contains(secret));
     }
 }
 

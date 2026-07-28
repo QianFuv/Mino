@@ -130,6 +130,7 @@ fn main() {
     }
     match mode.as_str() {
         "pass" | "pass-mark" => println!("planned success"),
+        "residual-secret" => println!("client_secret executioncredentialvalue"),
         "fail" | "fail-mark" => {
             eprintln!("planned failure");
             std::process::exit(9);
@@ -137,6 +138,7 @@ fn main() {
         _ => std::process::exit(10),
     }
 }
+
 "#,
     )
     .expect("helper source should be written");
@@ -151,6 +153,73 @@ fn main() {
         String::from_utf8_lossy(&output.stderr)
     );
     executable
+}
+
+#[test]
+fn residual_secret_capture_fails_the_check_without_publishing_evidence() {
+    let project = TestProject::new("capture-blocked", "residual-secret", None);
+    let service = ExecutionService::discover(project.path()).expect("service should discover");
+    let started = service
+        .start_task(
+            mutation(
+                project.base_revision,
+                42,
+                start_command(project.base_revision, 42, "T1"),
+                40,
+            ),
+            task_id("T1"),
+        )
+        .expect("task should start");
+    let error = service
+        .run_check(
+            &mutation(
+                started.revision,
+                43,
+                check_command(started.revision, 43),
+                41,
+            ),
+            &check_id("TASK-CHECK"),
+        )
+        .expect_err("residual credential capture must fail closed");
+    assert_eq!(error.category(), ErrorCategory::PolicyViolation);
+    assert!(error.message().contains("residual credential scan"));
+    assert!(!error.message().contains("executioncredentialvalue"));
+    assert!(
+        EvidenceStore::new(project.path())
+            .list(&plan_id())
+            .expect("evidence should list")
+            .is_empty()
+    );
+    let plan = PlanStore::new(project.path())
+        .load_plan(&plan_id())
+        .expect("plan should load");
+    let check = &plan
+        .task(&task_id("T1"))
+        .expect("task should exist")
+        .verification_checks()[0];
+    assert_eq!(check.status(), CheckStatus::Failed);
+    assert!(check.evidence_refs().is_empty());
+    let managed_bytes = recursive_managed_bytes(&project.path().join(".mino"));
+    assert!(!String::from_utf8_lossy(&managed_bytes).contains("executioncredentialvalue"));
+}
+
+fn recursive_managed_bytes(root: &Path) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path.is_file() {
+                output.extend(fs::read(path).expect("managed fixture file should be readable"));
+            }
+        }
+    }
+    output
 }
 
 fn create_approved_plan(

@@ -306,6 +306,76 @@ fn supplemental_types_are_monotonic_queryable_deduplicated_and_redacted() {
     assert_eq!(audit.blob_count(), 2);
 }
 
+#[test]
+fn residual_credentials_block_evidence_records_and_text_blobs() {
+    let project = TestProject::new("residual-credentials", true);
+    let store = EvidenceStore::new(project.path());
+    let redactor = Redactor::default();
+    let description_secret = "descriptioncredentialvalue";
+    let description_request = add_request(
+        180,
+        2,
+        EvidenceType::ManualObservation,
+        EvidenceSource::Observation,
+        &format!("client_secret {description_secret}"),
+    )
+    .with_task(task_id());
+    let error = store
+        .add(&description_request, &redactor)
+        .expect_err("residual description credential must block capture");
+    assert_eq!(error.kind(), EvidenceErrorKind::InvalidRequest);
+    assert!(!error.message().contains(description_secret));
+
+    let artifact_secret = "artifactcredentialvalue";
+    fs::write(
+        project.path().join("residual.log"),
+        format!("client_secret {artifact_secret}\n"),
+    )
+    .expect("residual artifact fixture should be written");
+    let artifact_request = add_request(
+        181,
+        2,
+        EvidenceType::Log,
+        EvidenceSource::Artifact(PathBuf::from("residual.log")),
+        "Capture residual log",
+    )
+    .with_task(task_id());
+    let error = store
+        .add(&artifact_request, &redactor)
+        .expect_err("residual artifact credential must block capture");
+    assert_eq!(error.kind(), EvidenceErrorKind::InvalidRequest);
+    assert!(!error.message().contains(artifact_secret));
+
+    let managed_bytes = recursive_file_bytes(&project.path().join(".mino"));
+    let managed_text = String::from_utf8_lossy(&managed_bytes);
+    assert!(!managed_text.contains(description_secret));
+    assert!(!managed_text.contains(artifact_secret));
+    assert!(
+        !evidence_directory(project.path())
+            .join("index.jsonl")
+            .exists()
+    );
+}
+
+fn recursive_file_bytes(root: &Path) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path.is_file() {
+                output.extend(fs::read(path).expect("managed fixture file should be readable"));
+            }
+        }
+    }
+    output
+}
+
 fn supplemental_requests() -> [AddEvidenceRequest; 8] {
     [
         add_request(

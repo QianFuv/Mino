@@ -354,6 +354,8 @@ pub enum CheckRunOutcome {
     SpawnFailed,
     /// The process ended but one of its output streams could not be captured.
     CaptureFailed,
+    /// Captured text still resembled a credential after all redaction rules ran.
+    CaptureBlocked,
     /// A prior invocation stopped after its lease but before its result journal.
     Interrupted,
 }
@@ -557,12 +559,21 @@ impl CheckRunResult {
             }
             CheckRunOutcome::SpawnFailed
             | CheckRunOutcome::CaptureFailed
+            | CheckRunOutcome::CaptureBlocked
             | CheckRunOutcome::Interrupted
                 if self.error_summary.as_deref().is_none_or(str::is_empty) =>
             {
                 Err(DomainError::new(
                     DomainErrorKind::InvariantViolation,
-                    "Spawn-failed and interrupted results require an error summary",
+                    "Failed, blocked, and interrupted results require an error summary",
+                ))
+            }
+            CheckRunOutcome::CaptureBlocked
+                if !self.stdout_summary.is_empty() || !self.stderr_summary.is_empty() =>
+            {
+                Err(DomainError::new(
+                    DomainErrorKind::InvariantViolation,
+                    "A capture-blocked result cannot retain stdout or stderr text",
                 ))
             }
             _ => Ok(()),

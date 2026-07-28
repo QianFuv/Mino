@@ -11,8 +11,8 @@ use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    CheckRunResult, CheckStatus, Evidence, EvidenceFields, EvidenceId, EvidenceType, Plan, PlanId,
-    Redaction, RequestId, VerificationCheck,
+    CheckRunOutcome, CheckRunResult, CheckStatus, Evidence, EvidenceFields, EvidenceId,
+    EvidenceType, Plan, PlanId, Redaction, RequestId, VerificationCheck,
 };
 use crate::managed_fs::{
     ManagedEntryKind, ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs, read_bounded_line,
@@ -187,6 +187,11 @@ impl CommandEvidenceRequest {
         result
             .validate()
             .map_err(|error| invalid(error.to_string()))?;
+        if result.outcome() == CheckRunOutcome::CaptureBlocked {
+            return Err(invalid(
+                "Capture-blocked check results cannot be published as evidence",
+            ));
+        }
         if request_command.is_empty() || request_command.iter().any(|part| part.trim().is_empty()) {
             return Err(invalid(
                 "Command evidence requires a complete canonical invoking command",
@@ -219,11 +224,11 @@ impl PreparedInput {
         request: &AddEvidenceRequest,
         redactor: &Redactor,
     ) -> Result<Self, EvidenceError> {
-        let (description, description_redactions) = redact_text(redactor, request.description());
+        let (description, description_redactions) = redact_text(redactor, request.description())?;
         let mut redactions = description_redactions;
         let mut request_command = Vec::with_capacity(request.context().command().len());
         for argument in request.context().command() {
-            let (argument, argument_redactions) = redact_text(redactor, argument);
+            let (argument, argument_redactions) = redact_text(redactor, argument)?;
             merge_redactions(&mut redactions, argument_redactions);
             request_command.push(argument);
         }
@@ -234,15 +239,14 @@ impl PreparedInput {
                 merge_redactions(&mut redactions, artifact.redactions.clone());
                 (Some(artifact.protocol_path.clone()), Some(artifact))
             }
-            EvidenceSource::Reference(reference) if request.kind() == EvidenceType::Url => {
-                let (reference, reference_redactions) = redact_text(redactor, reference);
-                merge_redactions(&mut redactions, reference_redactions);
-                (Some(reference), None)
-            }
             EvidenceSource::Reference(reference) if request.kind() == EvidenceType::Commit => {
                 (Some(reference.to_ascii_lowercase()), None)
             }
-            EvidenceSource::Reference(reference) => (Some(reference.clone()), None),
+            EvidenceSource::Reference(reference) => {
+                let (reference, reference_redactions) = redact_text(redactor, reference)?;
+                merge_redactions(&mut redactions, reference_redactions);
+                (Some(reference), None)
+            }
             EvidenceSource::Observation => (None, None),
         };
         Ok(Self {
@@ -1054,13 +1058,18 @@ fn digest_from_blob_path(path: &ManagedPath) -> Option<String> {
     .then(|| format!("sha256:{stem}"))
 }
 
-fn redact_text(redactor: &Redactor, text: &str) -> (String, Vec<Redaction>) {
-    let (redacted, applied) = redactor.redact(text);
+fn redact_text(redactor: &Redactor, text: &str) -> Result<(String, Vec<Redaction>), EvidenceError> {
+    let (redacted, applied, capture_blocked) = redactor.redact_checked(text, &[]).into_parts();
+    if capture_blocked {
+        return Err(invalid(
+            "Evidence capture was blocked by the residual credential scan",
+        ));
+    }
     let redactions = applied
         .into_iter()
         .map(|redaction| Redaction::new(redaction.rule_id(), redaction.replacements()))
         .collect();
-    (redacted, redactions)
+    Ok((redacted, redactions))
 }
 
 fn command_output_summary(result: &CheckRunResult) -> String {

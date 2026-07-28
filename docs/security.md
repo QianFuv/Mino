@@ -103,7 +103,7 @@ Project scan 的 ignore 语义不适用于已批准 File Map 的验证范围。W
 
 每个 run request 先以项目内 `owner.lock` 取得跨进程唯一所有权，锁从 lease 发布前持续到 terminal result 及其父目录完成同步。相同 request ID 的实时重试若发现锁仍被持有，会得到可重试的 AlreadyRunning/revision conflict，且不会写 `Interrupted`、evidence 或计划终态。只有取得已释放的锁后仍看到 lease 且没有 result，才能把旧运行恢复为 `Interrupted`；该结果的后续重试只 replay。
 
-spawn failure、unexpected exit、timeout、output limit、capture failure 与经 owner-lock 证明的 interruption 都会形成持久终态。exit 6 不是“没有证据”：失败 evidence 会保留供审计，只是不能证明检查通过。
+spawn failure、unexpected exit、timeout、output limit、capture failure 与经 owner-lock 证明的 interruption 都会形成持久终态。exit 6 不是“没有证据”：普通失败 evidence 会保留供审计，只是不能证明检查通过。唯一例外是 `capture_blocked`：residual credential scan 命中后只保存无敏感值的 run 终态，check 变为 Failed，但不会创建 Command evidence。
 
 ### 有限监控
 
@@ -133,9 +133,9 @@ result destination 必须是项目内的相对文件，父目录为现有普通�
 
 ## 输出脱敏与证据
 
-命令输出会先脱敏再计算摘要和持久化。默认规则替换形似 `api_key`、`token`、`secret`、`password` 和 `authorization` 的 key/value，并只记录 rule ID 与 count；secret-named allowlisted environment value 也会注册为 runtime literal redaction。
+命令输出会先脱敏再计算摘要和持久化。默认策略按稳定 rule ID 分别处理完整 Authorization header、Bearer/Basic/Digest credential、quoted JSON value、shell assignment、URL query secret、常见 token prefix、JWT 和 private-key block；secret-named allowlisted environment value 也会注册为 runtime literal redaction。stdout/stderr capture 在分块读取后先合并，因此 credential 跨 chunk boundary 时仍按完整逻辑输出处理。持久记录只包含 rule ID 与 replacement count。
 
-脱敏只是纵深防御，无法保证识别任意敏感信息。计划检查不应打印凭据；File、Log、Screenshot 等补充 evidence 也可能包含敏感字节。分享 `.mino` 或派生报告前必须人工审阅。
+结构化替换后还会执行一轮低成本 residual credential scan。命中时 stdout/stderr 会清空，run 记录 `capture_blocked` 和不含匹配值的诊断；File、Log、GitDiff、description、URL/reference 等文字 evidence 则在创建 record/blob 前整体拒绝。二进制 File 与 Screenshot 仍不做内容解释，因此计划检查和补充 evidence 都不应包含凭据；分享 `.mino` 或派生报告前仍必须人工审阅。
 
 证据不可变：修正会创建通过 `supersedes` 关联的新记录。被 supersede 的记录不能通过当前 gate。`AcceptedException` 必须携带策略要求的 approval-compatible binding，不是通用绕过。Material amendment 会保留旧证据但标记 stale；pending amendment 阶段则拒绝新增证据，避免绑定到含糊输入。
 

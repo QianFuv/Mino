@@ -230,14 +230,18 @@ fn redact_artifact(
     if !should_redact {
         return Ok((bytes, Vec::new()));
     }
-    let text = String::from_utf8(bytes.clone()).map_err(|error| {
-        bytes.fill(0);
-        invalid(format!(
-            "Text evidence artifact is not valid UTF-8: {error}"
-        ))
+    let text = String::from_utf8(std::mem::take(&mut bytes)).map_err(|error| {
+        let message = format!("Text evidence artifact is not valid UTF-8: {error}");
+        let mut recovered = error.into_bytes();
+        recovered.fill(0);
+        invalid(message)
     })?;
-    bytes.fill(0);
-    let (redacted, applied) = redactor.redact(&text);
+    let (redacted, applied, capture_blocked) = redactor.redact_checked(&text, &[]).into_parts();
+    if capture_blocked {
+        return Err(invalid(
+            "Evidence capture was blocked by the residual credential scan",
+        ));
+    }
     let redactions = applied
         .into_iter()
         .map(|redaction| Redaction::new(redaction.rule_id(), redaction.replacements()))

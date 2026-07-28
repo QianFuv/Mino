@@ -533,6 +533,9 @@ impl ExecutionService {
             .map_err(|error| map_runner_error(&error))?;
         let disposition = journaled.disposition().into();
         let run = journaled.into_result();
+        if run.outcome() == crate::domain::CheckRunOutcome::CaptureBlocked {
+            return self.fail_capture_blocked(request, leased_revision, &changed_prefix, check_id);
+        }
         let evidence_command = phase_command(&request.command, "evidence");
         let evidence_request = CommandEvidenceRequest::new(run.clone(), evidence_command)
             .map_err(|error| map_evidence_error(&error))?;
@@ -562,6 +565,24 @@ impl ExecutionService {
             run,
             disposition,
         })
+    }
+
+    fn fail_capture_blocked(
+        &self,
+        request: &PlanMutationRequest,
+        leased_revision: u64,
+        changed_prefix: &str,
+        check_id: &CheckId,
+    ) -> Result<CheckExecutionReport, MinoError> {
+        let attach_request = phase_request(request, "attach", leased_revision)?;
+        self.commit_or_replay(attach_request, vec![format!("{changed_prefix}.status")], {
+            let check_id = check_id.clone();
+            move |plan, at| plan.record_check_capture_blocked(&check_id, at)
+        })?;
+        Err(MinoError::new(
+            ErrorCategory::PolicyViolation,
+            format!("Check {check_id} output capture was blocked by the residual credential scan"),
+        ))
     }
 
     fn commit_or_replay<F>(
