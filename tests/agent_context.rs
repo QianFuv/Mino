@@ -499,6 +499,7 @@ fn automatic_git_flow_requires_current_plan_binding_before_start_and_commit() {
 
 #[test]
 fn verified_execution_requires_outcome_before_finish_guidance() {
+    let project = TestProject::new("outcome-guidance");
     let mut plan = configured_draft();
     plan.finalize(timestamp(3)).expect("plan should finalize");
     plan.record_approval(Approval::plan(
@@ -529,7 +530,7 @@ fn verified_execution_requires_outcome_before_finish_guidance() {
     plan.record_global_check_pass(&check_id("GLOBAL-V1"), evidence_id("E0003"), timestamp(9))
         .expect("global check should pass");
 
-    let incomplete = build_agent_context(Path::new("C:/fixture"), Some(&plan))
+    let incomplete = build_agent_context(project.path(), Some(&plan))
         .expect("incomplete outcome context should build");
     assert_eq!(
         incomplete.allowed_actions,
@@ -550,7 +551,7 @@ fn verified_execution_requires_outcome_before_finish_guidance() {
         timestamp(10),
     )
     .expect("Final Outcome should record");
-    let complete = build_agent_context(Path::new("C:/fixture"), Some(&plan))
+    let complete = build_agent_context(project.path(), Some(&plan))
         .expect("complete outcome context should build");
     assert_eq!(complete.next_actions[0].id, "exec.finish");
 }

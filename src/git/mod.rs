@@ -32,7 +32,7 @@ pub use hooks::{
     GitHookStatusReport,
 };
 pub(crate) use hooks::{hook_proposal, hook_status, install_hooks, observe_hook};
-pub use inspect::{GitAdapter, GitFacts, GitHeadState};
+pub use inspect::{GitAdapter, GitAvailability, GitFacts, GitHeadState};
 pub(crate) use inspect::{GitReadinessProbe, GitRootProbe, probe_root};
 pub use intent::{
     CommitFileSnapshot, CommitFileSnapshotKind, GitCommitCompletion, GitCommitCompletionInput,

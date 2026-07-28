@@ -126,10 +126,16 @@ impl GitBindingService {
 }
 
 pub(crate) fn map_git_error(error: &GitError) -> MinoError {
-    let category = match error.kind() {
-        GitErrorKind::InvalidOutput => ErrorCategory::DriftDetected,
-        GitErrorKind::PolicyViolation => ErrorCategory::PolicyViolation,
-        GitErrorKind::Unavailable => ErrorCategory::EnvironmentUnavailable,
+    let (category, message) = match error.kind() {
+        GitErrorKind::InvalidOutput => (
+            ErrorCategory::DriftDetected,
+            "Git returned invalid machine-readable state",
+        ),
+        GitErrorKind::PolicyViolation => (ErrorCategory::PolicyViolation, error.message()),
+        GitErrorKind::Unavailable => (
+            ErrorCategory::EnvironmentUnavailable,
+            "Git inspection or operation is unavailable",
+        ),
     };
-    MinoError::new(category, error.message())
+    MinoError::new(category, message)
 }

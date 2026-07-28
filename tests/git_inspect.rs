@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use mino::domain::{GitReadiness, Plan, PlanDraftSeed, PlanId, RequestId, Timestamp};
 use mino::git::{
-    GitAdapter, GitErrorKind, GitHeadState, GitStatusEntry, GitStatusKind, parse_porcelain_v2,
+    GitAdapter, GitAvailability, GitErrorKind, GitHeadState, GitStatusEntry, GitStatusKind,
+    parse_porcelain_v2,
 };
 use mino::integration::IntegrationOptions;
 use mino::project::initialize_with_options;
@@ -98,6 +99,12 @@ fn inspect_reports_normal_status_submodules_and_preserves_git_bytes() {
         .expect("plain directory should inspect");
     assert!(!plain.repository);
     assert_eq!(plain.head_state, GitHeadState::NotRepository);
+    assert_eq!(
+        GitAdapter::new(&non_repository)
+            .inspect_availability()
+            .expect("plain directory availability should inspect"),
+        GitAvailability::NotRepository
+    );
 
     let repository = committed_repository(&area.path("repository"));
     add_status_matrix(&area, &repository);
@@ -126,6 +133,21 @@ fn inspect_reports_normal_status_submodules_and_preserves_git_bytes() {
     assert!(facts.status.iter().any(GitStatusEntry::is_submodule));
     assert!(!facts.is_clean);
     assert_eq!(protected_git_bytes(&repository), protected);
+}
+
+#[test]
+fn availability_rejects_corrupt_repository_metadata_without_echoing_git_output() {
+    let area = TestArea::new("corrupt-metadata");
+    let repository = committed_repository(&area.path("repository"));
+    let secret = "gitmetadatacredentialvalue";
+    fs::write(repository.join(".git/HEAD"), format!("invalid {secret}\n"))
+        .expect("corrupt HEAD should be written");
+
+    let error = GitAdapter::new(&repository)
+        .inspect_availability()
+        .expect_err("corrupt repository metadata must not become NotRepository");
+    assert_eq!(error.kind(), GitErrorKind::Unavailable);
+    assert!(!error.message().contains(secret));
 }
 
 #[test]

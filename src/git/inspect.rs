@@ -1,5 +1,6 @@
 //! Repository, worktree, HEAD, index, and porcelain fact inspection.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -38,6 +39,15 @@ pub(crate) enum GitReadinessProbe {
         branch: Option<String>,
         base_commit: Option<String>,
     },
+}
+
+/// Explicit repository availability returned by Git inspection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GitAvailability {
+    /// Git confirmed that the supplied path is not inside a repository.
+    NotRepository,
+    /// Git returned complete, validated repository facts.
+    Available(Box<GitFacts>),
 }
 
 /// Complete read-only Git facts for one supplied path.
@@ -112,20 +122,20 @@ impl GitAdapter {
     /// or when Git violates the expected machine-readable contracts.
     pub fn inspect(&self) -> Result<GitFacts, GitError> {
         let inspected_path = canonical_directory(&self.start)?;
-        let inside = run_read_only(&inspected_path, ["rev-parse", "--is-inside-work-tree"])?;
-        if !inside.success {
-            return if is_not_repository(&inside) {
-                Ok(not_repository(inspected_path))
-            } else {
-                Err(failed_command(&inside, "Git worktree probe"))
-            };
+        match inspect_availability_at(inspected_path.clone())? {
+            GitAvailability::NotRepository => Ok(not_repository(inspected_path)),
+            GitAvailability::Available(facts) => Ok(*facts),
         }
-        let inside_value = output_text(&inside, "Git worktree probe")?;
-        match inside_value.as_str() {
-            "true" => inspect_worktree(inspected_path),
-            "false" => inspect_bare_or_non_repository(inspected_path),
-            _ => Err(invalid("Git returned an invalid worktree probe value")),
-        }
+    }
+
+    /// Distinguishes an explicit non-repository from validated Git facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Git is unavailable, repository metadata is
+    /// present but unusable, or machine-readable output is invalid.
+    pub fn inspect_availability(&self) -> Result<GitAvailability, GitError> {
+        inspect_availability_at(canonical_directory(&self.start)?)
     }
 
     pub(crate) fn index_entries(&self) -> Result<Vec<u8>, GitError> {
@@ -139,7 +149,7 @@ impl GitAdapter {
         let root = canonical_directory(&self.start)?;
         let inside = run_probe(&root, ["rev-parse", "--is-inside-work-tree"])?;
         if !inside.success {
-            return if is_not_repository(&inside) {
+            return if is_explicit_not_repository(&root, &inside)? {
                 Ok(GitReadinessProbe::NotRepository)
             } else {
                 Err(failed_command(&inside, "Git worktree probe"))
@@ -182,7 +192,7 @@ pub(crate) fn probe_root(start: &Path) -> Result<GitRootProbe, GitError> {
     let start = canonical_directory(start)?;
     let output = run_probe(&start, ["rev-parse", "--show-toplevel"])?;
     if !output.success {
-        return if is_not_repository(&output) {
+        return if is_explicit_not_repository(&start, &output)? {
             Ok(GitRootProbe::NotRepository)
         } else {
             Err(failed_command(&output, "Git root probe"))
@@ -199,6 +209,24 @@ pub(crate) fn probe_root(start: &Path) -> Result<GitRootProbe, GitError> {
         Ok(GitRootProbe::Found(canonical))
     } else {
         Err(invalid("Git root probe did not return a directory"))
+    }
+}
+
+fn inspect_availability_at(inspected_path: PathBuf) -> Result<GitAvailability, GitError> {
+    let inside = run_probe(&inspected_path, ["rev-parse", "--is-inside-work-tree"])?;
+    if !inside.success {
+        return if is_explicit_not_repository(&inspected_path, &inside)? {
+            Ok(GitAvailability::NotRepository)
+        } else {
+            Err(failed_command(&inside, "Git worktree probe"))
+        };
+    }
+    match output_text(&inside, "Git worktree probe")?.as_str() {
+        "true" => inspect_worktree(inspected_path)
+            .map(Box::new)
+            .map(GitAvailability::Available),
+        "false" => inspect_bare_or_non_repository(inspected_path),
+        _ => Err(invalid("Git returned an invalid worktree probe value")),
     }
 }
 
@@ -266,14 +294,28 @@ fn inspect_worktree(inspected_path: PathBuf) -> Result<GitFacts, GitError> {
     })
 }
 
-fn inspect_bare_or_non_repository(inspected_path: PathBuf) -> Result<GitFacts, GitError> {
+fn inspect_bare_or_non_repository(inspected_path: PathBuf) -> Result<GitAvailability, GitError> {
     let bare = run_read_only(&inspected_path, ["rev-parse", "--is-bare-repository"])?;
-    if !bare.success || output_text(&bare, "Git bare-repository probe")? != "true" {
-        return Ok(not_repository(inspected_path));
+    if !bare.success {
+        return if is_explicit_not_repository(&inspected_path, &bare)? {
+            Ok(GitAvailability::NotRepository)
+        } else {
+            Err(failed_command(&bare, "Git bare-repository probe"))
+        };
+    }
+    if output_text(&bare, "Git bare-repository probe")? != "true" {
+        return if has_git_marker(&inspected_path)? {
+            Err(GitError::new(
+                GitErrorKind::Unavailable,
+                "Git repository metadata is present but unusable",
+            ))
+        } else {
+            Ok(GitAvailability::NotRepository)
+        };
     }
     let common_dir = git_existing_path(&inspected_path, &["rev-parse", "--git-common-dir"], true)?;
     let git_dir = git_existing_path(&inspected_path, &["rev-parse", "--git-dir"], true)?;
-    Ok(GitFacts {
+    Ok(GitAvailability::Available(Box::new(GitFacts {
         repository: true,
         is_worktree: false,
         inspected_path,
@@ -292,7 +334,7 @@ fn inspect_bare_or_non_repository(inspected_path: PathBuf) -> Result<GitFacts, G
         unstaged_paths: Vec::new(),
         untracked_paths: Vec::new(),
         is_clean: false,
-    })
+    })))
 }
 
 fn not_repository(inspected_path: PathBuf) -> GitFacts {
@@ -411,13 +453,7 @@ fn require_success(output: &GitCommandOutput, operation: &str) -> Result<(), Git
     if output.success {
         Ok(())
     } else {
-        Err(GitError::new(
-            GitErrorKind::Unavailable,
-            format!(
-                "{operation} failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        ))
+        Err(failed_command(output, operation))
     }
 }
 
@@ -449,14 +485,33 @@ fn is_not_repository(output: &GitCommandOutput) -> bool {
         && String::from_utf8_lossy(&output.stderr).contains("not a git repository")
 }
 
+fn is_explicit_not_repository(
+    inspected_path: &Path,
+    output: &GitCommandOutput,
+) -> Result<bool, GitError> {
+    Ok(is_not_repository(output) && !has_git_marker(inspected_path)?)
+}
+
+fn has_git_marker(inspected_path: &Path) -> Result<bool, GitError> {
+    for ancestor in inspected_path.ancestors() {
+        match fs::symlink_metadata(ancestor.join(".git")) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(GitError::new(
+                    GitErrorKind::Unavailable,
+                    "Git repository marker could not be inspected",
+                ));
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn failed_command(output: &GitCommandOutput, operation: &str) -> GitError {
     GitError::new(
         GitErrorKind::Unavailable,
-        format!(
-            "{operation} failed with exit {:?}: {}",
-            output.exit_code,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ),
+        format!("{operation} failed with exit {:?}", output.exit_code),
     )
 }
 

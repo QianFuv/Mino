@@ -35,6 +35,11 @@ When Approved Git Flow is ready to start or commit and binding is not current,
 execute the returned `git.bind` argv, refresh context, and wait for Mino to
 return `exec.start` or `git.commit`.
 
+Agent context uses `git: null` only when Git explicitly confirms that the
+project is not a repository. A missing executable, timeout, permission or
+metadata failure, or invalid machine-readable output returns a typed non-zero
+error and blocks action generation. The error does not echo raw Git output.
+
 Use `mino git inspect --plan <id> --format json --no-input` for a complete
 read-only relationship report. Use
 `mino git bind --plan <id> --current --format json --no-input` only to bind the

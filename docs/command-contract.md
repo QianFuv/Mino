@@ -161,6 +161,8 @@ Validation/Agent 对阻塞 finding 使用精确修复映射：所有非 conflict
 
 Agent 命令直接返回各自 schema，不套 `mino.result/v1`。缺少 JSON 或 no-input 模式时以 exit 5 失败。
 
+`agent context` 和 `agent next` 只有在 Git 明确确认当前目录不是 repository 时才把 `git` 表示为 `null`。Git executable 缺失、timeout、权限或 repository metadata 故障返回 exit 7 `environment_unavailable`；machine-readable output 无效返回 exit 8 `drift_detected`。这些失败阻止 Agent 动作生成，错误 envelope 不包含 Git 的原始 stdout/stderr。
+
 <!-- doc-contract: next-actions-subset -->
 
 每个 `next_actions[].id` 都是当前 `allowed_actions` 的成员。Approved Git Flow 下，Ready 计划或待自动提交的 Done task 若 binding 为 `missing`、`foreign_worktree`、`stale_branch`、`stale_head` 或 `not_repository`，下一步只返回精确 `git.bind` argv；刷新 context 且 binding 为 `current` 后，才分别返回 `exec.start` 或 `git.commit`。调用方不得在 returned argv 之外手工插入 bind、start、commit 或其他状态修改。

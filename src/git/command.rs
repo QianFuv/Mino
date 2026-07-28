@@ -171,5 +171,17 @@ fn map_bounded_error(error: &BoundedCommandError) -> GitError {
     } else {
         GitErrorKind::Unavailable
     };
-    GitError::new(kind, format!("Git adapter command failed: {error}"))
+    let message = match error.kind() {
+        BoundedCommandErrorKind::OutputLimit | BoundedCommandErrorKind::Timeout => {
+            format!("Git adapter command failed: {error}")
+        }
+        BoundedCommandErrorKind::Spawn => "Git executable is unavailable".to_owned(),
+        BoundedCommandErrorKind::InvalidLimits
+        | BoundedCommandErrorKind::Capture
+        | BoundedCommandErrorKind::Observe
+        | BoundedCommandErrorKind::Terminate => {
+            "Git adapter command could not complete safely".to_owned()
+        }
+    };
+    GitError::new(kind, message)
 }

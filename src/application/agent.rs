@@ -12,7 +12,9 @@ use crate::domain::{
     CheckId, CheckStatus, MaterialReviewDisposition, Plan, PlanId, PlanStatus,
     ReviewClassification, ReviewStatus, TaskId, TaskStatus,
 };
-use crate::git::{ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitHeadState};
+use crate::git::{
+    ActiveBindingStatus, ActiveBindingStore, GitAdapter, GitAvailability, GitHeadState,
+};
 use crate::project::ProjectPlanSelection;
 use crate::validation::{ValidationReport, validate_plan};
 use crate::{ErrorCategory, MinoError, NextAction};
@@ -506,10 +508,14 @@ fn alternatives_action() -> NextAction {
 }
 
 fn agent_git_context(root: &Path) -> Result<Option<AgentGitContext>, MinoError> {
-    let Ok(facts) = GitAdapter::new(root).inspect() else {
-        return Ok(None);
+    let facts = match GitAdapter::new(root)
+        .inspect_availability()
+        .map_err(|error| crate::application::git_binding::map_git_error(&error))?
+    {
+        GitAvailability::NotRepository => return Ok(None),
+        GitAvailability::Available(facts) => *facts,
     };
-    if !facts.repository || !facts.is_worktree {
+    if !facts.is_worktree {
         return Ok(None);
     }
     let resolution = ActiveBindingStore::new(root)

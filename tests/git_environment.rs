@@ -197,6 +197,73 @@ fn discovery_and_readiness_probes_enforce_timeout_and_output_limits() {
 }
 
 #[test]
+fn agent_context_only_downgrades_an_explicit_non_repository() {
+    let area = TestArea::new("agent-inspection");
+    let shim_directory = area.path("shim");
+    fs::create_dir(&shim_directory).expect("Git shim directory should be created");
+    compile_git_shim(&shim_directory);
+
+    let non_repository = initialized_non_git_project(&area.path("non-repository"));
+    let context = json_success(&run_with_git_shim(
+        &non_repository,
+        &shim_directory,
+        &["agent", "context"],
+    ));
+    assert_eq!(context["git"], Value::Null);
+
+    for (label, marker, exit_code, error_code) in [
+        (
+            "command-failure",
+            "command-failure.marker",
+            7,
+            "environment_unavailable",
+        ),
+        ("malformed", "malformed.marker", 8, "drift_detected"),
+        ("output-limit", "output-limit.marker", 8, "drift_detected"),
+    ] {
+        let project = initialized_non_git_project(&area.path(label));
+        fs::write(project.join(marker), "trigger\n").expect("Git failure marker should be written");
+        let output = run_with_git_shim(&project, &shim_directory, &["agent", "context"]);
+        let failure = json_failure(&output, exit_code, error_code);
+        assert_eq!(failure["active_plan"], Value::Null);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("gitcommandcredentialvalue"));
+    }
+
+    let timeout = initialized_non_git_project(&area.path("timeout"));
+    fs::write(timeout.join("probe-timeout.marker"), "timeout\n")
+        .expect("Git timeout marker should be written");
+    let started = Instant::now();
+    let failure = run_with_git_shim(&timeout, &shim_directory, &["agent", "context"]);
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "Agent Git inspection exceeded its bounded timeout"
+    );
+    json_failure(&failure, 7, "environment_unavailable");
+
+    let empty_path = area.path("missing-git");
+    fs::create_dir(&empty_path).expect("empty PATH directory should be created");
+    let missing = initialized_non_git_project(&area.path("missing-executable"));
+    let failure = run_with_git_shim(&missing, &empty_path, &["agent", "context"]);
+    json_failure(&failure, 7, "environment_unavailable");
+}
+
+#[test]
+fn recorded_git_plan_blocks_agent_context_when_repository_metadata_breaks() {
+    let area = TestArea::new("recorded-git-failure");
+    let repository = committed_repository(&area.path("repository"), "recorded-git", true);
+    let plan = create_plan(&repository, None, 20);
+    assert_eq!(plan.git_readiness().repository(), "Present");
+    assert!(plan.git_readiness().git_flow_enabled());
+
+    let secret = "gitmetadatacredentialvalue";
+    fs::write(repository.join(".git/HEAD"), format!("invalid {secret}\n"))
+        .expect("corrupt HEAD should be written");
+    let output = run_mino(&repository, &["agent", "context"]);
+    json_failure(&output, 7, "environment_unavailable");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+}
+
+#[test]
 fn inspect_changes_uses_project_root_and_default_index_under_each_git_override() {
     let area = TestArea::new("changes");
     let primary = committed_repository(&area.path("primary"), "primary", false);
@@ -389,6 +456,14 @@ fn main() {
         .iter()
         .any(|argument| argument == "--is-inside-work-tree")
     {
+        if root.join("command-failure.marker").exists() {
+            eprintln!("permission denied: gitcommandcredentialvalue");
+            std::process::exit(1);
+        }
+        if root.join("malformed.marker").exists() {
+            println!("invalid-worktree-value");
+            return;
+        }
         if root.join("probe-timeout.marker").exists() {
             thread::sleep(Duration::from_secs(30));
             return;
@@ -504,6 +579,20 @@ fn json_success(output: &Output) -> Value {
     );
     assert!(output.stderr.is_empty());
     serde_json::from_slice(&output.stdout).expect("Mino stdout should be JSON")
+}
+
+fn json_failure(output: &Output, exit_code: i32, error_code: &str) -> Value {
+    assert_eq!(
+        output.status.code(),
+        Some(exit_code),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let value: Value = serde_json::from_slice(&output.stdout).expect("Mino failure should be JSON");
+    assert_eq!(value["error"]["code"], error_code);
+    value
 }
 
 fn git(path: &Path, arguments: &[&str]) {
