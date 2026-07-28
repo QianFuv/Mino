@@ -75,7 +75,7 @@
     "repository": "Present",
     "working_tree": "Clean",
     "branch": "main",
-    "base_commit": "134527f",
+    "base_commit": "134527f000000000000000000000000000000000",
     "base_status": "Clean baseline",
     "git_flow_enabled": true,
     "git_flow_consent": "Approved",
@@ -250,6 +250,19 @@
     ]
   },
   "extensions": {
+    "git_readiness_state": {
+      "format_version": 1,
+      "observation": {
+        "repository_mode": "worktree",
+        "worktree": "/workspace/mino",
+        "common_dir": "/workspace/mino/.git",
+        "branch": "main",
+        "head": "134527f000000000000000000000000000000000",
+        "status_digest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "is_clean": true,
+        "observed_at": "2026-07-25T12:00:00Z"
+      }
+    },
     "vendor.example/renderer": {
       "fence_sample": "```",
       "enabled": true

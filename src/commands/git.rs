@@ -8,6 +8,7 @@ use crate::application::git_binding::GitBindingService;
 use crate::application::git_branch::GitBranchService;
 use crate::application::git_commit::GitCommitService;
 use crate::application::git_hooks::GitHookService;
+use crate::application::git_readiness::GitReadinessService;
 use crate::application::plan::PlanMutationRequest;
 use crate::commands::CommandResponse;
 use crate::domain::{PlanId, RequestId, TaskId, Timestamp};
@@ -28,6 +29,8 @@ pub(crate) enum GitAction {
     Gate(GateArguments),
     /// Inspect, install, or invoke optional advisory repository hooks.
     Hook(HookArguments),
+    /// Inspect or explicitly refresh plan-bound live Git readiness.
+    Readiness(ReadinessArguments),
 }
 
 #[derive(Debug, Args)]
@@ -167,6 +170,34 @@ pub(crate) struct HookArguments {
     action: GitHookAction,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct ReadinessArguments {
+    #[command(subcommand)]
+    action: GitReadinessAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum GitReadinessAction {
+    /// Capture current Git facts as one revisioned plan mutation.
+    Refresh(ReadinessRefreshArguments),
+}
+
+#[derive(Debug, Args)]
+struct ReadinessRefreshArguments {
+    /// Draft or Ready plan whose readiness should be refreshed.
+    #[arg(long)]
+    plan: String,
+    /// Required optimistic-concurrency revision.
+    #[arg(long)]
+    expect_revision: u64,
+    /// Idempotency UUID for this refresh request.
+    #[arg(long)]
+    request_id: String,
+    /// Actor recorded in the event log.
+    #[arg(long, default_value = "user")]
+    actor: String,
+}
+
 #[derive(Debug, Subcommand)]
 enum GitHookAction {
     /// Return the hash-bound installation proposal without mutation.
@@ -236,6 +267,7 @@ pub(crate) fn execute(start: &Path, action: GitAction) -> Result<CommandResponse
         GitAction::Commit(arguments) => execute_commit(start, arguments)?,
         GitAction::Gate(arguments) => execute_gate(start, arguments.action)?,
         GitAction::Hook(arguments) => return execute_hook(start, arguments.action),
+        GitAction::Readiness(arguments) => execute_readiness(start, arguments.action)?,
     };
     let payload = payload.map_err(|error| {
         MinoError::new(
@@ -250,6 +282,42 @@ pub(crate) fn execute(start: &Path, action: GitAction) -> Result<CommandResponse
         missing: Vec::new(),
         next_actions: Vec::new(),
     })
+}
+
+fn execute_readiness(
+    start: &Path,
+    action: GitReadinessAction,
+) -> Result<(&'static str, Result<serde_json::Value, serde_json::Error>), MinoError> {
+    let service = GitReadinessService::discover(start)?;
+    match action {
+        GitReadinessAction::Refresh(arguments) => {
+            let request = PlanMutationRequest {
+                plan_id: parse_plan_id(&arguments.plan)?,
+                expected_revision: arguments.expect_revision,
+                request_id: parse_request_id(&arguments.request_id)?,
+                actor: arguments.actor.clone(),
+                command: vec![
+                    "mino".to_owned(),
+                    "git".to_owned(),
+                    "readiness".to_owned(),
+                    "refresh".to_owned(),
+                    "--plan".to_owned(),
+                    arguments.plan,
+                    "--expect-revision".to_owned(),
+                    arguments.expect_revision.to_string(),
+                    "--request-id".to_owned(),
+                    arguments.request_id,
+                    "--actor".to_owned(),
+                    arguments.actor,
+                ],
+                updated_at: Timestamp::now_utc(),
+            };
+            Ok((
+                "Git readiness refreshed as a plan revision.",
+                serde_json::to_value(service.refresh(request)?),
+            ))
+        }
+    }
 }
 
 fn execute_commit(

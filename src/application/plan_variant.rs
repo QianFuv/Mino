@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::application::git_readiness::detect_initial_git_readiness;
 use crate::application::plan::{
-    PlanMutationRequest, PlanOperationReport, PlanService, detect_git_readiness, map_render_error,
-    map_store_error, operation_report, plan_id_for, projection_managed_path,
+    PlanMutationRequest, PlanOperationReport, PlanService, map_render_error, map_store_error,
+    operation_report, plan_id_for, projection_managed_path,
 };
 use crate::diff::{PlanDiff, diff_plans};
 use crate::domain::{Lineage, Plan, PlanId, RequestId, Timestamp};
@@ -103,8 +104,9 @@ impl PlanVariantService {
             let source_state_hash = sha256_digest(
                 &canonical_json_bytes(&source).map_err(|error| map_store_error(&error))?,
             );
-            let (git_readiness, branch) = detect_git_readiness(&self.root);
-            Plan::fork_from_snapshot(
+            let (git_readiness, branch, git_readiness_state) =
+                detect_initial_git_readiness(&self.root, request.forked_at.clone())?;
+            let mut fork = Plan::fork_from_snapshot(
                 &source,
                 plan_id.clone(),
                 request.name.clone(),
@@ -115,7 +117,10 @@ impl PlanVariantService {
                 markdown_path,
                 request.forked_at.clone(),
             )
-            .map_err(|error| domain_error(&error))?
+            .map_err(|error| domain_error(&error))?;
+            fork.record_initial_git_readiness(&git_readiness_state)
+                .map_err(|error| domain_error(&error))?;
+            fork
         };
         let receipt = self
             .store

@@ -7,11 +7,10 @@ use serde::Serialize;
 use crate::domain::{
     CheckId, CriterionId, DraftContextInput, DraftCriterionInput, DraftDecisionInput,
     DraftEdgeCaseInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,
-    DraftTaskInput, DraftTaskUpdateInput, DraftVerificationInput, GitReadiness, Plan,
-    PlanDraftSeed, PlanId, PlanStatus, ProjectScanSummary, RequestId, StandardSelection, TaskId,
-    Timestamp, VerificationCheck,
+    DraftTaskInput, DraftTaskUpdateInput, DraftVerificationInput, Plan, PlanDraftSeed, PlanId,
+    PlanStatus, ProjectScanSummary, RequestId, StandardSelection, TaskId, Timestamp,
+    VerificationCheck,
 };
-use crate::git::{GitAdapter, GitReadinessProbe};
 use crate::managed_fs::{
     ManagedEntryKind, ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs,
 };
@@ -28,6 +27,7 @@ use crate::store::{MutationRequest, PlanStore, StoreError, StoreErrorKind, sha25
 use crate::{ErrorCategory, MinoError, NextAction};
 
 use super::AGENT_EXECUTOR_IDENTITY;
+use super::git_readiness::detect_initial_git_readiness;
 
 /// Maximum UTF-8 request or YAML input accepted by authoring adapters.
 pub const MAX_AUTHORING_INPUT_BYTES: usize = 1024 * 1024;
@@ -1042,7 +1042,8 @@ impl PlanService {
                 ))
             })
             .collect::<Result<Vec<_>, MinoError>>()?;
-        let (git_readiness, branch) = detect_git_readiness(&self.root);
+        let (git_readiness, branch, git_readiness_state) =
+            detect_initial_git_readiness(&self.root, request.created_at.clone())?;
         let seed = PlanDraftSeed {
             id: plan_id,
             name: request.name.clone(),
@@ -1057,6 +1058,8 @@ impl PlanService {
         let mut plan = Plan::from_draft_seed(seed, request.created_at.clone());
         let scan_summary = summarize_project_scan(&scan)?;
         plan.record_initial_project_scan(&scan_summary)
+            .map_err(|error| domain_input_error(&error))?;
+        plan.record_initial_git_readiness(&git_readiness_state)
             .map_err(|error| domain_input_error(&error))?;
         plan.validate_invariants()
             .map_err(|error| domain_input_error(&error))?;
@@ -1192,56 +1195,6 @@ fn ascii_slug(name: &str) -> Option<String> {
 fn hashed_name_slug(name: &str) -> String {
     let digest = sha256_digest(name.as_bytes());
     format!("plan-{}", &digest["sha256:".len().."sha256:".len() + 8])
-}
-
-pub(crate) fn detect_git_readiness(root: &Path) -> (GitReadiness, Option<String>) {
-    match GitAdapter::new(root).probe_readiness() {
-        Ok(GitReadinessProbe::NotRepository) => (
-            GitReadiness::detected(
-                "Missing",
-                "Not Applicable",
-                None,
-                None,
-                "No Git repository",
-                false,
-            ),
-            None,
-        ),
-        Ok(GitReadinessProbe::Repository {
-            is_clean,
-            branch,
-            base_commit,
-        }) => {
-            let working_tree = if is_clean { "Clean" } else { "Dirty" };
-            let base_status = if is_clean {
-                "Clean: git status --short returned empty".to_owned()
-            } else {
-                "Dirty: git status --short returned changes".to_owned()
-            };
-            (
-                GitReadiness::detected(
-                    "Present",
-                    working_tree,
-                    branch.clone(),
-                    base_commit,
-                    base_status,
-                    is_clean,
-                ),
-                branch,
-            )
-        }
-        Err(error) => (
-            GitReadiness::detected(
-                "Unknown",
-                "Unknown",
-                None,
-                None,
-                format!("Git readiness probe failed: {error}"),
-                false,
-            ),
-            None,
-        ),
-    }
 }
 
 pub(crate) fn projection_managed_path(plan: &Plan) -> Result<ManagedPath, MinoError> {

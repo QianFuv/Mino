@@ -395,6 +395,27 @@ fn render_git_readiness(output: &mut String, plan: &Value) {
             row("Approved At", &scalar(&git["approved_at"])),
         ],
     );
+    let state = &plan["extensions"]["git_readiness_state"];
+    if state.is_null() {
+        return;
+    }
+    let observation = &state["observation"];
+    output.push_str("\n### Live Observation\n\n");
+    write_table(
+        output,
+        &["Field", "Value"],
+        vec![
+            row("Format Version", &scalar(&state["format_version"])),
+            row("Repository Mode", &scalar(&observation["repository_mode"])),
+            row("Worktree", &scalar(&observation["worktree"])),
+            row("Common Directory", &scalar(&observation["common_dir"])),
+            row("Branch", &scalar(&observation["branch"])),
+            row("HEAD", &scalar(&observation["head"])),
+            row("Status Digest", &scalar(&observation["status_digest"])),
+            row("Clean", &scalar(&observation["is_clean"])),
+            row("Observed At", &scalar(&observation["observed_at"])),
+        ],
+    );
 }
 
 fn render_task_order(output: &mut String, plan: &Value) {
@@ -820,6 +841,7 @@ fn render_extensions(output: &mut String, plan: &Value) {
     output.push_str("\n## Extensions\n\n");
     let mut extensions = plan["extensions"].as_object().cloned().unwrap_or_default();
     extensions.remove("execution");
+    extensions.remove("git_readiness_state");
     extensions.remove("project_scan");
     extensions.remove("standards_conflicts");
     if extensions.is_empty() {

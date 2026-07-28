@@ -31,16 +31,6 @@ pub(crate) enum GitRootProbe {
     NotRepository,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum GitReadinessProbe {
-    NotRepository,
-    Repository {
-        is_clean: bool,
-        branch: Option<String>,
-        base_commit: Option<String>,
-    },
-}
-
 /// Explicit repository availability returned by Git inspection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitAvailability {
@@ -143,48 +133,6 @@ impl GitAdapter {
         let output = run_read_only(&root, ["ls-files", "--stage", "-z", "--full-name"])?;
         require_success(&output, "Git index inspection")?;
         Ok(output.stdout)
-    }
-
-    pub(crate) fn probe_readiness(&self) -> Result<GitReadinessProbe, GitError> {
-        let root = canonical_directory(&self.start)?;
-        let inside = run_probe(&root, ["rev-parse", "--is-inside-work-tree"])?;
-        if !inside.success {
-            return if is_explicit_not_repository(&root, &inside)? {
-                Ok(GitReadinessProbe::NotRepository)
-            } else {
-                Err(failed_command(&inside, "Git worktree probe"))
-            };
-        }
-        if output_text(&inside, "Git worktree probe")? != "true" {
-            return Ok(GitReadinessProbe::NotRepository);
-        }
-        let status = run_probe(
-            &root,
-            [
-                "status",
-                "--porcelain=v1",
-                "-z",
-                "--untracked-files=all",
-                "--no-renames",
-            ],
-        )?;
-        require_success(&status, "Git readiness status")?;
-        let branch_output = run_probe(&root, ["branch", "--show-current"])?;
-        require_success(&branch_output, "Git branch probe")?;
-        let branch = optional_output_text(&branch_output, "Git branch probe")?;
-        let head_output = run_probe(&root, ["rev-parse", "--short", "HEAD"])?;
-        let base_commit = if head_output.success {
-            Some(output_text(&head_output, "Git HEAD probe")?)
-        } else if branch.is_some() {
-            None
-        } else {
-            return Err(failed_command(&head_output, "Git HEAD probe"));
-        };
-        Ok(GitReadinessProbe::Repository {
-            is_clean: status.stdout.is_empty(),
-            branch,
-            base_commit,
-        })
     }
 }
 
@@ -468,16 +416,6 @@ fn output_text(output: &GitCommandOutput, operation: &str) -> Result<String, Git
     } else {
         Ok(value.to_owned())
     }
-}
-
-fn optional_output_text(
-    output: &GitCommandOutput,
-    operation: &str,
-) -> Result<Option<String>, GitError> {
-    if output.stdout.is_empty() {
-        return Ok(None);
-    }
-    output_text(output, operation).map(Some)
 }
 
 fn is_not_repository(output: &GitCommandOutput) -> bool {

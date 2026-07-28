@@ -14,6 +14,8 @@ use crate::git::{
 };
 use crate::{ErrorCategory, MinoError};
 
+use super::git_readiness::{GitReadinessRequirement, require_current_git_readiness};
+
 /// Stable reason that a proposed branch cannot currently be created.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -132,7 +134,14 @@ impl GitBranchService {
                 return self.replay_completed(&plan, journal, approval_reference);
             }
             Some(_) => {}
-            None => require_eligible(&self.propose(plan_id)?)?,
+            None => {
+                require_current_git_readiness(
+                    &self.root,
+                    &plan,
+                    GitReadinessRequirement::CleanBaseline,
+                )?;
+                require_eligible(&self.propose(plan_id)?)?;
+            }
         }
         let _lock = store.lock().map_err(|error| map_git_error(&error))?;
         match store.load(plan_id).map_err(|error| map_git_error(&error))? {

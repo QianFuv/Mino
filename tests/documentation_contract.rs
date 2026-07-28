@@ -167,7 +167,14 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
     (
         &["git", "--help"],
         &[
-            "inspect", "bind", "branch", "commit", "gate", "hook", "help",
+            "inspect",
+            "bind",
+            "branch",
+            "commit",
+            "gate",
+            "hook",
+            "readiness",
+            "help",
         ],
     ),
     (&["git", "branch", "--help"], &["propose", "create", "help"]),
@@ -177,6 +184,7 @@ const HELP_CASES: &[(&[&str], &[&str])] = &[
         &["git", "hook", "--help"],
         &["propose", "status", "install", "run", "help"],
     ),
+    (&["git", "readiness", "--help"], &["refresh", "help"]),
     (
         &["review", "--help"],
         &[
@@ -226,6 +234,7 @@ const LEAF_COMMANDS: &[&str] = &[
     "git hook run",
     "git hook status",
     "git inspect",
+    "git readiness refresh",
     "plan apply",
     "plan amend apply",
     "plan amend approve",

@@ -103,6 +103,17 @@ fn parse_success(output: &Output) -> Value {
     parse_json(output)
 }
 
+fn assert_readiness_drift(output: &Output, expected_mismatches: &[&str]) {
+    assert_eq!(output.status.code(), Some(8));
+    let value = parse_json(output);
+    assert_eq!(value["error"]["code"], "drift_detected");
+    assert_eq!(
+        value["readiness_mismatches"],
+        serde_json::json!(expected_mismatches)
+    );
+    assert_eq!(value["next_actions"][0]["id"], "git.readiness.refresh");
+}
+
 fn create_plan(project: &TestProject, name: &str, request_number: u64) -> String {
     let request_file = project.path().join(format!("request-{request_number}.md"));
     fs::write(&request_file, "Finalize and approve a complete plan.\n")
@@ -218,6 +229,61 @@ fn approve_arguments(
         consent.to_owned(),
     ]);
     arguments
+}
+
+fn refresh_arguments(
+    project: &TestProject,
+    plan_id: &str,
+    expected_revision: u64,
+    request_number: u64,
+) -> Vec<String> {
+    mutation_arguments(
+        project,
+        &["git", "readiness", "refresh"],
+        plan_id,
+        expected_revision,
+        request_number,
+    )
+}
+
+fn initialize_git(project: &TestProject) {
+    fs::write(
+        project.path().join(".gitignore"),
+        "/.mino/\n/docs/plan/\n/request-*.md\n",
+    )
+    .expect("Git ignore fixture should be written");
+    git(
+        project.path(),
+        &["init", "--quiet", "--initial-branch", "main"],
+    );
+    git(project.path(), &["add", "."]);
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=Mino Tests",
+            "-c",
+            "user.email=mino-tests@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "chore: establish readiness fixture",
+        ],
+    );
+}
+
+fn git(root: &Path, arguments: &[&str]) {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .expect("Git should run");
+    assert!(
+        output.status.success(),
+        "git {arguments:?} failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn typed_id(plan_id: &str) -> PlanId {
@@ -467,4 +533,135 @@ fn projection_drift_blocks_show_review_and_approval_without_state_changes() {
         assert_eq!(output.status.code(), Some(8));
         assert_eq!(stored_bytes(&project, &plan_id), before);
     }
+}
+
+#[test]
+fn readiness_drift_requires_explicit_refresh_and_invalidates_ready_approval() {
+    let project = TestProject::new("git-readiness-refresh");
+    initialize_git(&project);
+    let (plan_id, _) = finalize_complete_plan(&project, "Refresh Git readiness", 60);
+    let approved = parse_success(&run_mino(&approve_arguments(
+        &project, &plan_id, 3, 63, "approved",
+    )));
+    assert_eq!(approved["revision"], 4);
+
+    fs::write(
+        project.path().join("src/lib.rs"),
+        "pub fn fixture() -> u8 { 2 }\n",
+    )
+    .expect("tracked source should become dirty");
+    let drifted = run_mino(&read_arguments(&project, "review", &plan_id));
+    assert_eq!(drifted.status.code(), Some(8));
+    let drifted = parse_json(&drifted);
+    assert_eq!(drifted["error"]["code"], "drift_detected");
+    assert_eq!(drifted["next_actions"][0]["id"], "git.readiness.refresh");
+    assert_eq!(load_plan(&project, &plan_id).revision(), 4);
+
+    let refresh = refresh_arguments(&project, &plan_id, 4, 64);
+    let refreshed = parse_success(&run_mino(&refresh));
+    assert_eq!(refreshed["revision"], 5);
+    assert_eq!(refreshed["status"], "Ready");
+    let plan = load_plan(&project, &plan_id);
+    assert!(!plan.has_plan_approval());
+    assert_eq!(plan.git_readiness().working_tree(), "Dirty");
+    assert!(!plan.git_readiness().git_flow_enabled());
+    assert_eq!(
+        plan.git_readiness().git_flow_consent(),
+        GitFlowConsent::Pending
+    );
+
+    fs::write(
+        project.path().join("src/lib.rs"),
+        "pub fn fixture() -> u8 { 1 }\n",
+    )
+    .expect("tracked source should be restored");
+    let replay = parse_success(&run_mino(&refresh));
+    assert_eq!(replay["revision"], 5);
+    assert_eq!(replay["replayed"], true);
+    let context = parse_success(&run_mino(
+        &[
+            base_arguments(&project),
+            vec!["agent".to_owned(), "context".to_owned()],
+        ]
+        .concat(),
+    ));
+    assert_eq!(context["next_actions"][0]["id"], "git.readiness.refresh");
+
+    let refreshed_clean = parse_success(&run_mino(&refresh_arguments(&project, &plan_id, 5, 65)));
+    assert_eq!(refreshed_clean["revision"], 6);
+    let plan = load_plan(&project, &plan_id);
+    assert_eq!(plan.git_readiness().working_tree(), "Clean");
+    assert!(plan.git_readiness().git_flow_enabled());
+    assert!(!plan.has_plan_approval());
+    let reviewed = parse_success(&run_mino(&read_arguments(&project, "review", &plan_id)));
+    assert_eq!(reviewed["approval_required"], true);
+}
+
+#[test]
+fn head_branch_and_worktree_identity_drift_block_review_without_mutation() {
+    let head_project = TestProject::new("git-readiness-head");
+    initialize_git(&head_project);
+    let (head_plan_id, _) = finalize_complete_plan(&head_project, "HEAD readiness", 70);
+    fs::write(head_project.path().join("head-drift.txt"), "head drift\n")
+        .expect("HEAD drift fixture should be written");
+    git(head_project.path(), &["add", "--", "head-drift.txt"]);
+    git(
+        head_project.path(),
+        &[
+            "-c",
+            "user.name=Mino Tests",
+            "-c",
+            "user.email=mino-tests@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "test: advance readiness head",
+        ],
+    );
+    assert_readiness_drift(
+        &run_mino(&read_arguments(&head_project, "review", &head_plan_id)),
+        &["head"],
+    );
+    assert_eq!(load_plan(&head_project, &head_plan_id).revision(), 3);
+
+    let branch_project = TestProject::new("git-readiness-branch");
+    initialize_git(&branch_project);
+    let (branch_plan_id, _) = finalize_complete_plan(&branch_project, "Branch readiness", 80);
+    git(
+        branch_project.path(),
+        &["switch", "--quiet", "-c", "readiness-drift"],
+    );
+    assert_readiness_drift(
+        &run_mino(&read_arguments(&branch_project, "review", &branch_plan_id)),
+        &["branch"],
+    );
+    assert_eq!(load_plan(&branch_project, &branch_plan_id).revision(), 3);
+
+    let mut worktree_project = TestProject::new("git-readiness-worktree");
+    initialize_git(&worktree_project);
+    let (worktree_plan_id, _) = finalize_complete_plan(&worktree_project, "Worktree readiness", 90);
+    let original = worktree_project.path.clone();
+    let moved = original.with_file_name(format!(
+        "{}-moved",
+        original
+            .file_name()
+            .expect("project path should have a file name")
+            .to_string_lossy()
+    ));
+    fs::rename(&original, &moved).expect("worktree fixture should move");
+    worktree_project.path = moved
+        .canonicalize()
+        .expect("moved worktree root should resolve");
+    assert_readiness_drift(
+        &run_mino(&read_arguments(
+            &worktree_project,
+            "review",
+            &worktree_plan_id,
+        )),
+        &["common_dir", "worktree"],
+    );
+    assert_eq!(
+        load_plan(&worktree_project, &worktree_plan_id).revision(),
+        3
+    );
 }

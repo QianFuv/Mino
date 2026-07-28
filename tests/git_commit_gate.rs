@@ -22,8 +22,9 @@ use mino::application::git_commit::GitCommitService;
 use mino::application::plan::{PlanMutationRequest, PlanService};
 use mino::domain::{
     AcceptanceCriterion, Approval, CheckId, CommitGate, CommitStatus, CriterionId, EvidenceType,
-    FileChange, FileMapEntry, GitFlowConsent, GitReadiness, Plan, PlanDraftSeed, PlanId,
-    PlanStatus, RequestId, Task, TaskId, Timestamp, VerificationCheck, WorkspaceGitEntry,
+    FileChange, FileMapEntry, GitFlowConsent, GitReadiness, GitReadinessObservation,
+    GitReadinessState, GitRepositoryMode, Plan, PlanDraftSeed, PlanId, PlanStatus, RequestId, Task,
+    TaskId, Timestamp, VerificationCheck, WorkspaceGitEntry,
 };
 use mino::evidence::EvidenceStore;
 use mino::git::{
@@ -32,7 +33,7 @@ use mino::git::{
 };
 use mino::project::initialize;
 use mino::render::{render_plan, write_projection};
-use mino::store::{MutationRequest, PlanStore};
+use mino::store::{MutationRequest, PlanStore, canonical_json_bytes, sha256_digest};
 use serde_json::Value;
 
 const PLAN_ID: &str = "2026-07-26-commit-gate";
@@ -876,6 +877,9 @@ fn create_plan(root: &Path, with_commit_gate: bool, git_flow_enabled: bool) -> P
         },
         timestamp(0),
     );
+    let readiness_state = worktree_readiness_state(root);
+    plan.record_initial_git_readiness(&readiness_state)
+        .expect("initial Git readiness should record");
     let store = PlanStore::new(root);
     store
         .create_plan(
@@ -945,6 +949,34 @@ fn create_plan(root: &Path, with_commit_gate: bool, git_flow_enabled: bool) -> P
     )
     .expect("commit plan projection should publish");
     plan_id
+}
+
+fn worktree_readiness_state(root: &Path) -> GitReadinessState {
+    let facts = GitAdapter::new(root)
+        .inspect()
+        .expect("Git facts should inspect");
+    GitReadinessState::new(
+        GitReadinessObservation::new(
+            GitRepositoryMode::Worktree,
+            facts
+                .worktree
+                .as_deref()
+                .map(|path| path.to_string_lossy().replace('\\', "/")),
+            facts
+                .common_dir
+                .as_deref()
+                .map(|path| path.to_string_lossy().replace('\\', "/")),
+            facts.branch.clone(),
+            facts.head.clone(),
+            sha256_digest(
+                &canonical_json_bytes(&facts.status).expect("Git status should canonicalize"),
+            ),
+            facts.is_clean,
+            timestamp(0),
+        )
+        .expect("Git readiness observation should validate"),
+    )
+    .expect("Git readiness state should validate")
 }
 
 fn prepare_task(root: &Path, plan_id: &PlanId, state: FixtureState) {

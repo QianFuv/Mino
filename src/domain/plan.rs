@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 
-use super::WORKSPACE_EXTENSION_KEY;
 use super::execution::EXECUTION_EXTENSION_KEY;
 use super::review::review_number;
 use super::standards::{STANDARDS_CONFLICT_EXTENSION_KEY, required_language_package_for_path};
@@ -15,12 +14,13 @@ use super::{
     CommitStatus, CriterionId, DeviationClassification, DomainError, DomainErrorKind,
     DraftContextInput, DraftCriterionInput, DraftDecisionInput, DraftEdgeCaseInput, DraftFileInput,
     DraftMetadataInput, DraftPlanInput, DraftScopeInput, DraftTaskInput, DraftTaskUpdateInput,
-    DraftVerificationInput, EvidenceId, ExecutionState, FileMapEntry, GitFlowConsent, Lineage,
-    MaterialReviewDisposition, PlanArchive, PlanDraftSeed, PlanId, PlanStatus, ProtocolVersion,
-    ReviewClassification, ReviewItem, ReviewStatus, SchemaVersion, StandardConflict,
-    StandardsConflictState, Task, TaskId, TaskStatus, Timestamp, VerificationCheck,
-    WorkspaceFingerprint, WorkspaceProtocolState,
+    DraftVerificationInput, EvidenceId, ExecutionState, FileMapEntry, GitFlowConsent,
+    GitReadinessState, Lineage, MaterialReviewDisposition, PlanArchive, PlanDraftSeed, PlanId,
+    PlanStatus, ProtocolVersion, ReviewClassification, ReviewItem, ReviewStatus, SchemaVersion,
+    StandardConflict, StandardsConflictState, Task, TaskId, TaskStatus, Timestamp,
+    VerificationCheck, WorkspaceFingerprint, WorkspaceProtocolState,
 };
+use super::{GIT_READINESS_EXTENSION_KEY, WORKSPACE_EXTENSION_KEY};
 
 const PROJECT_SCAN_EXTENSION_KEY: &str = "project_scan";
 
@@ -1305,6 +1305,77 @@ impl Plan {
     #[must_use]
     pub const fn git_readiness(&self) -> &GitReadiness {
         &self.git_readiness
+    }
+
+    /// Returns the typed live Git readiness extension when it has been captured.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when the extension payload is malformed.
+    pub fn git_readiness_state(&self) -> Result<Option<GitReadinessState>, DomainError> {
+        self.extensions
+            .get(GIT_READINESS_EXTENSION_KEY)
+            .cloned()
+            .map(|value| {
+                let state =
+                    serde_json::from_value::<GitReadinessState>(value).map_err(|error| {
+                        DomainError::new(
+                            DomainErrorKind::InvariantViolation,
+                            format!("Git readiness extension is malformed: {error}"),
+                        )
+                    })?;
+                state.validate()?;
+                Ok(state)
+            })
+            .transpose()
+    }
+
+    /// Records the first typed Git readiness observation on a revision-one Draft.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the plan is a revision-one Draft without an
+    /// existing readiness extension, or when the supplied state is malformed.
+    pub fn record_initial_git_readiness(
+        &mut self,
+        state: &GitReadinessState,
+    ) -> Result<(), DomainError> {
+        if self.status != PlanStatus::Draft
+            || self.revision != 1
+            || self.extensions.contains_key(GIT_READINESS_EXTENSION_KEY)
+        {
+            return Err(DomainError::new(
+                DomainErrorKind::InvalidTransition,
+                "Initial Git readiness can be recorded only once on a revision-one Draft",
+            ));
+        }
+        self.store_git_readiness_state(state)?;
+        self.validate_invariants()
+    }
+
+    pub(crate) fn refresh_git_readiness(
+        &mut self,
+        state: &GitReadinessState,
+        git_readiness: GitReadiness,
+        branch: Option<String>,
+        updated_at: Timestamp,
+    ) -> Result<(), DomainError> {
+        if !matches!(self.status, PlanStatus::Draft | PlanStatus::Ready) {
+            return Err(self.invalid_transition("refresh Git readiness"));
+        }
+        state.validate()?;
+        let mut candidate = self.clone();
+        candidate.git_readiness = git_readiness;
+        candidate.metadata.branch = branch;
+        candidate.store_git_readiness_state(state)?;
+        if candidate.status == PlanStatus::Ready {
+            candidate.invalidate_plan_approval();
+            candidate.store_workspace_state(&WorkspaceProtocolState::default())?;
+        }
+        candidate.record_revision(candidate.next_revision()?, updated_at);
+        candidate.validate_invariants()?;
+        *self = candidate;
+        Ok(())
     }
 
     /// Returns tasks in stored order.
@@ -4564,6 +4635,9 @@ impl Plan {
         if let Some(summary) = self.project_scan_summary()? {
             summary.validate()?;
         }
+        if let Some(state) = self.git_readiness_state()? {
+            state.validate()?;
+        }
         self.validate_review_state()?;
         self.validate_execution_state()?;
         let task_ids = self.tasks.iter().map(Task::id).collect::<BTreeSet<_>>();
@@ -4588,6 +4662,19 @@ impl Plan {
         })?;
         self.extensions
             .insert(STANDARDS_CONFLICT_EXTENSION_KEY.to_owned(), value);
+        Ok(())
+    }
+
+    fn store_git_readiness_state(&mut self, state: &GitReadinessState) -> Result<(), DomainError> {
+        state.validate()?;
+        let value = serde_json::to_value(state).map_err(|error| {
+            DomainError::new(
+                DomainErrorKind::InvariantViolation,
+                format!("Failed to encode Git readiness extension: {error}"),
+            )
+        })?;
+        self.extensions
+            .insert(GIT_READINESS_EXTENSION_KEY.to_owned(), value);
         Ok(())
     }
 

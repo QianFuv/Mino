@@ -48,6 +48,19 @@ Binding writes `.mino/active.json`; it does not stage, commit, switch branches,
 or otherwise mutate Git. Exact repeated binds are idempotent; binding another
 plan explicitly replaces only the current worktree's prior selection.
 
+Plan creation and fork persist a typed live Git observation. Before finalize,
+review, approval, execution start, or branch creation, Mino compares current
+repository mode, canonical worktree/common directory, branch, full HEAD, and
+status with that observation. On drift, execute only the returned revisioned
+`mino git readiness refresh --plan <id> --expect-revision <revision>
+--request-id <uuid> --actor codex --format json --no-input` argv. A Ready-plan
+refresh preserves Ready but clears the old plan approval, Git Flow consent, and
+workspace baseline. Exact retries replay without observing Git again. Commit
+preflight compares repository identity and branch without requiring a clean
+tree, so planned task dirt remains eligible while parent, index, scope, and
+checked blob rules still apply. A legacy plan without typed readiness must also
+refresh before a protected transition.
+
 Use `mino git branch propose --plan <id> --format json --no-input` to obtain the
 only supported branch name and current blockers. The proposal is read-only.
 `mino git branch create --plan <id> --approval-ref <ref> --format json

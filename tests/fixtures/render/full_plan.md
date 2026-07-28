@@ -2,7 +2,7 @@
 managed_by: mino
 plan_id: 2026-07-25-render-contract
 revision: 8
-state_hash: sha256:716d7420493179a45d2e7000584ad85c24d1a1ac9f9ff0711679a1dabf5dc8d0
+state_hash: sha256:4c63e67e64c8749549ecd22a83dbebdb87b118a90dac3db472fe4f549c70eec5
 renderer_version: 2
 manual_editing: prohibited
 ---
@@ -108,11 +108,25 @@ Plan \+ state hash -\> UTF-8 Markdown<br>Existing bytes \+ prior rendering -\> g
 | Repository | Present |
 | Working Tree | Clean |
 | Branch | main |
-| Base Commit | 134527f |
+| Base Commit | 134527f000000000000000000000000000000000 |
 | Base Status | Clean baseline |
 | Git Flow Enabled | true |
 | Git Flow Consent | Approved |
 | Approved At | 2026-07-25T12:07:00Z |
+
+### Live Observation
+
+| Field | Value |
+|---|---|
+| Format Version | 1 |
+| Repository Mode | worktree |
+| Worktree | /workspace/mino |
+| Common Directory | /workspace/mino/.git |
+| Branch | main |
+| HEAD | 134527f000000000000000000000000000000000 |
+| Status Digest | sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 |
+| Clean | true |
+| Observed At | 2026-07-25T12:00:00Z |
 
 ## Implementation Task Order
 

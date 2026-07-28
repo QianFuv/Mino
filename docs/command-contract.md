@@ -227,6 +227,7 @@ schedule spec 把当前 `--plan`、`--expect-revision` 和 `--check` 绑定到�
 | 命令 | 写入/副作用 | 核心契约 |
 |---|---|---|
 | `mino git inspect` | 无 | 返回 repository、common directory、worktree、Git directory、index、HEAD、upstream、porcelain v2 和绑定事实。 |
+| `mino git readiness refresh` | plan | 以 revision/request ID 记录当前 repository mode、worktree/common-dir、branch、完整 HEAD、规范 status digest、clean flag 和采样时间；仅支持 Draft/Ready。 |
 | `mino git bind` | 仅 `.mino/active.json` | 把一个非 Done 计划绑定到当前 canonical worktree 与分支，或绑定精确 detached HEAD。 |
 | `mino git branch propose` | 无 | 派生 `mino/<plan-id>`，交由 Git 校验，并报告 clean/base/source/ref blockers。 |
 | `mino git branch create` | 本地分支、journal、binding | 要求 `--approval-ref`；可选 `--branch` 必须与提案完全一致。重新核对工作树和 base 后创建并切换。 |
@@ -239,6 +240,8 @@ schedule spec 把当前 `--plan`、`--expect-revision` 和 `--check` 绑定到�
 | `mino git hook run` | 无 | 读取 pre-commit 或 post-commit 的 staged/HEAD 与绑定事实，输出诊断和 next actions。 |
 
 绑定状态只能是 `missing`、`current`、`foreign_worktree`、`stale_branch`、`stale_head` 或 `not_repository`。bind 只替换当前工作树 entry，不修改 HEAD、branch、ref、index、commit 或 `.mino/plan-selection.json`。foreign/stale 状态阻止需要当前 Git 身份的操作，但不会隐藏或切换 selected plan；项目方案始终由 project selection 独立决定。
+
+计划创建与 fork 会把 live Git observation 保存到 versioned `extensions.git_readiness_state`。`plan finalize`、`plan review`、`plan approve`、`exec start` 和 `git branch create` 在写入前重新采样 repository identity、branch、HEAD 与 status；Git Flow 开启时还要求正常 worktree 和 clean baseline。任何漂移都以 exit 8 返回规范 `git.readiness.refresh` action，不会静默更新计划。Ready refresh 保持 Ready，但清除旧 plan approval、Git Flow consent 与 workspace baseline；相同 request ID 的精确重试重放已提交 revision，不重新观察 Git。`git commit` 与 `record-manual` 只复用 repository/worktree/common-dir/branch identity，因此任务自身的计划内 dirty files 合法，parent、index、scope 和 checked blob 仍由提交门禁独立验证。缺少 typed extension 的旧计划也必须先显式 refresh。
 
 branch create 是独立审批边界，计划批准和 Git Flow consent 不能替代它。Mino 先写 `.mino/git/branches/<plan-id>/intent.json`，再以禁用 hooks 的精确 `git switch -c` 操作 base HEAD，确认 post-state 后才写 binding 和 `completion.json`。精确重试能够区分未变化的失败、已创建待协调的分支和已完成操作。
 

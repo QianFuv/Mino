@@ -12,12 +12,15 @@ use std::os::unix::fs::symlink;
 use std::os::windows::fs::{symlink_dir, symlink_file};
 
 use fs4::FileExt;
-use mino::domain::{GitReadiness, Plan, PlanDraftSeed, PlanId, RequestId, Timestamp};
+use mino::domain::{
+    GitReadiness, GitReadinessObservation, GitReadinessState, GitRepositoryMode, Plan,
+    PlanDraftSeed, PlanId, RequestId, Timestamp,
+};
 use mino::git::{ActiveBindingStore, GitAdapter, GitBranchJournalStore, GitErrorKind};
 use mino::integration::IntegrationOptions;
 use mino::project::initialize_with_options;
 use mino::render::{render_plan, write_projection};
-use mino::store::PlanStore;
+use mino::store::{PlanStore, canonical_json_bytes, sha256_digest};
 use serde_json::Value;
 
 const PLAN_ID: &str = "2026-07-26-branch-gate";
@@ -202,7 +205,7 @@ fn creation_rejects_missing_approval_dirty_existing_invalid_and_stale_sources() 
 
     fs::write(root.join("seed.txt"), "dirty\n").expect("tracked file should become dirty");
     let dirty = approved_create(&root, &plan_id, None);
-    assert_json_error(&dirty, 5, "policy_violation");
+    assert_json_error(&dirty, 8, "drift_detected");
     assert_no_branch_operation(&root, &plan_id);
     fs::write(root.join("seed.txt"), "seed\n").expect("fixture bytes should be restored");
 
@@ -222,7 +225,7 @@ fn creation_rejects_missing_approval_dirty_existing_invalid_and_stale_sources() 
     git(&detached_root, &["switch", "--quiet", "--detach", "HEAD"]);
     let detached_head = git_text(&detached_root, &["rev-parse", "HEAD"]);
     let detached = approved_create(&detached_root, &detached_plan, None);
-    assert_json_error(&detached, 5, "policy_violation");
+    assert_json_error(&detached, 8, "drift_detected");
     assert_eq!(
         git_text(&detached_root, &["rev-parse", "HEAD"]),
         detached_head
@@ -332,7 +335,10 @@ fn prepared_operations_retry_git_failures_and_reconcile_binding_interruptions() 
 
 fn create_plan(root: &Path) -> PlanId {
     let plan_id = PlanId::parse(PLAN_ID).expect("plan ID should parse");
-    let plan = Plan::from_draft_seed(
+    let facts = GitAdapter::new(root)
+        .inspect()
+        .expect("Git facts should inspect");
+    let mut plan = Plan::from_draft_seed(
         PlanDraftSeed {
             id: plan_id.clone(),
             name: "Branch gate fixture".to_owned(),
@@ -344,7 +350,7 @@ fn create_plan(root: &Path) -> PlanId {
                 "Present",
                 "Clean",
                 Some("main".to_owned()),
-                Some(git_text(root, &["rev-parse", "--short", "HEAD"])),
+                facts.head.clone(),
                 "Clean: git status --short returned empty",
                 true,
             ),
@@ -353,6 +359,30 @@ fn create_plan(root: &Path) -> PlanId {
         },
         timestamp(),
     );
+    let state = GitReadinessState::new(
+        GitReadinessObservation::new(
+            GitRepositoryMode::Worktree,
+            facts
+                .worktree
+                .as_deref()
+                .map(|path| path.to_string_lossy().replace('\\', "/")),
+            facts
+                .common_dir
+                .as_deref()
+                .map(|path| path.to_string_lossy().replace('\\', "/")),
+            facts.branch.clone(),
+            facts.head.clone(),
+            sha256_digest(
+                &canonical_json_bytes(&facts.status).expect("Git status should canonicalize"),
+            ),
+            facts.is_clean,
+            timestamp(),
+        )
+        .expect("Git readiness observation should validate"),
+    )
+    .expect("Git readiness state should validate");
+    plan.record_initial_git_readiness(&state)
+        .expect("initial Git readiness should record");
     PlanStore::new(root)
         .create_plan(
             &plan,

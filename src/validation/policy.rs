@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::domain::{Plan, PlanStatus, StandardSelection, VerificationCheck};
+use crate::domain::{GitRepositoryMode, Plan, PlanStatus, StandardSelection, VerificationCheck};
 use crate::standards::{
     EmbeddedCatalog, ResolvedCheck, ResolvedCheckStatus, StandardConflictStatus,
     StandardsRecommendation, SystemToolProbe, apply_recommendation, assess_standard_conflicts,
@@ -23,7 +23,7 @@ pub(crate) fn validate(
     findings: &mut Vec<ValidationFinding>,
 ) -> Result<(), MinoError> {
     validate_project_scan(plan, findings)?;
-    validate_git(plan, findings);
+    validate_git(plan, findings)?;
     validate_commit_gates(plan, findings);
     validate_approval(plan, findings);
     validate_standards(root, plan, findings)
@@ -49,7 +49,7 @@ fn validate_project_scan(
     Ok(())
 }
 
-fn validate_git(plan: &Plan, findings: &mut Vec<ValidationFinding>) {
+fn validate_git(plan: &Plan, findings: &mut Vec<ValidationFinding>) -> Result<(), MinoError> {
     let git = plan.git_readiness();
     let repository_decided = matches!(git.repository(), "Present" | "Missing");
     let tree_decided = matches!(git.working_tree(), "Clean" | "Dirty" | "Not Applicable");
@@ -69,6 +69,62 @@ fn validate_git(plan: &Plan, findings: &mut Vec<ValidationFinding>) {
             "Git Flow requires a present repository and clean working tree",
         ));
     }
+    let state = plan.git_readiness_state().map_err(|error| {
+        MinoError::new(
+            crate::ErrorCategory::DriftDetected,
+            format!("Git readiness state is malformed: {error}"),
+        )
+    })?;
+    let Some(state) = state else {
+        findings.push(ValidationFinding::error(
+            "POLICY-GIT-READINESS-REFRESH-REQUIRED",
+            ValidationLayer::Policy,
+            "extensions.git_readiness_state",
+            "Live Git readiness has not been captured for this plan revision",
+        ));
+        return Ok(());
+    };
+    let observation = state.observation();
+    let summary_matches = match observation.repository_mode() {
+        GitRepositoryMode::NotRepository => {
+            git.repository() == "Missing"
+                && git.working_tree() == "Not Applicable"
+                && git.branch().is_none()
+                && git.base_commit().is_none()
+                && !git.git_flow_enabled()
+        }
+        GitRepositoryMode::Worktree => {
+            git.repository() == "Present"
+                && git.working_tree()
+                    == if observation.is_clean() {
+                        "Clean"
+                    } else {
+                        "Dirty"
+                    }
+                && git.branch() == observation.branch()
+                && git.base_commit() == observation.head()
+                && (!git.git_flow_enabled()
+                    || (observation.is_clean()
+                        && observation.branch().is_some()
+                        && observation.head().is_some()))
+        }
+        GitRepositoryMode::Bare => {
+            git.repository() == "Present"
+                && git.working_tree() == "Not Applicable"
+                && git.branch().is_none()
+                && git.base_commit().is_none()
+                && !git.git_flow_enabled()
+        }
+    };
+    if !summary_matches {
+        findings.push(ValidationFinding::error(
+            "POLICY-GIT-READINESS-SUMMARY-MISMATCH",
+            ValidationLayer::Policy,
+            "git_readiness",
+            "Git readiness summary does not match its typed live observation",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_commit_gates(plan: &Plan, findings: &mut Vec<ValidationFinding>) {

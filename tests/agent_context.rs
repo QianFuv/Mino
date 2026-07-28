@@ -11,12 +11,13 @@ use mino::domain::{
     AmendmentPatch, Approval, CheckId, CriterionId, DeviationClassification, DraftCommitGateInput,
     DraftCriterionInput, DraftFileInput, DraftMetadataInput, DraftPlanInput, DraftScopeInput,
     DraftTaskInput, DraftVerificationInput, EvidenceId, FileChange, GitFlowConsent, GitReadiness,
-    Plan, PlanDraftSeed, PlanId, StandardSelection, TaskId, Timestamp, VerificationCheck,
+    GitReadinessObservation, GitReadinessState, GitRepositoryMode, Plan, PlanDraftSeed, PlanId,
+    StandardSelection, TaskId, Timestamp, VerificationCheck,
 };
 use mino::git::{ActiveBindingStore, GitAdapter};
 use mino::project::initialize;
 use mino::standards::EmbeddedCatalog;
-use mino::store::PlanStore;
+use mino::store::{PlanStore, canonical_json_bytes, sha256_digest};
 use mino::validation::validate_plan;
 use serde_json::Value;
 
@@ -94,12 +95,14 @@ fn configured_draft() -> Plan {
             false,
         ),
         None,
+        &non_git_readiness_state(),
     )
 }
 
 fn configured_draft_with_git(
     git_readiness: GitReadiness,
     commit_gate: Option<DraftCommitGateInput>,
+    readiness_state: &GitReadinessState,
 ) -> Plan {
     let catalog = EmbeddedCatalog::load().expect("embedded standards should load");
     let common = catalog
@@ -130,6 +133,8 @@ fn configured_draft_with_git(
         },
         timestamp(0),
     );
+    plan.record_initial_git_readiness(readiness_state)
+        .expect("initial Git readiness should record");
     plan.apply_draft_input(
         DraftPlanInput {
             metadata: Some(DraftMetadataInput {
@@ -182,6 +187,52 @@ fn configured_draft_with_git(
     )
     .expect("task should be added");
     plan
+}
+
+fn non_git_readiness_state() -> GitReadinessState {
+    GitReadinessState::new(
+        GitReadinessObservation::new(
+            GitRepositoryMode::NotRepository,
+            None,
+            None,
+            None,
+            None,
+            sha256_digest(b"[]"),
+            false,
+            timestamp(0),
+        )
+        .expect("non-Git observation should validate"),
+    )
+    .expect("non-Git readiness state should validate")
+}
+
+fn worktree_readiness_state(project: &TestProject) -> GitReadinessState {
+    let facts = GitAdapter::new(project.path())
+        .inspect()
+        .expect("Git facts should inspect");
+    let status_digest = sha256_digest(
+        &canonical_json_bytes(&facts.status).expect("Git status should canonicalize"),
+    );
+    GitReadinessState::new(
+        GitReadinessObservation::new(
+            GitRepositoryMode::Worktree,
+            facts
+                .worktree
+                .as_deref()
+                .map(|path| path.to_string_lossy().replace('\\', "/")),
+            facts
+                .common_dir
+                .as_deref()
+                .map(|path| path.to_string_lossy().replace('\\', "/")),
+            facts.branch,
+            facts.head,
+            status_digest,
+            facts.is_clean,
+            timestamp(0),
+        )
+        .expect("worktree observation should validate"),
+    )
+    .expect("worktree readiness state should validate")
 }
 
 fn initialize_git_flow_baseline(project: &TestProject) -> GitReadiness {
@@ -409,6 +460,7 @@ fn automatic_git_flow_requires_current_plan_binding_before_start_and_commit() {
             planned_message: "test(agent): verify binding guidance".to_owned(),
             scope: vec!["fixture.txt".to_owned()],
         }),
+        &worktree_readiness_state(&project),
     );
     plan.finalize(timestamp(3)).expect("plan should finalize");
     plan.record_approval(Approval::plan(

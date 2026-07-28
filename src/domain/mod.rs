@@ -7,6 +7,7 @@ mod error;
 mod event;
 mod evidence;
 mod execution;
+mod git_readiness;
 mod id;
 mod lineage;
 mod plan;
@@ -39,6 +40,8 @@ pub use evidence::{Evidence, EvidenceType, Redaction};
 pub use execution::{
     Checkpoint, CheckpointKind, Deviation, DeviationClassification, DeviationStatus, ExecutionState,
 };
+pub(crate) use git_readiness::GIT_READINESS_EXTENSION_KEY;
+pub use git_readiness::{GitReadinessObservation, GitReadinessState, GitRepositoryMode};
 pub use id::{CheckId, CriterionId, EvidenceId, PlanId, RequestId, TaskId};
 pub use lineage::{Lineage, PlanArchive};
 pub use plan::{

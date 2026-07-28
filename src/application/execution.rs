@@ -21,6 +21,8 @@ use crate::validation::{validate_plan, validation_failure};
 use crate::workspace::{capture_task_workspace_baseline, capture_workspace_fingerprint};
 use crate::{ErrorCategory, MinoError};
 
+use super::git_readiness::{GitReadinessRequirement, require_current_git_readiness};
+
 const DEFAULT_CHECK_TIMEOUT: Duration = Duration::from_mins(5);
 const DEFAULT_OUTPUT_LIMIT_BYTES: u64 = 1024 * 1024;
 
@@ -155,6 +157,11 @@ impl ExecutionService {
     ) -> Result<PlanOperationReport, MinoError> {
         let stored = self.plans.load_stored(&request.plan_id)?;
         if stored.revision() == request.expected_revision {
+            require_current_git_readiness(
+                &self.root,
+                &stored,
+                GitReadinessRequirement::CleanBaseline,
+            )?;
             let validation = validate_plan(&self.root, &stored)?;
             if validation.findings.iter().any(|finding| {
                 finding.blocking && finding.id.starts_with("POLICY-STANDARD-CONFLICT")

@@ -21,6 +21,8 @@ pub mod git_branch;
 pub mod git_commit;
 /// Approval-bound advisory hook installation and read-only runtime service.
 pub mod git_hooks;
+/// Live Git readiness capture, refresh, and protected-transition preflight.
+pub mod git_readiness;
 /// Finite foreground monitoring over existing planned-check execution.
 pub mod monitor;
 /// Plan authoring and read-side application service.

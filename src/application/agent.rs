@@ -20,6 +20,7 @@ use crate::validation::{ValidationReport, validate_plan};
 use crate::{ErrorCategory, MinoError, NextAction};
 
 use super::AGENT_EXECUTOR_IDENTITY;
+use super::git_readiness::{GitReadinessRequirement, readiness_mismatches, refresh_action};
 
 /// Versioned Agent context schema identifier.
 pub const AGENT_CONTEXT_KIND: &str = "mino.agent-context/v1";
@@ -62,6 +63,7 @@ const CAPABILITIES: &[(&str, bool, bool)] = &[
     ("git.hook.run", false, false),
     ("git.hook.status", false, false),
     ("git.inspect", false, false),
+    ("git.readiness.refresh", true, false),
     ("plan.alternatives", false, false),
     ("plan.amend.apply", true, false),
     ("plan.amend.approve", true, true),
@@ -789,6 +791,12 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
         )
     })?;
     let missing = draft_missing(plan);
+    if missing.is_empty() {
+        let mismatches = readiness_mismatches(root, plan, GitReadinessRequirement::CleanBaseline)?;
+        if !mismatches.is_empty() {
+            return Ok(readiness_refresh_guidance(plan, &mismatches));
+        }
+    }
     let (next_actions, is_valid, blocking_count, requires_conflict_decision) = if missing.is_empty()
     {
         let report = validate_plan(root, plan)?;
@@ -814,44 +822,7 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
             false,
         )
     };
-    let mut allowed_actions = action_ids(&[
-        "plan.apply",
-        "plan.metadata.set",
-        "plan.summary.set",
-        "plan.context.add",
-        "plan.scope.set",
-        "plan.scope.add",
-        "plan.decision.add",
-        "plan.decision.remove",
-        "plan.decision.update",
-        "plan.edge-case.remove",
-        "plan.edge-case.update",
-        "plan.task.add",
-        "plan.task.update",
-        "plan.task.remove",
-        "plan.task.move",
-        "plan.task.step.add",
-        "plan.task.step.update",
-        "plan.task.step.remove",
-        "plan.task.criterion.add",
-        "plan.task.criterion.update",
-        "plan.task.criterion.remove",
-        "plan.task.verification.add",
-        "plan.task.verification.update",
-        "plan.task.verification.remove",
-        "plan.file.add",
-        "plan.file.update",
-        "plan.file.remove",
-        "plan.verification.add",
-        "plan.verification.update",
-        "plan.verification.remove",
-        "plan.validate",
-        "plan.show",
-        "standards.apply",
-        "standards.conflict.list",
-        "standards.conflict.refresh",
-        "standards.conflict.resolve",
-    ]);
+    let mut allowed_actions = action_ids(DRAFT_ALLOWED_ACTIONS);
     if requires_scan_acceptance {
         allowed_actions.push("plan.scan.accept".to_owned());
     }
@@ -881,6 +852,45 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
     })
 }
 
+const DRAFT_ALLOWED_ACTIONS: &[&str] = &[
+    "plan.apply",
+    "plan.metadata.set",
+    "plan.summary.set",
+    "plan.context.add",
+    "plan.scope.set",
+    "plan.scope.add",
+    "plan.decision.add",
+    "plan.decision.remove",
+    "plan.decision.update",
+    "plan.edge-case.remove",
+    "plan.edge-case.update",
+    "plan.task.add",
+    "plan.task.update",
+    "plan.task.remove",
+    "plan.task.move",
+    "plan.task.step.add",
+    "plan.task.step.update",
+    "plan.task.step.remove",
+    "plan.task.criterion.add",
+    "plan.task.criterion.update",
+    "plan.task.criterion.remove",
+    "plan.task.verification.add",
+    "plan.task.verification.update",
+    "plan.task.verification.remove",
+    "plan.file.add",
+    "plan.file.update",
+    "plan.file.remove",
+    "plan.verification.add",
+    "plan.verification.update",
+    "plan.verification.remove",
+    "plan.validate",
+    "plan.show",
+    "standards.apply",
+    "standards.conflict.list",
+    "standards.conflict.refresh",
+    "standards.conflict.resolve",
+];
+
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_false(value: &bool) -> bool {
     !*value
@@ -891,6 +901,10 @@ fn ready_guidance(
     plan: &Plan,
     git: Option<&AgentGitContext>,
 ) -> Result<Guidance, MinoError> {
+    let mismatches = readiness_mismatches(root, plan, GitReadinessRequirement::CleanBaseline)?;
+    if !mismatches.is_empty() {
+        return Ok(readiness_refresh_guidance(plan, &mismatches));
+    }
     let has_open_deviation = plan_has_open_deviation(plan)?;
     let validation = validate_plan(root, plan)?;
     if !validation.valid {
@@ -927,6 +941,25 @@ fn ready_guidance(
         approval_required: false,
         next_actions,
     })
+}
+
+fn readiness_refresh_guidance(plan: &Plan, mismatches: &[String]) -> Guidance {
+    let reason = format!(
+        "Git readiness refresh is required for: {}",
+        mismatches.join(", ")
+    );
+    Guidance {
+        allowed_actions: action_ids(&["plan.show", "git.inspect", "git.readiness.refresh"]),
+        blocked_actions: vec![
+            blocked("plan.finalize", &reason),
+            blocked("plan.review", &reason),
+            blocked("plan.approve", &reason),
+            blocked("exec.start", &reason),
+            blocked("git.branch.create", &reason),
+        ],
+        approval_required: false,
+        next_actions: vec![refresh_action(plan)],
+    }
 }
 
 fn plan_has_open_deviation(plan: &Plan) -> Result<bool, MinoError> {

@@ -166,6 +166,8 @@ stateDiagram-v2
 - 没有未解决偏差；
 - 相对于 task-start baseline 的当前任务增量符合 File Map。
 
+计划的 `extensions.git_readiness_state` 是 versioned typed state，拥有 repository mode、canonical worktree/common directory、branch、完整 HEAD、规范 status digest、clean flag 与 observation timestamp。create/fork 捕获初始 observation；finalize、review、approve、exec start 和 branch create 都只读重采样并比较，发现漂移时返回显式 revisioned refresh action。refresh 是唯一更新该 observation 的路径；Ready refresh 会撤销旧 plan approval、Git Flow consent 与 workspace baseline。commit preflight 只比较 repository identity 和 branch，允许实现任务产生 dirt，同时继续由 commit gate 核对 parent、index、scope 和文件对象身份。
+
 计划批准时捕获 `PlanBaseline`，每次 `exec start` 捕获对应 `TaskBaseline`。两者在 Git 与非 Git 项目中都保存 path、存在性、对象类型、长度、可执行位和内容摘要；Git 模式另保存 HEAD、index tree 与 status。任务完成计算 `current workspace - task-start baseline`，因此批准前的未变脏文件和前一未提交任务的变化不会被错误归给当前任务，而当前任务对同一路径的进一步修改仍会被识别。
 
 <!-- doc-contract: final-plan-delta-gate -->

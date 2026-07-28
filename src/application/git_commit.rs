@@ -35,6 +35,8 @@ use crate::workspace::{
 };
 use crate::{ErrorCategory, MinoError};
 
+use super::git_readiness::{GitReadinessRequirement, require_current_git_readiness};
+
 /// Complete read-only commit eligibility and exact-path snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct GitCommitPreflight {
@@ -191,6 +193,13 @@ impl GitCommitService {
         let current = self.plans.load_verified(&request.plan_id)?;
         let is_replay = mutation_is_replay(&current, &request)?;
         let task = validate_manual_commit_gate(&current, task_id, is_replay)?;
+        if !is_replay {
+            require_current_git_readiness(
+                &self.root,
+                &current,
+                GitReadinessRequirement::IdentityOnly,
+            )?;
+        }
         let facts = self.inspect_git()?;
         validate_live_identity(&self.root, &current, &facts)?;
         let commit =
@@ -897,6 +906,7 @@ impl GitCommitService {
         plan: &Plan,
         task_id: &TaskId,
     ) -> Result<GitCommitPreflight, MinoError> {
+        require_current_git_readiness(&self.root, plan, GitReadinessRequirement::IdentityOnly)?;
         let task = validate_new_commit_gate(plan, task_id)?;
         let evidence = self
             .evidence

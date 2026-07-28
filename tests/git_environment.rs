@@ -86,7 +86,7 @@ fn cli_root_inspection_and_readiness_ignore_all_ambient_git_controls() {
     );
 
     fs::remove_file(primary.join("primary-change.txt")).expect("primary change should be removed");
-    let base_commit = git_text(&primary, &["rev-parse", "--short", "HEAD"]);
+    let base_commit = git_text(&primary, &["rev-parse", "HEAD"]);
     let request_file = primary.join("request.md").to_string_lossy().into_owned();
     let created = json_success(&run_poisoned_mino(
         &primary,
@@ -166,33 +166,32 @@ fn discovery_and_readiness_probes_enforce_timeout_and_output_limits() {
     let output_limited = initialized_non_git_project(&area.path("output-limited"));
     fs::write(output_limited.join("output-limit.marker"), "limit\n")
         .expect("output limit marker should be written");
-    let output_plan = create_plan(&output_limited, Some(&shim_directory), 2);
-    assert_eq!(output_plan.git_readiness().repository(), "Unknown");
-    assert_eq!(output_plan.git_readiness().working_tree(), "Unknown");
-    assert!(!output_plan.git_readiness().git_flow_enabled());
-    assert!(
-        output_plan
-            .git_readiness()
-            .base_status()
-            .contains("65536-byte limit")
+    let output_failure = json_failure(
+        &run_create_plan(&output_limited, Some(&shim_directory), 2),
+        8,
+        "drift_detected",
+    );
+    assert_eq!(
+        output_failure["message"],
+        "Git returned invalid machine-readable state"
     );
 
     let probe_timeout = initialized_non_git_project(&area.path("probe-timeout"));
     fs::write(probe_timeout.join("probe-timeout.marker"), "timeout\n")
         .expect("readiness timeout marker should be written");
     let started = Instant::now();
-    let timeout_plan = create_plan(&probe_timeout, Some(&shim_directory), 3);
+    let timeout_failure = json_failure(
+        &run_create_plan(&probe_timeout, Some(&shim_directory), 3),
+        7,
+        "environment_unavailable",
+    );
     assert!(
         started.elapsed() < Duration::from_secs(8),
         "Git readiness exceeded its bounded timeout"
     );
-    assert_eq!(timeout_plan.git_readiness().repository(), "Unknown");
-    assert!(!timeout_plan.git_readiness().git_flow_enabled());
-    assert!(
-        timeout_plan
-            .git_readiness()
-            .base_status()
-            .contains("Command exceeded its timeout")
+    assert_eq!(
+        timeout_failure["message"],
+        "Git inspection or operation is unavailable"
     );
 }
 
@@ -387,6 +386,18 @@ fn create_plan(
     shim_directory: Option<&Path>,
     request_number: u64,
 ) -> mino::domain::Plan {
+    let output = run_create_plan(root, shim_directory, request_number);
+    let created = json_success(&output);
+    let plan_id = created["plan_id"]
+        .as_str()
+        .expect("plan creation should report an identifier");
+    let plan_id = PlanId::parse(plan_id).expect("plan identifier should parse");
+    PlanStore::new(root)
+        .load_plan(&plan_id)
+        .expect("bounded-probe plan should load")
+}
+
+fn run_create_plan(root: &Path, shim_directory: Option<&Path>, request_number: u64) -> Output {
     let request_file = root.join("request.md").to_string_lossy().into_owned();
     let request_id = format!("81000000-0000-0000-0000-{request_number:012}");
     let arguments = [
@@ -403,19 +414,11 @@ fn create_plan(
         "--actor",
         "codex",
     ];
-    let output = if let Some(shim_directory) = shim_directory {
+    if let Some(shim_directory) = shim_directory {
         run_with_git_shim(root, shim_directory, &arguments)
     } else {
         run_mino(root, &arguments)
-    };
-    let created = json_success(&output);
-    let plan_id = created["plan_id"]
-        .as_str()
-        .expect("plan creation should report an identifier");
-    let plan_id = PlanId::parse(plan_id).expect("plan identifier should parse");
-    PlanStore::new(root)
-        .load_plan(&plan_id)
-        .expect("bounded-probe plan should load")
+    }
 }
 
 fn compile_git_shim(directory: &Path) {

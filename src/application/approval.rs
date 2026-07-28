@@ -9,6 +9,8 @@ use crate::validation::{ValidationReport, validate_plan, validation_failure};
 use crate::workspace::capture_workspace_baseline;
 use crate::{ErrorCategory, MinoError};
 
+use super::git_readiness::{GitReadinessRequirement, require_current_git_readiness};
+
 /// Versioned generated plan-review schema identifier.
 pub const PLAN_REVIEW_KIND: &str = "mino.plan-review/v1";
 
@@ -71,6 +73,11 @@ impl ApprovalService {
                 format!("Plan {plan_id} must be Ready before review"),
             ));
         }
+        require_current_git_readiness(
+            self.plans.root(),
+            &plan,
+            GitReadinessRequirement::CleanBaseline,
+        )?;
         review_report(&plan)
     }
 
@@ -84,6 +91,11 @@ impl ApprovalService {
         let current = self.plans.load_verified(&request.plan_id)?;
         let is_replay = is_replay_candidate(&current, &request)?;
         if !is_replay {
+            require_current_git_readiness(
+                self.plans.root(),
+                &current,
+                GitReadinessRequirement::CleanBaseline,
+            )?;
             let validation = validate_plan(self.plans.root(), &current)?;
             require_valid(&validation)?;
         }
@@ -110,6 +122,11 @@ impl ApprovalService {
         let current = self.plans.load_verified(&request.plan_id)?;
         let is_replay = is_replay_candidate(&current, &request)?;
         if !is_replay {
+            require_current_git_readiness(
+                self.plans.root(),
+                &current,
+                GitReadinessRequirement::CleanBaseline,
+            )?;
             let validation = validate_plan(self.plans.root(), &current)?;
             require_valid(&validation)?;
         }

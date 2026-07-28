@@ -97,6 +97,15 @@ fn derive_next_actions(plan: &Plan, findings: &[ValidationFinding]) -> Vec<NextA
     if findings.iter().all(|finding| !finding.blocking) {
         return Vec::new();
     }
+    if matches!(
+        plan.status(),
+        crate::domain::PlanStatus::Draft | crate::domain::PlanStatus::Ready
+    ) && findings
+        .iter()
+        .any(|finding| finding.id.starts_with("POLICY-GIT-READINESS-"))
+    {
+        return vec![crate::application::git_readiness::refresh_action(plan)];
+    }
     if let Some(action) = conflict_next_action(plan, findings) {
         return vec![action];
     }
