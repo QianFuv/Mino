@@ -550,7 +550,7 @@ fn package_and_extract(workspace: &TestWorkspace) -> PathBuf {
     let manifest = validate_plugin_artifact_directory(&report.output_directory)
         .expect("native plugin artifact should validate");
     assert_eq!(manifest.target, target);
-    assert_eq!(manifest.files.len(), 10);
+    assert_eq!(manifest.files.len(), 14);
     let install = workspace.path("plugin install");
     let archive_file = File::open(&report.archive_path).expect("plugin ZIP should open");
     let mut archive = ZipArchive::new(archive_file).expect("plugin ZIP should parse");
