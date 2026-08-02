@@ -701,6 +701,148 @@ fn concurrent_exact_retry_reports_already_running_without_interrupting_the_owner
     assert_eq!(replay.disposition(), RunDisposition::Replayed);
 }
 
+#[cfg(windows)]
+fn windows_path_environment(path: &Path) -> RunEnvironment {
+    RunEnvironment::empty()
+        .with_variable("PATH", path.to_string_lossy())
+        .expect("test PATH should be valid")
+        .with_variable("PATHEXT", ".CMD;.EXE")
+        .expect("PATHEXT should be valid")
+        .with_variable(
+            "SYSTEMROOT",
+            std::env::var("SYSTEMROOT").expect("Windows system root should exist"),
+        )
+        .expect("system root should be valid")
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_runner_resolves_cmd_shim_without_shell_injection() {
+    let project = TestProject::new("windows-cmd");
+    let shim_directory = project.path().join("shims");
+    fs::create_dir(&shim_directory).expect("shim directory should be created");
+    fs::write(
+        shim_directory.join("ordered-tool.cmd"),
+        "@echo off\r\necho cmd-wrapper\r\nexit /b 0\r\n",
+    )
+    .expect("command shim should be written");
+    fs::copy(
+        std::env::current_exe().expect("test executable should resolve"),
+        shim_directory.join("ordered-tool.exe"),
+    )
+    .expect("lower-priority executable should be copied");
+
+    let environment = windows_path_environment(&shim_directory)
+        .with_variable("MINO_RUNNER_FIXTURE", "nonzero")
+        .expect("fixture selector should be valid");
+    let check = VerificationCheck::new(
+        CheckId::parse("T1-CMD").expect("check ID should be valid"),
+        vec![
+            "ordered-tool".to_owned(),
+            "--exact".to_owned(),
+            "runner_fixture_process".to_owned(),
+            "--nocapture".to_owned(),
+        ],
+        ".",
+        0,
+        true,
+    );
+    let redactor = Redactor::default();
+    let result = ProcessRunner::default()
+        .run(
+            project.path(),
+            lease(95, &check, limits(2_000, 8_192), &environment, &redactor),
+            &environment,
+            &redactor,
+        )
+        .expect("command shim should produce a terminal result");
+    assert_eq!(result.outcome(), CheckRunOutcome::Passed);
+    assert!(result.stdout_summary().contains("cmd-wrapper"));
+    assert_eq!(result.lease().command(), check.command());
+
+    let injection_marker = project.path().join("injected.txt");
+    let injection_check = VerificationCheck::new(
+        CheckId::parse("T1-CMD-INJECT").expect("check ID should be valid"),
+        vec![
+            "ordered-tool".to_owned(),
+            format!(
+                "safe & echo injected>\"{}\"",
+                injection_marker.to_string_lossy()
+            ),
+        ],
+        ".",
+        0,
+        true,
+    );
+    let injection_result = ProcessRunner::default()
+        .run(
+            project.path(),
+            lease(
+                96,
+                &injection_check,
+                limits(2_000, 8_192),
+                &environment,
+                &redactor,
+            ),
+            &environment,
+            &redactor,
+        )
+        .expect("unsafe batch argument should fail closed or remain one argument");
+    assert!(matches!(
+        injection_result.outcome(),
+        CheckRunOutcome::Passed | CheckRunOutcome::SpawnFailed
+    ));
+    assert!(
+        !injection_marker.exists(),
+        "batch argument must not start a second command"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_runner_does_not_search_project_cwd_for_bare_commands() {
+    let project = TestProject::new("windows-cwd-shadow");
+    let empty_path = project.path().join("empty-path");
+    fs::create_dir(&empty_path).expect("empty PATH directory should be created");
+    let shadow_marker = project.path().join("shadowed.txt");
+    fs::write(
+        project.path().join("shadowed-tool.cmd"),
+        format!(
+            "@echo off\r\necho shadowed>\"{}\"\r\nexit /b 0\r\n",
+            shadow_marker.to_string_lossy()
+        ),
+    )
+    .expect("cwd shadow command should be written");
+    let shadow_environment = windows_path_environment(&empty_path);
+    let shadow_check = VerificationCheck::new(
+        CheckId::parse("T1-CMD-SHADOW").expect("check ID should be valid"),
+        vec!["shadowed-tool".to_owned()],
+        ".",
+        0,
+        true,
+    );
+    let redactor = Redactor::default();
+    let shadow_result = ProcessRunner::default()
+        .run(
+            project.path(),
+            lease(
+                97,
+                &shadow_check,
+                limits(2_000, 8_192),
+                &shadow_environment,
+                &redactor,
+            ),
+            &shadow_environment,
+            &redactor,
+        )
+        .expect("missing PATH command should produce a terminal result");
+    assert_eq!(shadow_result.outcome(), CheckRunOutcome::SpawnFailed);
+    assert!(
+        !shadow_marker.exists(),
+        "bare command must not resolve from the project working directory"
+    );
+}
+
 #[test]
 fn runner_rejects_shells_traversal_and_conflicting_retries() {
     let project = TestProject::new("policy");

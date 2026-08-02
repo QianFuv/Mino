@@ -9,6 +9,7 @@ use std::process::Command;
 use serde::Serialize;
 
 use crate::project::LockedStandard;
+use crate::runner::command::resolve_program;
 use crate::runner::probe::{BoundedCommandErrorKind, BoundedCommandRunner};
 use crate::{ErrorCategory, MinoError};
 
@@ -73,19 +74,25 @@ pub struct SystemToolProbe;
 
 impl ToolProbe for SystemToolProbe {
     fn probe(&self, tool: &str, working_directory: &Path) -> ToolProbeOutcome {
-        let mut command = if tool == "cargo-miri" {
-            let mut command = Command::new("cargo");
-            command.args(["+nightly", "miri", "--version"]);
-            command
-        } else {
-            let mut command = Command::new(tool);
-            command.arg("--version");
-            command
+        let environment = allowed_tool_environment();
+        let program = if tool == "cargo-miri" { "cargo" } else { tool };
+        let Ok(resolved_program) = resolve_program(
+            program,
+            environment.get("PATH").map(OsString::as_os_str),
+            environment.get("PATHEXT").map(OsString::as_os_str),
+        ) else {
+            return ToolProbeOutcome::Unavailable;
         };
+        let mut command = Command::new(resolved_program);
+        if tool == "cargo-miri" {
+            command.args(["+nightly", "miri", "--version"]);
+        } else {
+            command.arg("--version");
+        }
         command
             .current_dir(working_directory)
             .env_clear()
-            .envs(allowed_tool_environment())
+            .envs(environment)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("LC_ALL", "C");
         match BoundedCommandRunner::tool_probe().run(&mut command) {
@@ -315,7 +322,7 @@ fn resolve_python_check<P: ToolProbe>(
     (argv, tool, CommandSource::EmbeddedTemplate)
 }
 
-fn allowed_tool_environment() -> Vec<(String, OsString)> {
+fn allowed_tool_environment() -> BTreeMap<String, OsString> {
     TOOL_ENVIRONMENT_ALLOWLIST
         .iter()
         .filter_map(|name| std::env::var_os(name).map(|value| ((*name).to_owned(), value)))

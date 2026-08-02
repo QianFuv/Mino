@@ -16,6 +16,7 @@ static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 const HELPER_MODE: &str = "MINO_PROBE_TEST_HELPER";
 const HELPER_ROOT: &str = "MINO_PROBE_TEST_ROOT";
 const HELPER_EXPECTED: &str = "MINO_PROBE_TEST_EXPECTED";
+const HELPER_TOOL: &str = "MINO_PROBE_TEST_TOOL";
 
 struct TestArea {
     root: PathBuf,
@@ -108,8 +109,47 @@ fn system_tool_probe_helper() {
     let root =
         PathBuf::from(std::env::var_os(HELPER_ROOT).expect("probe helper root should be supplied"));
     let expected = std::env::var(HELPER_EXPECTED).expect("expected outcome should be supplied");
-    let outcome = SystemToolProbe.probe("probe-tool", &root);
+    let tool = std::env::var(HELPER_TOOL).unwrap_or_else(|_| "probe-tool".to_owned());
+    let outcome = SystemToolProbe.probe(&tool, &root);
     assert_eq!(outcome_label(outcome), expected);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_tool_probe_resolves_cmd_shim() {
+    let area = TestArea::new("windows-cmd");
+    let shim_directory = area.path("shim");
+    let root = area.path("project");
+    fs::create_dir(&shim_directory).expect("shim directory should be created");
+    fs::create_dir(&root).expect("probe working directory should be created");
+    fs::write(
+        shim_directory.join("cmd-probe-tool.cmd"),
+        "@echo off\r\nexit /b 0\r\n",
+    )
+    .expect("command shim should be written");
+
+    for (tool, expected) in [
+        ("cmd-probe-tool", "available"),
+        ("missing-probe-tool", "unavailable"),
+    ] {
+        let output = Command::new(std::env::current_exe().expect("test binary should resolve"))
+            .args(["--exact", "system_tool_probe_helper", "--nocapture"])
+            .env(HELPER_MODE, "run")
+            .env(HELPER_ROOT, &root)
+            .env(HELPER_EXPECTED, expected)
+            .env(HELPER_TOOL, tool)
+            .env("PATH", &shim_directory)
+            .env("PATHEXT", ".CMD;.EXE")
+            .stdin(Stdio::null())
+            .output()
+            .expect("probe helper should run");
+        assert!(
+            output.status.success(),
+            "probe tool {tool} failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]

@@ -99,6 +99,8 @@ Project scan 的 ignore 语义不适用于已批准 File Map 的验证范围。W
 
 `exec check run` 以计划中保存的 executable 和 argv 直接启动进程，不经过 shell。working directory 必须解析到项目内，child 只继承最小跨平台环境 allowlist，而不是完整 parent environment。
 
+Windows 上的 bare executable name 会在启动前只从 child 已获准的绝对 <code>PATH</code> 目录解析，并按 <code>PATHEXT</code> 中 <code>.COM</code>、<code>.EXE</code>、<code>.BAT</code>、<code>.CMD</code> 的安全子集选择第一个普通文件；缺失或没有安全项时使用同一默认顺序。解析不隐式搜索项目 working directory，调用仓库内工具必须提供显式路径。<code>.cmd</code>/<code>.bat</code> 仍以 program 和分离 argv 交给 Rust <code>Command</code>；标准库可能为 batch wrapper 使用系统 command processor，并会拒绝无法安全编码的参数，但 Mino 不构造 shell command text，直接的 <code>cmd</code>、PowerShell 或 Unix shell executable 仍被拒绝。探测和实际检查共用这条解析边界及同一个环境快照。
+
 默认限制为五分钟和 1 MiB 合并 stdout/stderr；领域构造器允许的绝对上限为一小时和 16 MiB。超时、输出超限或 capture failure 时，Mino 使用 process group 或 Windows job object 终止 descendant processes。
 
 每个 run request 先以项目内 `owner.lock` 取得跨进程唯一所有权，锁从 lease 发布前持续到 terminal result 及其父目录完成同步。相同 request ID 的实时重试若发现锁仍被持有，会得到可重试的 AlreadyRunning/revision conflict，且不会写 `Interrupted`、evidence 或计划终态。只有取得已释放的锁后仍看到 lease 且没有 result，才能把旧运行恢复为 `Interrupted`；该结果的后续重试只 replay。

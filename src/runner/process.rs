@@ -1,6 +1,7 @@
 //! Process execution, bounded stream capture, and immutable run journals.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fmt::{self, Debug, Formatter};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -21,6 +22,7 @@ use crate::domain::{
 use crate::managed_fs::{ManagedFsError, ManagedFsErrorKind, ManagedPath, ProjectFs};
 use crate::store::{canonical_json_bytes, sha256_digest};
 
+use super::command::resolve_program;
 use super::group;
 use super::{Redactor, RunnerError, RunnerErrorKind};
 
@@ -538,7 +540,23 @@ fn execute_process(
     redactor: &Redactor,
 ) -> Result<CheckRunResult, RunnerError> {
     let started = Instant::now();
-    let mut command = Command::new(&lease.command()[0]);
+    let resolved_program = match resolve_program(
+        &lease.command()[0],
+        environment.variables.get("PATH").map(OsStr::new),
+        environment.variables.get("PATHEXT").map(OsStr::new),
+    ) {
+        Ok(program) => program,
+        Err(error) => {
+            return Ok(spawn_failed_result(
+                lease,
+                redactor,
+                environment,
+                started,
+                &error,
+            ));
+        }
+    };
+    let mut command = Command::new(resolved_program);
     command
         .args(&lease.command()[1..])
         .current_dir(working_directory)
