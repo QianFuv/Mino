@@ -10,10 +10,9 @@ use crate::application::plan::PlanMutationRequest;
 use crate::application::review::ReviewService;
 use crate::commands::CommandResponse;
 use crate::domain::{
-    DraftTaskInput, MaterialReviewDisposition, PlanId, RequestId, ReviewClassification, TaskId,
-    Timestamp,
+    MaterialReviewDisposition, PlanId, RequestId, ReviewClassification, TaskId, Timestamp,
 };
-use crate::input::read_utf8_file;
+use crate::input::{read_utf8_file, yaml};
 use crate::store::sha256_digest;
 use crate::{ErrorCategory, MinoError};
 
@@ -121,6 +120,7 @@ pub(crate) struct ReworkArguments {
     #[arg(long)]
     review: String,
     /// Strict YAML definition for the reserved in-scope R task.
+    /// Copy `.agents/skills/mino/references/examples/review-rework-task.yaml` before editing.
     #[arg(long)]
     file: Option<PathBuf>,
     /// Canonical file digest accepted only for normalized replay argv.
@@ -257,7 +257,7 @@ fn rework(
             "--file-digest".to_owned(),
             digest,
         ]);
-        Some(parse_task_input(&source)?)
+        Some(yaml::parse_review_rework_task(&source)?)
     } else {
         if arguments.file_digest.is_some() {
             return Err(MinoError::new(
@@ -389,15 +389,6 @@ fn accept(
     let request = mutation_request(arguments.mutation, command)?;
     let report = service.accept(request, arguments.approval_ref)?;
     response_with_guidance(start, "Reviewed plan accepted and completed.", report)
-}
-
-fn parse_task_input(source: &str) -> Result<DraftTaskInput, MinoError> {
-    serde_saphyr::from_str(source).map_err(|error| {
-        MinoError::new(
-            ErrorCategory::IncompleteOrValidation,
-            format!("Failed to parse strict review-task YAML: {error}"),
-        )
-    })
 }
 
 fn require_matching_digest(provided: Option<&str>, actual: &str) -> Result<(), MinoError> {

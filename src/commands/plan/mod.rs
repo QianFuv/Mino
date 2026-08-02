@@ -134,6 +134,7 @@ pub(crate) struct ApplyArguments {
     #[command(flatten)]
     mutation: MutationArguments,
     /// Strict single-document authored Draft YAML file.
+    /// Copy `.agents/skills/mino/references/examples/draft-plan.yaml` before editing.
     #[arg(long)]
     file: PathBuf,
     /// Canonical file digest accepted only for normalized replay argv.

@@ -154,7 +154,20 @@ fn canonical_source_matches_cli_protocol_capabilities_standards_and_skill() {
             "typescript-javascript@1.0.0",
         ]
     );
-    assert_eq!(report.file_count, 7);
+    assert_eq!(report.file_count, 11);
+    for name in [
+        "draft-plan.yaml",
+        "git-cleanup-proposal.yaml",
+        "amendment-patch.yaml",
+        "review-rework-task.yaml",
+    ] {
+        assert!(
+            canonical_plugin()
+                .join("skills/mino/references/examples")
+                .join(name)
+                .is_file()
+        );
+    }
     assert_eq!(
         report.targets,
         [
@@ -167,11 +180,11 @@ fn canonical_source_matches_cli_protocol_capabilities_standards_and_skill() {
     );
     assert_eq!(
         report.skill_digest,
-        "sha256:37b7b63f12ecb7c0823c221b64f2104c93824161c01217dcb7f4dd4032f1ee03"
+        "sha256:6750ece8b4b1f9149f53229a909e0af76a8456cc0c8c8e5e3505c1c8774fbb5f"
     );
     assert_eq!(
         report.source_digest,
-        "sha256:6c5a5812a3e01c8eb9268970b78b84f43ae1fbaf3090d22d9b471cc46069073b"
+        "sha256:7104136226a54059512329d4dadf68c3a316951468f80d99db2c6ab06b27994b"
     );
 }
 
@@ -223,7 +236,7 @@ fn changed_missing_or_duplicated_skill_assets_fail_before_packaging() {
     assert_eq!(changed_error.category(), ErrorCategory::DriftDetected);
 
     let missing = temporary.plugin_copy("missing");
-    fs::remove_file(missing.join("skills/mino/references/approval-boundaries.md"))
+    fs::remove_file(missing.join("skills/mino/references/examples/draft-plan.yaml"))
         .expect("Skill reference should be removed");
     let missing_error = validate_plugin_source(&repository_root(), &missing)
         .expect_err("missing Skill asset should fail validation");
@@ -285,7 +298,19 @@ fn native_artifacts_are_byte_reproducible_reusable_and_strictly_verified() {
     let manifest = validate_plugin_artifact_directory(&first.output_directory)
         .expect("complete native artifact should validate");
     assert_eq!(manifest.target, target);
-    assert_eq!(manifest.files.len(), 10);
+    assert_eq!(manifest.files.len(), 14);
+    for name in [
+        "draft-plan.yaml",
+        "git-cleanup-proposal.yaml",
+        "amendment-patch.yaml",
+        "review-rework-task.yaml",
+    ] {
+        assert!(
+            manifest.files.iter().any(|file| {
+                file.path == format!("mino/skills/mino/references/examples/{name}")
+            })
+        );
+    }
     assert_eq!(
         manifest
             .files

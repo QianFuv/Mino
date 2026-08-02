@@ -1,0 +1,29 @@
+id: R1
+title: Correct the reviewed structured-input contract
+depends_on:
+  - T1
+steps:
+  - Implement the accepted in-scope review correction.
+  - Revalidate the corrected command and distribution contract.
+files:
+  - path: tests/structured_input_examples.rs
+    change: Modify
+    reason: Own the reviewed regression and its production-facing assertions.
+acceptance_criteria:
+  - id: R1-A1
+    description: The accepted review correction is implemented and revalidated.
+verification:
+  - id: R1-V1
+    command:
+      - cargo
+      - test
+      - --test
+      - structured_input_examples
+    cwd: .
+    expected_exit_code: 0
+    required: true
+commit_gate:
+  required: true
+  planned_message: "fix(review): correct structured input contract"
+  scope:
+    - tests/structured_input_examples.rs

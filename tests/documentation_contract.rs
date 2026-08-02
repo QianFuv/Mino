@@ -598,6 +598,17 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
 }
 
 #[test]
+fn structured_input_inventory_is_navigable_and_explains_audited_exclusions() {
+    let structured_inputs = read("docs/structured-inputs.md");
+    let documentation_index = read("docs/README.md");
+    assert!(structured_inputs.contains("doc-contract: structured-input-inventory"));
+    assert!(documentation_index.contains("structured-inputs.md"));
+    for excluded in ["catalog 的 TOML", "legacy Markdown", "original request"] {
+        assert!(structured_inputs.contains(excluded));
+    }
+}
+
+#[test]
 fn shipped_skill_references_match_plugin_source_byte_for_byte() {
     for name in ["approval-boundaries.md", "command-contract.md"] {
         let canonical = fs::read(repository_path(&format!(

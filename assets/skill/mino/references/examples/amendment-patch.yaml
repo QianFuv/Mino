@@ -1,0 +1,12 @@
+operations:
+  - operation: replace-task-verification
+    task_id: T1
+    check_id: T1-V1
+    command:
+      - cargo
+      - test
+      - --test
+      - structured_input_examples
+    cwd: .
+    expected_exit_code: 0
+    required: true

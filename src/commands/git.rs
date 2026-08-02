@@ -3,18 +3,17 @@
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand, ValueEnum};
-use serde::Deserialize;
 
 use crate::application::git_binding::GitBindingService;
 use crate::application::git_branch::GitBranchService;
 use crate::application::git_commit::GitCommitService;
 use crate::application::git_hooks::GitHookService;
-use crate::application::git_readiness::{GitReadinessService, PrePlanCleanupItemInput};
+use crate::application::git_readiness::GitReadinessService;
 use crate::application::plan::PlanMutationRequest;
 use crate::commands::CommandResponse;
 use crate::domain::{GitSetupDecision, PlanId, RequestId, TaskId, Timestamp};
 use crate::git::GitHookName;
-use crate::input::read_utf8_file;
+use crate::input::{read_utf8_file, yaml};
 use crate::store::sha256_digest;
 use crate::{ErrorCategory, MinoError};
 
@@ -278,6 +277,7 @@ struct CleanupProposeArguments {
     #[arg(long)]
     plan: String,
     /// YAML document containing the ordered cleanup items.
+    /// Copy `.agents/skills/mino/references/examples/git-cleanup-proposal.yaml` before editing.
     #[arg(long)]
     file: PathBuf,
     /// Optional digest that must match the normalized proposal bytes.
@@ -339,12 +339,6 @@ struct CleanupRecordArguments {
     /// Actor recorded in the event log.
     #[arg(long, default_value = "user")]
     actor: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CleanupProposalDocument {
-    items: Vec<PrePlanCleanupItemInput>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -497,12 +491,7 @@ fn execute_cleanup_proposal(
     let source = read_utf8_file(&arguments.file)?;
     let digest = sha256_digest(source.as_bytes());
     require_matching_digest(arguments.file_digest.as_deref(), &digest)?;
-    let document: CleanupProposalDocument = serde_saphyr::from_str(&source).map_err(|error| {
-        MinoError::new(
-            ErrorCategory::IncompleteOrValidation,
-            format!("Failed to parse cleanup proposal YAML: {error}"),
-        )
-    })?;
+    let items = yaml::parse_cleanup_proposal(&source)?;
     let request = readiness_mutation_request(
         &arguments.plan,
         arguments.expect_revision,
@@ -529,7 +518,7 @@ fn execute_cleanup_proposal(
     )?;
     Ok((
         "Pre-plan cleanup proposal recorded without mutating Git.",
-        serde_json::to_value(service.propose_cleanup(request, document.items)?),
+        serde_json::to_value(service.propose_cleanup(request, items)?),
     ))
 }
 

@@ -37,6 +37,26 @@ const BUNDLED_FILES: &[BundledFile] = &[
         relative_path: "references/command-contract.md",
         bytes: include_bytes!("../../assets/skill/mino/references/command-contract.md"),
     },
+    BundledFile {
+        relative_path: "references/examples/draft-plan.yaml",
+        bytes: include_bytes!("../../assets/skill/mino/references/examples/draft-plan.yaml"),
+    },
+    BundledFile {
+        relative_path: "references/examples/git-cleanup-proposal.yaml",
+        bytes: include_bytes!(
+            "../../assets/skill/mino/references/examples/git-cleanup-proposal.yaml"
+        ),
+    },
+    BundledFile {
+        relative_path: "references/examples/amendment-patch.yaml",
+        bytes: include_bytes!("../../assets/skill/mino/references/examples/amendment-patch.yaml"),
+    },
+    BundledFile {
+        relative_path: "references/examples/review-rework-task.yaml",
+        bytes: include_bytes!(
+            "../../assets/skill/mino/references/examples/review-rework-task.yaml"
+        ),
+    },
 ];
 
 pub(super) fn reconcile(

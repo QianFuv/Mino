@@ -1,0 +1,76 @@
+metadata:
+  priority: P1
+  plan_type: implementation
+  area: planning
+  owner: codex
+summary: Add strict structured-input examples to the repository workflow.
+context:
+  - reference: src/input/yaml.rs
+    fact: Authored plan fields are deserialized through a strict YAML boundary.
+    implication: The example must contain only accepted authored fields.
+scope:
+  goal: Make every strict structured input discoverable and reproducible.
+  deliverables:
+    - Production-validated YAML examples
+    - CLI and Skill discovery guidance
+  in_scope:
+    - Strict YAML parsing and example distribution
+  out_of_scope:
+    - Lifecycle state or approval mutation inside input files
+decisions:
+  - item: Example ownership
+    type: Decision
+    decision: Keep canonical examples in the installed Mino Skill.
+    reason: Agents need a stable copy-first source beside the command contract.
+    status: Accepted
+approach: Parse canonical files through the same functions used by their CLI commands.
+interfaces: CLI file options read caller-owned copies and bind their exact bytes to replay digests.
+edge_cases:
+  - case: A copied Draft contains an unknown lifecycle field.
+    expected_behavior: Reject the entire document without changing the plan revision.
+    covered_by:
+      - T1-A1
+      - T1-V1
+tasks:
+  - id: T1
+    title: Ship structured-input examples
+    depends_on: []
+    steps:
+      - Add canonical examples to the Skill bundle.
+      - Validate examples through production parsers.
+    files:
+      - path: src/input/yaml.rs
+        change: Modify
+        reason: Own the shared strict parsing boundary.
+      - path: docs/structured-inputs.md
+        change: Create
+        reason: Explain discovery, prerequisites, and replay behavior.
+    acceptance_criteria:
+      - id: T1-A1
+        description: Every strict YAML command identifies a complete installed example.
+    verification:
+      - id: T1-V1
+        command:
+          - cargo
+          - test
+          - --test
+          - structured_input_examples
+        cwd: .
+        expected_exit_code: 0
+        required: true
+    commit_gate:
+      required: true
+      planned_message: "feat(skill): ship structured input examples"
+      scope:
+        - src/input/yaml.rs
+        - docs/structured-inputs.md
+verification_plan:
+  - id: GLOBAL-V1
+    command:
+      - cargo
+      - test
+      - --all-targets
+      - --all-features
+    cwd: .
+    expected_exit_code: 0
+    required: true

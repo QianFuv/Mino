@@ -30,6 +30,10 @@ const ALLOWED_TARGETS: &[&str] = &[
     ".agents/skills/mino/agents/openai.yaml",
     ".agents/skills/mino/references/approval-boundaries.md",
     ".agents/skills/mino/references/command-contract.md",
+    ".agents/skills/mino/references/examples/draft-plan.yaml",
+    ".agents/skills/mino/references/examples/git-cleanup-proposal.yaml",
+    ".agents/skills/mino/references/examples/amendment-patch.yaml",
+    ".agents/skills/mino/references/examples/review-rework-task.yaml",
     ".gitignore",
     "AGENTS.md",
 ];

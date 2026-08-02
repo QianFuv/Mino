@@ -19,6 +19,10 @@ const SKILL_FILES: &[&str] = &[
     "agents/openai.yaml",
     "references/approval-boundaries.md",
     "references/command-contract.md",
+    "references/examples/draft-plan.yaml",
+    "references/examples/git-cleanup-proposal.yaml",
+    "references/examples/amendment-patch.yaml",
+    "references/examples/review-rework-task.yaml",
 ];
 
 struct TestProject {
@@ -129,6 +133,7 @@ fn skill_metadata_and_workflow_cover_every_required_trigger_and_guardrail() {
     let skill = fs::read_to_string(bundled_skill_root().join("SKILL.md"))
         .expect("bundled SKILL.md should be readable");
     let normalized = skill.to_ascii_lowercase();
+    let normalized_whitespace = skill.split_whitespace().collect::<Vec<_>>().join(" ");
     for trigger in [
         "formal plan",
         "durable planning",
@@ -150,6 +155,10 @@ fn skill_metadata_and_workflow_cover_every_required_trigger_and_guardrail() {
     assert!(skill.contains("Never use bundled protocol Markdown as a fallback"));
     assert!(skill.contains("references/command-contract.md"));
     assert!(skill.contains("references/approval-boundaries.md"));
+    for example in &SKILL_FILES[4..] {
+        assert!(skill.contains(example));
+    }
+    assert!(normalized_whitespace.contains("copy it to a caller-owned working file"));
 
     let metadata = fs::read_to_string(bundled_skill_root().join("agents/openai.yaml"))
         .expect("Skill UI metadata should be readable");
@@ -434,14 +443,17 @@ fn interrupted_skill_refresh_recovers_then_finishes_remaining_owned_files() {
     initialize(project.path()).expect("baseline Skill should install");
     let skill_entry = installed_skill_root(&project).join("SKILL.md");
     let metadata = installed_skill_root(&project).join("agents/openai.yaml");
+    let draft_example = installed_skill_root(&project).join("references/examples/draft-plan.yaml");
     let stale_entry = fs::read_to_string(&skill_entry)
         .expect("Skill entry should be readable")
         .replace("Treat the `mino` CLI", "Treat an interrupted CLI");
     let stale_metadata = fs::read_to_string(&metadata)
         .expect("Skill metadata should be readable")
         .replace("Mino Planning Workflow", "Interrupted Planning Workflow");
+    let stale_example = b"summary: Interrupted example\n";
     fs::write(&skill_entry, stale_entry).expect("Skill entry drift should be written");
     fs::write(&metadata, &stale_metadata).expect("Skill metadata drift should be written");
+    fs::write(&draft_example, stale_example).expect("Skill example drift should be written");
 
     integrate_project_with_failure(
         project.path(),
@@ -456,6 +468,10 @@ fn interrupted_skill_refresh_recovers_then_finishes_remaining_owned_files() {
     assert_eq!(
         fs::read_to_string(&metadata).expect("unprocessed metadata should exist"),
         stale_metadata
+    );
+    assert_eq!(
+        fs::read(&draft_example).expect("unprocessed example should exist"),
+        stale_example
     );
 
     initialize(project.path()).expect("next init should recover and finish the Skill refresh");

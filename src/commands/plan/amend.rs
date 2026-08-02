@@ -10,8 +10,8 @@ use crate::application::agent::AgentService;
 use crate::application::amendment::AmendmentService;
 use crate::application::plan::PlanMutationRequest;
 use crate::commands::CommandResponse;
-use crate::domain::{AmendmentClassification, AmendmentPatch, Timestamp};
-use crate::input::read_utf8_file;
+use crate::domain::{AmendmentClassification, Timestamp};
+use crate::input::{read_utf8_file, yaml};
 use crate::store::sha256_digest;
 use crate::{ErrorCategory, MinoError};
 
@@ -61,6 +61,7 @@ struct ProposeArguments {
     #[arg(long, allow_hyphen_values = true)]
     reason: String,
     /// Strict YAML document containing only typed amendment operations.
+    /// Copy `.agents/skills/mino/references/examples/amendment-patch.yaml` before editing.
     #[arg(long)]
     patch_file: PathBuf,
     /// Optional caller-selected class; it may raise but never lower the minimum.
@@ -142,12 +143,7 @@ fn propose(
     let source = read_utf8_file(&arguments.patch_file)?;
     let digest = sha256_digest(source.as_bytes());
     require_matching_digest(arguments.patch_digest.as_deref(), &digest)?;
-    let patch: AmendmentPatch = serde_saphyr::from_str(&source).map_err(|error| {
-        MinoError::new(
-            ErrorCategory::IncompleteOrValidation,
-            format!("Failed to parse strict amendment YAML: {error}"),
-        )
-    })?;
+    let patch = yaml::parse_amendment_patch(&source)?;
     let mut extra = vec![
         "--reason".to_owned(),
         arguments.reason.clone(),

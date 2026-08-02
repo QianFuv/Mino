@@ -56,6 +56,22 @@ or durable plan, read [command-contract.md](references/command-contract.md) and
 use `plan create` once with the user's request and a fresh request ID. Then
 return to the required workflow and follow the CLI's canonical next actions.
 
+## Structured YAML inputs
+
+Before invoking a command that accepts strict YAML, read the matching installed
+example:
+
+- `plan apply --file`: `references/examples/draft-plan.yaml`
+- `git cleanup propose --file`: `references/examples/git-cleanup-proposal.yaml`
+- `plan amend propose --patch-file`: `references/examples/amendment-patch.yaml`
+- `review rework --file`: `references/examples/review-rework-task.yaml`
+
+Never edit a managed example in this Skill. Read it, copy it to a caller-owned
+working file, and edit only that copy. Replace sample task, criterion, check,
+review, file, and dependency identifiers with the exact values valid for the
+current plan. Preserve the top-level shape, omit lifecycle and execution state,
+and return to Agent context after the successful mutation.
+
 ## State and Git guardrails
 
 - Never edit `.mino/**` or Mino-managed `docs/plan/*.md` directly.

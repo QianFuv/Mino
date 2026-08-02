@@ -1,0 +1,9 @@
+items:
+  - logical_change: Centralize strict YAML parsing.
+    files:
+      - src/input/yaml.rs
+    planned_commit_message: "refactor(input): centralize strict yaml parsing"
+  - logical_change: Document structured input workflows.
+    files:
+      - docs/structured-inputs.md
+    planned_commit_message: "docs(input): explain structured yaml workflows"
