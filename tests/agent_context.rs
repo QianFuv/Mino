@@ -1,5 +1,6 @@
 //! Golden and CLI contract tests for stable Agent context and next-action APIs.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -693,6 +694,34 @@ fn run_mino(arguments: &[String]) -> Output {
         .expect("Mino binary should run")
 }
 
+fn run_mino_with_path(arguments: &[String], path: &OsString) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_mino"))
+        .args(arguments)
+        .env("PATH", path)
+        .stdin(Stdio::null())
+        .output()
+        .expect("Mino binary should run with the controlled PATH")
+}
+
+fn git_only_path() -> OsString {
+    let original = std::env::var_os("PATH").expect("test PATH should exist");
+    let candidates: &[&str] = if cfg!(windows) {
+        &["git.exe", "git.cmd", "git.bat"]
+    } else {
+        &["git"]
+    };
+    for directory in std::env::split_paths(&original).filter(|path| path.is_absolute()) {
+        if candidates
+            .iter()
+            .any(|candidate| directory.join(candidate).is_file())
+        {
+            return std::env::join_paths([directory])
+                .expect("Git-only PATH should be representable");
+        }
+    }
+    panic!("Git executable directory should be present in PATH");
+}
+
 fn run_canonical_action(project: &TestProject, arguments: &[String], input: &str) -> Output {
     assert_eq!(arguments.first().map(String::as_str), Some("mino"));
     let mut child = Command::new(env!("CARGO_BIN_EXE_mino"))
@@ -824,6 +853,94 @@ fn decide_without_git(project: &TestProject, plan_id: &str, request_number: u64)
         "codex".to_owned(),
     ]);
     parse_success(&run_mino(&arguments));
+}
+
+#[test]
+fn tool_unavailable_exposes_blocked_environment_guidance() {
+    let project = TestProject::new("tool-unavailable");
+    initialize_git_flow_baseline(&project);
+    fs::write(
+        project.path().join(".git/info/exclude"),
+        ".agents/\n.mino/\n/docs/plan/\n/request-*.md\n",
+    )
+    .expect("generated plan files should be excluded");
+    fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("fixture manifest should be written");
+    fs::create_dir(project.path().join("src")).expect("fixture source should be created");
+    fs::write(
+        project.path().join("src/lib.rs"),
+        "pub fn fixture() -> u8 { 1 }\n",
+    )
+    .expect("fixture source should be written");
+    let staged = Command::new("git")
+        .args(["add", "--", "Cargo.toml", "src/lib.rs"])
+        .current_dir(project.path())
+        .output()
+        .expect("Rust fixture should stage");
+    assert!(staged.status.success());
+    let committed = Command::new("git")
+        .args([
+            "commit",
+            "--quiet",
+            "-m",
+            "test: add Rust validation fixture",
+        ])
+        .current_dir(project.path())
+        .output()
+        .expect("Rust fixture should commit");
+    assert!(committed.status.success());
+
+    let created = parse_success(&run_mino(&create_arguments(
+        &project,
+        "Unavailable verification tools",
+        80,
+    )));
+    let plan_id = created["plan_id"]
+        .as_str()
+        .expect("created plan ID should be text");
+    let mut apply = base_arguments(&project);
+    apply.extend([
+        "plan".to_owned(),
+        "apply".to_owned(),
+        "--plan".to_owned(),
+        plan_id.to_owned(),
+        "--expect-revision".to_owned(),
+        "1".to_owned(),
+        "--request-id".to_owned(),
+        "38000000-0000-0000-0000-000000000081".to_owned(),
+        "--actor".to_owned(),
+        "codex".to_owned(),
+        "--file".to_owned(),
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/drafts/complete.yaml")
+            .to_string_lossy()
+            .into_owned(),
+    ]);
+    parse_success(&run_mino(&apply));
+
+    let context = parse_success(&run_mino_with_path(
+        &agent_arguments(&project, "context"),
+        &git_only_path(),
+    ));
+    assert_eq!(context["approval_required"], false);
+    assert_eq!(context["next_actions"], serde_json::json!([]));
+    assert!(
+        context["blocked_actions"]
+            .as_array()
+            .is_some_and(|actions| {
+                actions.iter().any(|action| {
+                    action["action"] == "plan.finalize"
+                        && action["reason"].as_str().is_some_and(|reason| {
+                            reason.contains("Environment remediation required")
+                                && reason.contains("PATH/PATHEXT")
+                                && reason.contains("agent context")
+                        })
+                })
+            })
+    );
 }
 
 #[test]

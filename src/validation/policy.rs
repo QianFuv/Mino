@@ -473,13 +473,16 @@ fn validate_required_checks(
             ));
         }
         if expected_check.status == ResolvedCheckStatus::Unresolved {
+            let unresolved_reason = expected_check
+                .unresolved_reason
+                .unwrap_or_else(|| format!("Check {} cannot run", expected_check.id));
             findings.push(ValidationFinding::error(
                 "POLICY-TOOL-UNAVAILABLE",
                 ValidationLayer::Policy,
                 location,
-                expected_check
-                    .unresolved_reason
-                    .unwrap_or_else(|| format!("Check {} cannot run", expected_check.id)),
+                format!(
+                    "{unresolved_reason}; install or expose the required tool through PATH/PATHEXT, then rerun `mino plan validate` or `mino agent context`"
+                ),
             ));
         }
     }

@@ -967,13 +967,19 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
             return Ok(readiness_refresh_guidance(plan, &mismatches));
         }
     }
-    let (next_actions, is_valid, blocking_count, requires_conflict_decision) = if missing.is_empty()
-    {
+    let (
+        next_actions,
+        is_valid,
+        blocking_count,
+        requires_conflict_decision,
+        environment_remediation,
+    ) = if missing.is_empty() {
         let report = validate_plan(root, plan)?;
         let requires_conflict_decision = report
             .findings
             .iter()
             .any(|finding| finding.id == "POLICY-STANDARD-CONFLICT-UNRESOLVED");
+        let environment_remediation = environment_remediation_reason(&report);
         (
             report.next_actions,
             report.valid,
@@ -983,6 +989,7 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
                 .filter(|finding| finding.blocking)
                 .count(),
             requires_conflict_decision,
+            environment_remediation,
         )
     } else {
         (
@@ -990,6 +997,7 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
             false,
             missing.len(),
             false,
+            None,
         )
     };
     let mut allowed_actions = action_ids(DRAFT_ALLOWED_ACTIONS);
@@ -1006,13 +1014,9 @@ fn draft_guidance(root: &Path, plan: &Plan) -> Result<Guidance, MinoError> {
     if is_valid {
         allowed_actions.push("plan.finalize".to_owned());
     } else {
-        blocked_actions.insert(
-            0,
-            blocked(
-                "plan.finalize",
-                &format!("Plan validation has {blocking_count} blocking item(s)"),
-            ),
-        );
+        let reason = environment_remediation
+            .unwrap_or_else(|| format!("Plan validation has {blocking_count} blocking item(s)"));
+        blocked_actions.insert(0, blocked("plan.finalize", &reason));
     }
     Ok(Guidance {
         allowed_actions,
@@ -1173,21 +1177,32 @@ fn invalid_ready_guidance(validation: ValidationReport, has_open_deviation: bool
         "standards.conflict.resolve",
     ]);
     append_ready_deviation_actions(&mut allowed_actions, has_open_deviation);
+    let reason = environment_remediation_reason(&validation)
+        .unwrap_or_else(|| "Current repository or standards validation is blocking".to_owned());
     Guidance {
         allowed_actions,
         blocked_actions: vec![
-            blocked(
-                "plan.approve",
-                "Current repository or standards validation is blocking",
-            ),
-            blocked(
-                "exec.start",
-                "Current repository or standards validation is blocking",
-            ),
+            blocked("plan.approve", &reason),
+            blocked("exec.start", &reason),
         ],
         approval_required: requires_conflict_decision,
         next_actions: validation.next_actions,
     }
+}
+
+fn environment_remediation_reason(validation: &ValidationReport) -> Option<String> {
+    let mut messages = Vec::new();
+    for finding in validation
+        .findings
+        .iter()
+        .filter(|finding| finding.blocking && finding.id == "POLICY-TOOL-UNAVAILABLE")
+    {
+        if !messages.contains(&finding.message.as_str()) {
+            messages.push(finding.message.as_str());
+        }
+    }
+    (!messages.is_empty())
+        .then(|| format!("Environment remediation required: {}", messages.join("; ")))
 }
 
 fn unapproved_ready_guidance(has_open_deviation: bool) -> Guidance {

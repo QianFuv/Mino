@@ -160,15 +160,15 @@ fn git_inspect_action(plan: &Plan) -> NextAction {
 
 fn requires_standards_reconciliation(finding: &ValidationFinding) -> bool {
     finding.blocking
-        && ((finding.id.starts_with("POLICY-STANDARD-")
-            && !finding.id.starts_with("POLICY-STANDARD-CONFLICT-"))
-            || finding.id == "POLICY-TOOL-UNAVAILABLE")
+        && finding.id.starts_with("POLICY-STANDARD-")
+        && !finding.id.starts_with("POLICY-STANDARD-CONFLICT-")
 }
 
 fn requires_authored_remediation(finding: &ValidationFinding) -> bool {
     finding.blocking
         && !requires_standards_reconciliation(finding)
         && finding.id != "POLICY-SCAN-INCOMPLETE"
+        && finding.id != "POLICY-TOOL-UNAVAILABLE"
 }
 
 fn standards_apply_action(plan: &Plan) -> NextAction {

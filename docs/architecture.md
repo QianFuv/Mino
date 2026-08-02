@@ -278,7 +278,7 @@ Agent 编排把该门禁显式化：Approved Git Flow 的 Ready 计划若 bindin
 
 `plan create` 持久化扫描摘要；plan-scoped `standards apply --recommended --seed-verification` 按完整 File Map 重新扫描，并原子协调内嵌 package、catalog-owned check、冲突和摘要。定义不变的检查保留状态，变化的检查回到无 evidence 的 Pending，自定义检查保留。截断摘要必须用绑定当前 scan digest 的 `plan scan accept` 明确接受，否则 validate/finalize 阻塞。远程 Team Catalog 当前只支持 sync 与 cache 验证，不进入 recommend/apply 的选择集合。
 
-Validation 的修复路由按 finding 类型确定：`POLICY-STANDARD-REQUIRED`、`POLICY-STANDARD-CHECK-MISSING`、`POLICY-STANDARD-CHECK-MISMATCH`、其他非 conflict 的 `POLICY-STANDARD-*` 以及 `POLICY-TOOL-UNAVAILABLE` 返回 plan-scoped `standards apply`；未跟踪或 stale conflict 返回 `standards conflict refresh`；未解决 conflict 返回 `standards conflict list`。只有 Draft 的 authored finding 才附加 `plan apply`，Ready reconciliation 会使旧计划批准失效。
+Validation 的修复路由按 finding 类型确定：`POLICY-STANDARD-REQUIRED`、`POLICY-STANDARD-CHECK-MISSING`、`POLICY-STANDARD-CHECK-MISMATCH` 以及其他非 conflict 的 `POLICY-STANDARD-*` 返回 plan-scoped `standards apply`；未跟踪或 stale conflict 返回 `standards conflict refresh`；未解决 conflict 返回 `standards conflict list`。只有 Draft 的 authored finding 才附加 `plan apply`，Ready reconciliation 会使旧计划批准失效。`POLICY-TOOL-UNAVAILABLE` 是外部环境阻塞，不返回 mutation action；安装工具或通过 PATH/PATHEXT 暴露工具后，重新运行 `mino plan validate` 或 `mino agent context`。
 
 ## Agent 执行身份
 

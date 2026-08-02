@@ -590,6 +590,11 @@ fn stable_schemas_exits_states_paths_and_prohibitions_are_documented() {
             "command contract is missing {marker}"
         );
     }
+    assert!(
+        commands.contains("`POLICY-TOOL-UNAVAILABLE` 不返回 `standards.apply` 或 `plan.apply`")
+    );
+    assert!(commands.contains("PATH/PATHEXT"));
+    assert!(architecture.contains("`POLICY-TOOL-UNAVAILABLE` 是外部环境阻塞"));
 }
 
 #[test]

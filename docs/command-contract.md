@@ -153,7 +153,7 @@ detect、recommend 和 apply 只使用内嵌或已缓存数据；只有 sync 使
 
 <!-- doc-contract: standards-reconciliation-action -->
 
-Validation/Agent 对阻塞 finding 使用精确修复映射：所有非 conflict 的 `POLICY-STANDARD-*` 以及 `POLICY-TOOL-UNAVAILABLE` 返回带 `--plan --expect-revision --request-id --actor codex` 的 `standards.apply`；`POLICY-STANDARD-CONFLICT-UNTRACKED`/`STALE` 返回 `standards.conflict.refresh`；`POLICY-STANDARD-CONFLICT-UNRESOLVED` 返回 `standards.conflict.list`。只有 Draft 的 authored finding 才返回 `plan.apply`，Ready 中的 plan-scoped apply 会原子 reconcile 并使旧批准失效。
+Validation/Agent 对阻塞 finding 使用精确修复映射：所有非 conflict 的 `POLICY-STANDARD-*` 返回带 `--plan --expect-revision --request-id --actor codex` 的 `standards.apply`；`POLICY-STANDARD-CONFLICT-UNTRACKED`/`STALE` 返回 `standards.conflict.refresh`；`POLICY-STANDARD-CONFLICT-UNRESOLVED` 返回 `standards.conflict.list`。只有 Draft 的 authored finding 才返回 `plan.apply`，Ready 中的 plan-scoped apply 会原子 reconcile 并使旧批准失效。`POLICY-TOOL-UNAVAILABLE` 不返回 `standards.apply` 或 `plan.apply`；Agent 将其作为环境阻塞，要求安装工具或通过 PATH/PATHEXT 暴露工具后重新运行 `mino plan validate` 或 `mino agent context`。
 
 `plan create` 和 plan-scoped apply 都保存扫描 SHA-256、文件/目录/符号链接/字节计数以及稳定截断原因。截断扫描在 `agent context` 中返回 `scan_incomplete: true`，使 validate/finalize 保持阻塞且不会伪造完整扫描；`plan scan accept` 只接受该精确摘要。后续扫描摘要发生变化时，旧接受不会迁移到新的 digest。
 

@@ -167,13 +167,18 @@ decision reference, then execute only the returned resolve shape with those
 values. Re-read context afterward. If source bytes change, the decision is
 stale and must be refreshed and explicitly made again.
 
-For non-conflict `POLICY-STANDARD-*` findings or `POLICY-TOOL-UNAVAILABLE`,
-execute the returned plan-scoped `standards apply --recommended
---seed-verification --plan ...` argv. Do not substitute read-only `standards
-recommend` or Draft-only `plan apply`. Untracked/stale conflicts route to
-`standards conflict refresh`; unresolved conflicts route to `list` and then an
-explicit approved resolution. Ready reconciliation invalidates old plan
-approval, so refresh context and stop at the new approval boundary.
+For non-conflict `POLICY-STANDARD-*` findings, execute the returned plan-scoped
+`standards apply --recommended --seed-verification --plan ...` argv. Do not
+substitute read-only `standards recommend` or Draft-only `plan apply`.
+Untracked/stale conflicts route to `standards conflict refresh`; unresolved
+conflicts route to `list` and then an explicit approved resolution. Ready
+reconciliation invalidates old plan approval, so refresh context and stop at
+the new approval boundary.
+
+`POLICY-TOOL-UNAVAILABLE` is an external environment blocker. Do not run
+`standards apply` or `plan apply` for that finding. Install the required tool or
+expose it through PATH/PATHEXT, then rerun `mino plan validate` or `mino agent
+context` without mutating the plan.
 
 ## Initial creation
 

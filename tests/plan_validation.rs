@@ -1,5 +1,6 @@
 //! Contract tests for fixed-order plan validation and canonical remediation.
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -113,6 +114,34 @@ fn run_mino(arguments: &[String]) -> Output {
         .stdin(Stdio::null())
         .output()
         .expect("Mino binary should run")
+}
+
+fn run_mino_with_path(arguments: &[String], path: &OsString) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_mino"))
+        .args(arguments)
+        .env("PATH", path)
+        .stdin(Stdio::null())
+        .output()
+        .expect("Mino binary should run with the controlled PATH")
+}
+
+fn git_only_path() -> OsString {
+    let original = std::env::var_os("PATH").expect("test PATH should exist");
+    let candidates: &[&str] = if cfg!(windows) {
+        &["git.exe", "git.cmd", "git.bat"]
+    } else {
+        &["git"]
+    };
+    for directory in std::env::split_paths(&original).filter(|path| path.is_absolute()) {
+        if candidates
+            .iter()
+            .any(|candidate| directory.join(candidate).is_file())
+        {
+            return std::env::join_paths([directory])
+                .expect("Git-only PATH should be representable");
+        }
+    }
+    panic!("Git executable directory should be present in PATH");
 }
 
 fn run_canonical_action(project: &TestProject, action: &Value) -> Output {
@@ -323,6 +352,97 @@ fn valid_plan_has_zero_findings_stable_actions_and_no_writes() {
         fs::read(projection_path).expect("projection should remain"),
     ];
     assert_eq!(before, after);
+}
+
+#[test]
+fn tool_unavailable_requires_environment_remediation_without_mutation() {
+    let project = TestProject::new("tool-unavailable");
+    let plan_id = create_plan(&project, "Unavailable verification tools", 10);
+    apply_fixture(&project, &plan_id, "complete.yaml", 11);
+    let typed_id = PlanId::parse(&plan_id).expect("plan ID should parse");
+    let store = PlanStore::new(project.path());
+    let prior_revision = store
+        .load_plan(&typed_id)
+        .expect("complete Draft should load")
+        .revision();
+
+    let mut arguments = base_arguments(&project);
+    arguments.extend([
+        "plan".to_owned(),
+        "validate".to_owned(),
+        "--plan".to_owned(),
+        plan_id.clone(),
+    ]);
+    let unavailable_output = run_mino_with_path(&arguments, &git_only_path());
+    assert_eq!(unavailable_output.status.code(), Some(2));
+    let unavailable = parse_json(&unavailable_output);
+    let tool_findings = unavailable["findings"]
+        .as_array()
+        .expect("findings should be an array")
+        .iter()
+        .filter(|finding| finding["id"] == "POLICY-TOOL-UNAVAILABLE")
+        .collect::<Vec<_>>();
+    assert!(!tool_findings.is_empty());
+    assert!(tool_findings.iter().all(|finding| {
+        finding["message"].as_str().is_some_and(|message| {
+            message.contains("PATH/PATHEXT") && message.contains("agent context")
+        })
+    }));
+    assert_eq!(unavailable["next_actions"], serde_json::json!([]));
+    assert_eq!(
+        store
+            .load_plan(&typed_id)
+            .expect("unavailable validation must preserve the Draft")
+            .revision(),
+        prior_revision
+    );
+
+    let restored_output = validate(&project, &plan_id);
+    assert!(
+        restored_output.status.success(),
+        "restored validation stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&restored_output.stdout),
+        String::from_utf8_lossy(&restored_output.stderr)
+    );
+    assert_eq!(
+        store
+            .load_plan(&typed_id)
+            .expect("restored validation must preserve the Draft")
+            .revision(),
+        prior_revision
+    );
+
+    let mixed_project = TestProject::new("tool-unavailable-mixed");
+    let mixed_plan_id = create_plan(&mixed_project, "Mixed remediation", 12);
+    let mixed_document = mixed_project.path().join("mixed-remediation.yaml");
+    let mixed_source = fs::read_to_string(fixture_path("complete.yaml"))
+        .expect("complete fixture should be readable")
+        .replace(
+            "feat(plan): add draft authoring commands",
+            "invalid commit message",
+        );
+    fs::write(&mixed_document, mixed_source).expect("mixed fixture should be written");
+    apply_document(&mixed_project, &mixed_plan_id, &mixed_document, 13);
+    let mut mixed_arguments = base_arguments(&mixed_project);
+    mixed_arguments.extend([
+        "plan".to_owned(),
+        "validate".to_owned(),
+        "--plan".to_owned(),
+        mixed_plan_id,
+    ]);
+    let mixed_output = run_mino_with_path(&mixed_arguments, &git_only_path());
+    assert_eq!(mixed_output.status.code(), Some(2));
+    let mixed = parse_json(&mixed_output);
+    assert!(finding_ids(&mixed).contains(&"POLICY-TOOL-UNAVAILABLE"));
+    assert!(finding_ids(&mixed).contains(&"POLICY-COMMIT-MESSAGE-INVALID"));
+    assert_eq!(
+        mixed["next_actions"]
+            .as_array()
+            .expect("next actions should be an array")
+            .len(),
+        1
+    );
+    assert_eq!(mixed["next_actions"][0]["id"], "plan.apply");
 }
 
 #[test]
